@@ -103,3 +103,40 @@ def macd(
         for m, s in zip(line, signal_line, strict=True)
     ]
     return line, signal_line, histogram
+
+
+def true_range(
+    highs: Sequence[float], lows: Sequence[float], closes: Sequence[float]
+) -> list[float | None]:
+    """True range: max(high - low, |high - previous close|, |low - previous close|).
+
+    Needs a previous close, so the first value is at index 1.
+    """
+    if not len(highs) == len(lows) == len(closes):
+        raise ValueError("highs, lows and closes must have the same length")
+    out: list[float | None] = [None] * len(highs)
+    for i in range(1, len(highs)):
+        prev = closes[i - 1]
+        out[i] = max(highs[i] - lows[i], abs(highs[i] - prev), abs(lows[i] - prev))
+    return out
+
+
+def atr(
+    highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], period: int
+) -> list[float | None]:
+    """Wilder's Average True Range. First value at index `period` (needs period+1 candles).
+
+    Starts as the simple mean of the first `period` true ranges, then uses Wilder
+    smoothing: ATR_t = (ATR_t-1 * (period - 1) + TR_t) / period.
+    """
+    _check_period(period)
+    out: list[float | None] = [None] * len(highs)
+    ranges = [r for r in true_range(highs, lows, closes) if r is not None]  # from index 1
+    if len(ranges) < period:
+        return out
+    current = sum(ranges[:period]) / period
+    out[period] = current
+    for i in range(period, len(ranges)):
+        current = (current * (period - 1) + ranges[i]) / period
+        out[i + 1] = current
+    return out

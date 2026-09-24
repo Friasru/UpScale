@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from upscale.services.indicators import ema, macd, rsi, sma
+from upscale.services.indicators import atr, ema, macd, rsi, sma, true_range
 
 # Worked example from StockCharts' RSI article (Wilder's method).
 STOCKCHARTS_CLOSES = [
@@ -127,3 +127,32 @@ def test_macd_not_enough_values():
 def test_macd_requires_fast_shorter_than_slow():
     with pytest.raises(ValueError):
         macd([1.0] * 50, 26, 12, 9)
+
+
+# --- True range / ATR ---------------------------------------------------------------------
+
+
+def test_true_range_uses_the_previous_close_for_gaps():
+    highs, lows, closes = [10, 12, 11, 20], [9, 11, 8, 19], [9.5, 11.5, 10, 19.5]
+    # |12-9.5|=2.5 beats 12-11=1; |8-11.5|=3.5 beats 11-8=3; gap up: |20-10|=10
+    assert true_range(highs, lows, closes) == [None, 2.5, 3.5, 10]
+
+
+def test_true_range_rejects_mismatched_lengths():
+    with pytest.raises(ValueError):
+        true_range([1, 2], [1], [1, 2])
+
+
+def test_atr_is_seeded_with_the_mean_then_wilder_smoothed():
+    highs = [11, 12, 13, 14, 15, 22]
+    lows = [9, 10, 11, 12, 13, 14]
+    closes = [10, 11, 12, 13, 14, 21]
+    # True ranges from index 1: 2, 2, 2, 2, 8. Seed (period 3) = 2 at index 3.
+    # Index 4: (2*2 + 2)/3 = 2; index 5: (2*2 + 8)/3 = 4.
+    assert atr(highs, lows, closes, 3) == [None, None, None, 2, 2, 4]
+
+
+def test_atr_not_enough_candles():
+    assert atr([2, 3, 4], [1, 2, 3], [1.5, 2.5, 3.5], 3) == [None, None, None]
+    with pytest.raises(ValueError):
+        atr([1], [1], [1], 0)

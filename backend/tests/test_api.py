@@ -50,7 +50,7 @@ def test_chat_structured_response_fields(client):
     )
     assert {r["agent"]: r["mock"] for r in analysis["agent_results"]} == {
         "opportunity": True,
-        "risk": True,
+        "risk": False,
     }
     assert set(analysis["routing"]) == set(analysis["agents_used"])
 

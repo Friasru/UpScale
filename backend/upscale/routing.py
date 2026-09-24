@@ -61,6 +61,7 @@ AGENT_ORDER: tuple[AgentName, ...] = (
 
 _WORD_RE = re.compile(r"\$?[A-Za-z][A-Za-z0-9]*")
 _TIMEFRAME_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("30m", re.compile(r"\b30[ -]?(?:m|min|mins|minutes?)\b")),
     ("15m", re.compile(r"\b15[ -]?(?:m|min|mins|minutes?)\b")),
     ("5m", re.compile(r"\b5[ -]?(?:m|min|mins|minutes?)\b")),
     ("1m", re.compile(r"\b1[ -]?(?:m|min|minute)\b")),
@@ -73,7 +74,7 @@ _TIMEFRAME_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 @dataclass
 class RoutingDecision:
     assets: list[str] = field(default_factory=list)
-    # Chart timeframe the user asked for ("1m", "5m", "15m", "1h", "4h", "1d"), if any.
+    # Chart timeframe the user asked for ("1m", "5m", "15m", "30m", "1h", "4h", "1d"), if any.
     timeframe: str | None = None
     # Selected agents (in AGENT_ORDER) mapped to the reason each was selected.
     reasons: dict[AgentName, str] = field(default_factory=dict)

@@ -1,42 +1,86 @@
 from upscale.agents.base import Agent, AgentContext
 from upscale.schemas import AgentResult, Risk
+from upscale.services.risk import AGENT_LABELS, RiskAssessment, RiskConfig, assess, category_label
+
+MAX_SUMMARY_REASONS = 3
 
 
-class MockRiskAgent(Agent):
-    """Placeholder for risk assessment. Reviews what the other agents produced."""
+class RiskAgent(Agent):
+    """What could make the current analysis unreliable or fail.
+
+    Reviews the evidence the Vision, Technical Analysis, Market and News & Sentiment agents
+    already produced; it makes no network or model calls. Every factor, severity, the
+    overall risk level and the uncertainty level are decided by the deterministic rules in
+    `upscale.services.risk`. It never recommends buying or selling.
+    """
 
     name = "risk"
-    description = "Highlights risks and data gaps across all other agents' output."
-    depends_on = ("vision", "technical_analysis", "market", "news_sentiment", "opportunity")
+    description = (
+        "Concrete risks, overall risk level, uncertainty and invalidation conditions derived "
+        "from the other agents' evidence."
+    )
+    depends_on = ("vision", "technical_analysis", "market", "news_sentiment")
+
+    def __init__(self, config: RiskConfig | None = None):
+        self.config = config
 
     async def run(self, context: AgentContext) -> AgentResult:
-        reviewed = sorted(context.prior_results)
-        mocked = sorted(name for name, result in context.prior_results.items() if result.mock)
-        risks = [
-            Risk(
-                description=f"Mock (placeholder) data from: {', '.join(mocked + [self.name])}.",
-                severity="high",
-            ),
-            Risk(
-                description="Crypto assets are highly volatile; any scenario can fail quickly.",
-                severity="high",
-            ),
-        ]
-        failed = [
-            name for name, result in context.prior_results.items() if result.status == "error"
-        ]
-        if failed:
-            risks.append(
-                Risk(
-                    description=f"Some agents failed: {', '.join(sorted(failed))}.",
-                    severity="medium",
-                )
-            )
+        a = assess(context.prior_results, context.primary_asset, self.config)
         return AgentResult(
             agent=self.name,
-            mock=True,
-            summary=f"[Mock] Reviewed output from {len(reviewed)} agent(s); overall risk level is unknown.",
-            findings={"reviewed_agents": reviewed, "overall_risk": "unknown (mock)"},
-            evidence=["Risk level is not computed yet (mock)."],
-            risks=risks,
+            mock=False,
+            summary=_summary(a),
+            findings={
+                "reviewed_agents": sorted(context.prior_results),
+                **a.model_dump(mode="json"),
+            },
+            evidence=_evidence(a),
+            risks=[
+                Risk(
+                    description=f"{category_label(f.category).capitalize()}: {f.explanation}",
+                    severity=f.severity,
+                    source=f.source,
+                )
+                for f in a.factors
+            ],
         )
+
+
+def _clauses(items: list[str], capitalize: bool = True) -> str:
+    shown = items[:MAX_SUMMARY_REASONS]
+    text = "; ".join(shown)
+    if len(items) > len(shown):
+        text += f"; plus {len(items) - len(shown)} more"
+    return text[:1].upper() + text[1:] if capitalize else text
+
+
+def _summary(a: RiskAssessment) -> str:
+    subject = f" for {a.asset}" if a.asset else ""
+    text = f"Overall risk{subject}: {a.overall_risk}. {_clauses(a.overall_reasons)}."
+    if a.overall_risk == "unknown" and a.missing_evidence:
+        text += f" Missing: {'; '.join(a.missing_evidence)}."
+    text += f" Uncertainty: {a.uncertainty_level}"
+    if a.uncertainty_reasons:
+        text += f" because {_clauses(a.uncertainty_reasons, capitalize=False)}"
+    return text + "."
+
+
+def _evidence(a: RiskAssessment) -> list[str]:
+    reviewed = [AGENT_LABELS[i.agent].lower() for i in a.inputs if i.status == "ok"]
+    risk_factors = [f for f in a.factors if f.affects == "risk"]
+    counts = {lv: sum(f.severity == lv for f in risk_factors) for lv in ("high", "medium", "low")}
+    lines = [
+        f"Overall risk {a.overall_risk} from {sum(counts.values())} risk factor(s) "
+        f"({counts['high']} high, {counts['medium']} medium, {counts['low']} low); "
+        f"evidence reviewed: {', '.join(reviewed) or 'none'}. Rule-based, not a forecast."
+    ]
+    lines += [
+        f"[{f.severity} · {category_label(f.category)}"
+        f"{' · reliability' if f.affects == 'uncertainty' else ''}] {f.explanation}"
+        for f in a.factors
+    ]
+    lines += [
+        f"Would invalidate or weaken the analysis: {c.condition}" for c in a.invalidation_conditions
+    ]
+    lines += [f"Missing evidence: {m}." for m in a.missing_evidence]
+    return lines

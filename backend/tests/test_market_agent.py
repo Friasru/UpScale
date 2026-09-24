@@ -128,7 +128,7 @@ def test_orchestrator_continues_when_market_agent_fails(fake_coingecko):
     assert analysis.scenarios and analysis.risks
     assert not any(e.source == "market" for e in analysis.evidence)
     assert any("market agent failed" in n for n in analysis.uncertainty.notes)
-    assert any("Some agents failed: market" in r.description for r in analysis.risks)
+    assert any("Live market data failed" in r.description for r in analysis.risks)
     assert "market: failed" in response.message.content
 
 

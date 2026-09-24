@@ -1,10 +1,11 @@
 from upscale.agents.base import Agent, AgentContext
-from upscale.formatting import usd
+from upscale.formatting import usd, usd_zone
 from upscale.schemas import AgentResult, Risk, Scenario
 from upscale.services import technical_analysis_service
 from upscale.services.market_data import MarketDataError
 from upscale.services.technical_analysis import (
     InvalidCandleDataError,
+    Level,
     TechnicalAnalysis,
     TechnicalAnalysisService,
 )
@@ -20,7 +21,10 @@ class TechnicalAnalysisAgent(Agent):
     """
 
     name = "technical_analysis"
-    description = "SMA/EMA, RSI, MACD, recent range, rule-based trend and approximate levels."
+    description = (
+        "SMA/EMA, RSI, MACD, recent range, relative volume, rule-based trend and approximate "
+        "levels."
+    )
     depends_on = ("vision",)
 
     def __init__(self, service: TechnicalAnalysisService | None = None):
@@ -61,6 +65,15 @@ class TechnicalAnalysisAgent(Agent):
                 "requested_timeframe": context.timeframe,
                 "requested_timeframe_source": context.timeframe_source,
                 "timeframe_note": fallback_note,
+                "candle_source": {
+                    "provider": analysis.provider,
+                    "pair": analysis.pair,
+                    "requested_timeframe": context.timeframe,
+                    "actual_timeframe": analysis.timeframe,
+                    "candle_count": analysis.candle_count,
+                    "volume_available": analysis.volume_available,
+                    "fallback_notes": analysis.fallback_notes,
+                },
                 "not_analyzed": others,
             },
             evidence=_evidence(analysis, fallback_note, others),
@@ -81,11 +94,15 @@ def _summary(a: TechnicalAnalysis) -> str:
 
 
 def _evidence(a: TechnicalAnalysis, fallback_note: str | None, others: list[str]) -> list[str]:
+    pair = f" ({a.pair})" if a.pair else ""
+    volume = "with" if a.volume_available else "without"
     lines = [
-        f"{_label(a)}: {a.candle_count} candles from {a.provider}, "
-        f"{a.first_candle_at.strftime(TIME_FORMAT)} to {a.last_candle_at.strftime(TIME_FORMAT)} "
-        f"(candle open times); last close {usd(a.last_close)}."
+        f"{_label(a)}: {a.candle_count} candles from {a.provider}{pair} {volume} per-candle "
+        f"volume, {a.first_candle_at.strftime(TIME_FORMAT)} to "
+        f"{a.last_candle_at.strftime(TIME_FORMAT)} (candle open times); last close "
+        f"{usd(a.last_close)}."
     ]
+    lines += [f"{note}; used {a.provider} instead." for note in a.fallback_notes]
     if fallback_note:
         lines.append(fallback_note)
 
@@ -140,19 +157,47 @@ def _evidence(a: TechnicalAnalysis, fallback_note: str | None, others: list[str]
 
     lv = a.levels
     if lv.available:
-        support = ", ".join(f"~{usd(x.price)} ({x.touches} touch(es))" for x in lv.support)
-        resistance = ", ".join(f"~{usd(x.price)} ({x.touches} touch(es))" for x in lv.resistance)
+        support = ", ".join(_zone(x) for x in lv.support)
+        resistance = ", ".join(_zone(x) for x in lv.resistance)
         lines.append(
-            f"Approximate support: {support or 'none below the last close in the window'}; "
-            f"approximate resistance: {resistance or 'none above the last close in the window'}."
+            f"Approximate support zones: {support or 'none below the last close in the window'}; "
+            f"approximate resistance zones: {resistance or 'none above the last close in the window'}."
         )
+        if lv.containing is not None:
+            lines.append(
+                f"The last close ({usd(a.last_close)}) is inside the swing zone "
+                f"{_zone(lv.containing)}, so that zone is neither support nor resistance."
+            )
     else:
         lines.append(f"Support/resistance unavailable: {lv.unavailable_reason}.")
 
     lines.append(a.volume_note)
+    v = a.volume
+    if (
+        v.available
+        and v.last_volume is not None
+        and v.average_volume is not None
+        and v.relative_volume is not None
+        and v.up_volume_pct is not None
+        and v.down_volume_pct is not None
+    ):
+        lines.append(
+            f"Last {a.timeframe} candle volume {v.last_volume:,.4g} {v.unit} is "
+            f"{v.relative_volume:.2f}x the {v.lookback}-candle average ({v.average_volume:,.4g} "
+            f"{v.unit}); over the last {v.lookback + 1} candles {v.up_volume_pct:.0f}% of "
+            f"volume traded on candles that closed up and {v.down_volume_pct:.0f}% on candles "
+            "that closed down."
+        )
     if others:
         lines.append(f"Only {a.symbol} was analyzed; not analyzed: {', '.join(others)}.")
     return lines
+
+
+def _zone(lv: Level) -> str:
+    zone = usd_zone(lv.lower, lv.upper)
+    if zone == f"~{usd(lv.price)}":  # a single swing price: the mean adds nothing
+        return f"{zone} ({lv.touches} touch(es))"
+    return f"{zone} (mean ~{usd(lv.price)}, {lv.touches} touch(es))"
 
 
 def _scenarios(a: TechnicalAnalysis) -> list[Scenario]:
@@ -166,35 +211,45 @@ def _scenarios(a: TechnicalAnalysis) -> list[Scenario]:
             Scenario(
                 name="Range holds",
                 description=(
-                    f"{a.symbol} keeps trading between approximate support ~{usd(support.price)} "
-                    f"and resistance ~{usd(resistance.price)}."
+                    f"{a.symbol} keeps trading between the support zone "
+                    f"{usd_zone(support.lower, support.upper)} and the resistance zone "
+                    f"{usd_zone(resistance.lower, resistance.upper)}."
                 ),
-                conditions=[f"{tf} closes stay between the two levels"],
-                invalidation=f"A {tf} close outside the {usd(support.low)}–{usd(resistance.high)} zone.",
+                conditions=[f"{tf} closes stay between the two zones"],
+                invalidation=(
+                    f"A {tf} close below ~{usd(support.lower)} (support zone's lower bound) or "
+                    f"above ~{usd(resistance.upper)} (resistance zone's upper bound)."
+                ),
             )
         )
     if resistance:
         scenarios.append(
             Scenario(
                 name="Break above resistance",
-                description=f"{a.symbol} closes above the ~{usd(resistance.price)} resistance zone.",
+                description=(
+                    f"{a.symbol} closes above the resistance zone "
+                    f"{usd_zone(resistance.lower, resistance.upper)}."
+                ),
                 conditions=[
-                    f"A {tf} close above {usd(resistance.high)}",
+                    f"A {tf} close above ~{usd(resistance.upper)} (the zone's upper bound)",
                     "MACD line staying above its signal line would be consistent with this",
                 ],
-                invalidation=f"Price falls back below {usd(resistance.low)}.",
+                invalidation=f"Price falls back below ~{usd(resistance.lower)} (the zone's lower bound).",
             )
         )
     if support:
         scenarios.append(
             Scenario(
                 name="Break below support",
-                description=f"{a.symbol} closes below the ~{usd(support.price)} support zone.",
+                description=(
+                    f"{a.symbol} closes below the support zone "
+                    f"{usd_zone(support.lower, support.upper)}."
+                ),
                 conditions=[
-                    f"A {tf} close below {usd(support.low)}",
+                    f"A {tf} close below ~{usd(support.lower)} (the zone's lower bound)",
                     "MACD line staying below its signal line would be consistent with this",
                 ],
-                invalidation=f"Price recovers above {usd(support.high)}.",
+                invalidation=f"Price recovers above ~{usd(support.upper)} (the zone's upper bound).",
             )
         )
     return scenarios
@@ -211,6 +266,15 @@ def _risks(a: TechnicalAnalysis, fallback_note: str | None) -> list[Risk]:
         risks.append(
             Risk(
                 description="Support/resistance levels are approximate zones from recent swing points.",
+                severity="low",
+            )
+        )
+    if a.volume.available:
+        risks.append(
+            Risk(
+                description=(
+                    f"Volume is {a.provider}'s alone, not market-wide; other venues may differ."
+                ),
                 severity="low",
             )
         )

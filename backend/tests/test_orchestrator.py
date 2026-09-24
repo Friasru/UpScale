@@ -1,11 +1,17 @@
 import asyncio
+import json
+from datetime import UTC, datetime
+
+import httpx2
+import pytest
 
 from upscale.agents import Agent, AgentContext
 from upscale.orchestrator import Orchestrator
 from upscale.routing import detect_assets, route
 from upscale.schemas import AgentResult, ChatMessage, ChatRequest, ImageAttachment
 
-from .conftest import PNG_1PX
+from .conftest import PNG_1PX, coingecko_row
+from .test_technical_agent import serve_wave
 
 
 def ask(orchestrator: Orchestrator, content: str, images: int = 0):
@@ -70,7 +76,7 @@ def test_orchestrator_runs_selected_agents_and_combines_results():
     assert analysis.uncertainty.level == "high"
     assert response.message.content.startswith("Prototype mode")
     assert "No AI model is connected" not in response.message.content
-    assert "not built yet (opportunity, risk)" in response.message.content
+    assert "not built yet (opportunity)" in response.message.content
 
 
 def test_orchestrator_passes_dependency_results_downstream():
@@ -133,6 +139,109 @@ def test_detect_timeframe():
     assert detect_timeframe("BTC 4h chart") == "4h"
     assert detect_timeframe("daily RSI on eth") == "1d"
     assert detect_timeframe("15min SOL") == "15m"
+    assert detect_timeframe("BTC 30m chart") == "30m"
+    assert detect_timeframe("30 minutes candles on eth") == "30m"
+    assert detect_timeframe("BTC 1m scalp") == "1m"
     assert detect_timeframe("1 hour candles") == "1h"
     assert detect_timeframe("what about btc") is None
     assert route("ETH 4h", has_images=False).timeframe == "4h"
+
+
+# --- Uncertainty: mock placeholders don't raise it ------------------------------------------
+
+
+def _result(agent, *, mock=False, status="ok", **findings):
+    return AgentResult(
+        agent=agent,
+        mock=mock,
+        status=status,
+        summary=f"{'[Mock] ' if mock else ''}{agent}",
+        findings=findings,
+        error="boom" if status == "error" else None,
+    )
+
+
+def _review(level, reviewed=("market", "technical_analysis"), reasons=()):
+    return _result(
+        "risk",
+        uncertainty_level=level,
+        uncertainty_reasons=list(reasons),
+        reviewed_agents=list(reviewed),
+    )
+
+
+def _uncertainty(*results):
+    decision = route("What about BTC?", has_images=False)
+    return Orchestrator().synthesize(decision, list(results)).uncertainty
+
+
+MOCK_OPPORTUNITY = _result("opportunity", mock=True)
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_mock_opportunity_does_not_raise_uncertainty(level):
+    uncertainty = _uncertainty(_result("market"), _review(level), MOCK_OPPORTUNITY)
+    assert uncertainty.level == level
+    assert any(n.startswith("Not built yet: opportunity") for n in uncertainty.notes)
+
+
+def test_risk_review_reasons_become_uncertainty_notes():
+    uncertainty = _uncertainty(
+        _result("market"), _review("medium", reasons=["news is missing"]), MOCK_OPPORTUNITY
+    )
+    assert "Risk review: news is missing." in uncertainty.notes
+
+
+def test_real_failure_outside_the_risk_review_is_at_least_medium():
+    uncertainty = _uncertainty(
+        _result("market"), _result("opportunity", status="error"), _review("low")
+    )
+    assert uncertainty.level == "medium"
+    # A failure the risk review already assessed is left to its level.
+    covered = _uncertainty(
+        _result("market", status="error"), _result("news_sentiment"), _review("low")
+    )
+    assert covered.level == "low"
+
+
+def test_uncertainty_without_a_risk_review():
+    assert _uncertainty(_result("market"), MOCK_OPPORTUNITY).level == "medium"
+    assert _uncertainty(_result("market"), _result("news_sentiment", status="error")).level == (
+        "high"
+    )
+
+
+def test_only_mock_output_is_high_uncertainty():
+    assert _uncertainty(MOCK_OPPORTUNITY).level == "high"
+    assert _uncertainty().level == "high"
+
+
+def test_unreadable_risk_uncertainty_is_treated_as_high():
+    assert _uncertainty(_result("market"), _review("unclear")).level == "high"
+
+
+def test_general_question_uncertainty_follows_real_evidence(fake_coingecko):
+    # Consistent, fresh live data: candles around $100 and a matching current price.
+    serve_wave(fake_coingecko)
+    candles = fake_coingecko.handler
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    btc = coingecko_row("bitcoin", "btc", "Bitcoin", 100.0, last_updated=now)
+
+    def handler(request):
+        if request.url.path.endswith("/markets"):
+            return httpx2.Response(200, content=json.dumps([btc]))
+        return candles(request)
+
+    fake_coingecko.handler = handler
+    response = ask(Orchestrator(), "What's up with BTC?")
+    analysis = response.analysis
+    by_agent = {r.agent: r for r in analysis.agent_results}
+    assert by_agent["opportunity"].mock and by_agent["opportunity"].summary.startswith("[Mock]")
+    assert analysis.mock is True
+    risk_level = by_agent["risk"].findings["uncertainty_level"]
+    assert risk_level in ("low", "medium")
+    assert analysis.uncertainty.level == risk_level  # not raised to high by the placeholder
+    assert response.message.content.startswith(
+        "Prototype mode: results marked [Mock] are placeholders from agents that are not "
+        "built yet (opportunity)."
+    )

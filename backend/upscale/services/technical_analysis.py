@@ -1,9 +1,9 @@
 """Deterministic technical analysis over `CandleSeries` from the market data service.
 
 Computes SMA, EMA, RSI, MACD, a recent high/low range, a rule-based trend label and
-approximate support/resistance zones. Any calculation without enough candles is
-reported as unavailable with the reason, never estimated. No volume-based indicators
-are computed; volume availability is only reported.
+approximate support/resistance zones, plus relative volume when the candle provider
+supplies per-candle volume. Any calculation without enough candles (or without volume)
+is reported as unavailable with the reason, never estimated.
 """
 
 import itertools
@@ -26,8 +26,11 @@ from upscale.services.market_data import (
 
 SR_METHOD = (
     "Swing highs/lows (a candle's high or low is the extreme of the {w} candles on each "
-    "side) over the last {n} candles, grouped when within {tol}% of each other. "
-    "Levels are approximate zones, not exact prices."
+    "side) over the last {n} candles. Sorted by price, a swing point joins the current zone "
+    "when it is within {k:g} x ATR {atr_period} (the average true range at the last candle, "
+    "{tol}) of the zone's lowest swing point, so no zone is wider than that. Each zone spans "
+    "its lowest to highest grouped swing point; support lies wholly below the last close and "
+    "resistance wholly above it. Levels are approximate zones, not exact prices."
 )
 
 
@@ -51,9 +54,16 @@ class TechnicalAnalysisConfig:
     high_low_lookback: int = 50
     sr_lookback: int = 100
     sr_pivot_window: int = 3
-    sr_cluster_pct: float = 1.0
+    # Swing points group into one zone when within this many ATRs of the zone's lowest swing
+    # point: one ATR is the typical full range of a single candle on this series, so swings
+    # closer than that are the same area on the chart. Scales with timeframe and volatility.
+    atr_period: int = 14
+    sr_zone_atr_multiple: float = 1.0
     sr_max_levels: int = 3
-    # Candles requested from the market data service (180 = CoinGecko's 4h maximum).
+    # Relative volume compares the last candle with the average of the ones before it.
+    volume_lookback: int = 20
+    # Candles requested from the market data service (180 = CoinGecko's 4h maximum, the
+    # fallback when Kraken is unavailable; Kraken offers up to 719 per timeframe).
     candles_to_fetch: int = 180
     default_timeframe: Timeframe = "4h"
 
@@ -65,7 +75,9 @@ class TechnicalAnalysisConfig:
             self.macd_signal,
             self.high_low_lookback,
             self.sr_pivot_window,
+            self.atr_period,
             self.sr_max_levels,
+            self.volume_lookback,
         ]
         if any(p < 1 for p in periods):
             raise ValueError("all periods, windows and counts must be at least 1")
@@ -75,8 +87,10 @@ class TechnicalAnalysisConfig:
             raise ValueError("trend fast SMA must be shorter than the slow SMA")
         if self.sr_lookback < 2 * self.sr_pivot_window + 1:
             raise ValueError("sr_lookback must fit at least one pivot window")
-        if self.sr_cluster_pct <= 0:
-            raise ValueError("sr_cluster_pct must be positive")
+        if self.sr_zone_atr_multiple <= 0:
+            raise ValueError("sr_zone_atr_multiple must be positive")
+        if self.sr_lookback <= self.atr_period:
+            raise ValueError("sr_lookback must exceed atr_period so the ATR is available")
         if not 1 <= self.candles_to_fetch <= MAX_CANDLES:
             raise ValueError(f"candles_to_fetch must be between 1 and {MAX_CANDLES}")
 
@@ -116,9 +130,11 @@ class Trend(BaseModel):
 
 
 class Level(BaseModel):
-    price: float  # mean of the grouped swing points
-    low: float  # lowest swing point in the zone
-    high: float  # highest swing point in the zone
+    """A support/resistance zone built from grouped swing points."""
+
+    price: float  # representative price: mean of the grouped swing points
+    lower: float  # lower bound: lowest swing point in the zone
+    upper: float  # upper bound: highest swing point in the zone
     touches: int
     last_touched: datetime
     distance_pct: float  # from the last close; negative = below
@@ -128,9 +144,37 @@ class SupportResistance(BaseModel):
     method: str
     lookback: int
     available: bool
+    # Volatility used to group swing points: ATR at the last candle and the resulting
+    # maximum zone width (atr * multiple), both in price units.
+    atr_period: int | None = None
+    atr: float | None = None
+    zone_tolerance: float | None = None
     support: list[Level] = Field(default_factory=list)  # nearest first
     resistance: list[Level] = Field(default_factory=list)  # nearest first
+    # The zone whose bounds contain the last close, if any: price is trading inside it, so
+    # it is neither support below nor resistance above.
+    containing: Level | None = None
     unavailable_reason: str | None = None
+
+
+class VolumeAnalysis(BaseModel):
+    """Per-candle volume in the base asset (e.g. BTC), as supplied by the candle provider."""
+
+    lookback: int
+    available: bool
+    unit: str | None = None
+    last_volume: float | None = None  # the most recent completed candle
+    average_volume: float | None = None  # mean of the `lookback` candles before it
+    relative_volume: float | None = None  # last / average
+    # Share of the window's volume (last `lookback` + 1 candles) on candles closing above
+    # their open, and below it; the remainder traded on unchanged candles.
+    up_volume_pct: float | None = None
+    down_volume_pct: float | None = None
+    unavailable_reason: str | None = None
+
+
+def _volume_not_computed() -> VolumeAnalysis:
+    return VolumeAnalysis(lookback=0, available=False, unavailable_reason="not computed")
 
 
 class TechnicalAnalysis(BaseModel):
@@ -138,12 +182,16 @@ class TechnicalAnalysis(BaseModel):
     timeframe: Timeframe
     provider: str
     provider_id: str
+    pair: str | None = None  # e.g. "BTC/USD" when the provider quotes a traded pair
+    # Why preferred candle providers were skipped before `provider` served the candles.
+    fallback_notes: list[str] = Field(default_factory=list)
     candle_count: int
     first_candle_at: datetime
     last_candle_at: datetime  # open time of the most recent candle
     last_close: float
     volume_available: bool
     volume_note: str
+    volume: VolumeAnalysis = Field(default_factory=_volume_not_computed)
     indicators: list[Indicator]
     recent_range: RecentRange
     trend: Trend
@@ -167,6 +215,10 @@ def validate_candles(series: CandleSeries) -> None:
             raise InvalidCandleDataError(f"candle at {c.timestamp} has invalid prices")
         if c.low > min(c.open, c.close) or c.high < max(c.open, c.close) or c.low > c.high:
             raise InvalidCandleDataError(f"candle at {c.timestamp} has inconsistent high/low")
+        if c.volume is not None and not (math.isfinite(c.volume) and c.volume >= 0):
+            raise InvalidCandleDataError(f"candle at {c.timestamp} has invalid volume")
+        if series.volume_available and c.volume is None:
+            raise InvalidCandleDataError(f"candle at {c.timestamp} is missing its volume")
     for a, b in itertools.pairwise(candles):
         if b.timestamp - a.timestamp != series.interval:
             raise InvalidCandleDataError(
@@ -188,24 +240,33 @@ def analyze_series(
         _rsi(closes, config.rsi_period),
         _macd(closes, config),
     ]
-    volume_note = (
-        f"{series.provider} supplies per-candle volume, but no volume-based indicators are "
-        "implemented yet."
-        if series.volume_available
-        else f"{series.provider} does not supply per-candle volume, so no volume-based "
-        "analysis was performed."
-    )
+    volume = volume_analysis(series, config.volume_lookback)
+    if not series.volume_available:
+        volume_note = (
+            f"{series.provider} does not supply per-candle volume, so no volume-based "
+            "analysis was performed."
+        )
+    elif volume.available:
+        volume_note = f"Per-candle volume from {series.provider} ({volume.unit})."
+    else:
+        volume_note = (
+            f"{series.provider} supplies per-candle volume, but relative volume is "
+            f"unavailable: {volume.unavailable_reason}."
+        )
     return TechnicalAnalysis(
         symbol=series.symbol,
         timeframe=series.timeframe,
         provider=series.provider,
         provider_id=series.provider_id,
+        pair=series.pair,
+        fallback_notes=series.fallback_notes,
         candle_count=len(series.candles),
         first_candle_at=series.candles[0].timestamp,
         last_candle_at=series.candles[-1].timestamp,
         last_close=closes[-1],
         volume_available=series.volume_available,
         volume_note=volume_note,
+        volume=volume,
         indicators=indicator_list,
         recent_range=recent_range(series, config.high_low_lookback),
         trend=classify_trend(closes, config.trend_fast_sma, config.trend_slow_sma),
@@ -294,6 +355,51 @@ def recent_range(series: CandleSeries, lookback: int) -> RecentRange:
     )
 
 
+def volume_analysis(series: CandleSeries, lookback: int) -> VolumeAnalysis:
+    """Last candle's volume relative to the preceding `lookback` candles, and the up/down
+    split of volume over the window. Only computed from provider-supplied volume."""
+    unit = series.symbol
+    if not series.volume_available:
+        return VolumeAnalysis(
+            lookback=lookback,
+            available=False,
+            unavailable_reason=f"{series.provider} does not supply per-candle volume",
+        )
+    candles = series.candles
+    if len(candles) < lookback + 1:
+        return VolumeAnalysis(
+            lookback=lookback,
+            available=False,
+            unit=unit,
+            unavailable_reason=_needs(lookback + 1, len(candles)),
+        )
+    window = candles[-(lookback + 1) :]
+    volumes = [c.volume or 0.0 for c in window]
+    last = volumes[-1]
+    average = sum(volumes[:-1]) / lookback
+    total = sum(volumes)
+    if average <= 0 or total <= 0:
+        return VolumeAnalysis(
+            lookback=lookback,
+            available=False,
+            unit=unit,
+            last_volume=last,
+            unavailable_reason=f"no volume was traded in the previous {lookback} candles",
+        )
+    up = sum(v for c, v in zip(window, volumes, strict=True) if c.close > c.open)
+    down = sum(v for c, v in zip(window, volumes, strict=True) if c.close < c.open)
+    return VolumeAnalysis(
+        lookback=lookback,
+        available=True,
+        unit=unit,
+        last_volume=last,
+        average_volume=average,
+        relative_volume=last / average,
+        up_volume_pct=100 * up / total,
+        down_volume_pct=100 * down / total,
+    )
+
+
 def classify_trend(closes: list[float], fast: int, slow: int) -> Trend:
     """Uptrend if close > SMA fast > SMA slow, downtrend if close < SMA fast < SMA slow."""
     method = (
@@ -325,16 +431,30 @@ def classify_trend(closes: list[float], fast: int, slow: int) -> Trend:
 
 def support_resistance(series: CandleSeries, config: TechnicalAnalysisConfig) -> SupportResistance:
     """Approximate levels from clustered swing highs/lows of recent price structure."""
-    w, lookback, tol = config.sr_pivot_window, config.sr_lookback, config.sr_cluster_pct
-    method = SR_METHOD.format(w=w, n=lookback, tol=tol)
+    w, lookback, k = config.sr_pivot_window, config.sr_lookback, config.sr_zone_atr_multiple
     candles = series.candles
+
+    def method(tol: str) -> str:
+        return SR_METHOD.format(w=w, n=lookback, k=k, atr_period=config.atr_period, tol=tol)
+
     if len(candles) < lookback:
         return SupportResistance(
-            method=method,
+            method=method("unavailable"),
             lookback=lookback,
             available=False,
+            atr_period=config.atr_period,
             unavailable_reason=_needs(lookback, len(candles)),
         )
+
+    atr = indicators.atr(
+        [c.high for c in candles],
+        [c.low for c in candles],
+        [c.close for c in candles],
+        config.atr_period,
+    )[-1]
+    if atr is None:  # unreachable: len(candles) >= sr_lookback > atr_period
+        raise ValueError("ATR unavailable")
+    tolerance = k * atr
 
     window = candles[-lookback:]
     pivots: list[tuple[float, datetime]] = []
@@ -351,7 +471,8 @@ def support_resistance(series: CandleSeries, config: TechnicalAnalysisConfig) ->
     close = candles[-1].close
     clusters: list[list[tuple[float, datetime]]] = []
     for price, at in sorted(pivots):
-        if clusters and price <= clusters[-1][0][0] * (1 + tol / 100):
+        # Anchored to the zone's lowest swing point, so zones can't chain wider than `tolerance`.
+        if clusters and price - clusters[-1][0][0] <= tolerance:
             clusters[-1].append((price, at))
         else:
             clusters.append([(price, at)])
@@ -363,21 +484,28 @@ def support_resistance(series: CandleSeries, config: TechnicalAnalysisConfig) ->
         levels.append(
             Level(
                 price=mean,
-                low=min(prices),
-                high=max(prices),
+                lower=min(prices),
+                upper=max(prices),
                 touches=len(cluster),
                 last_touched=max(at for _, at in cluster),
                 distance_pct=100 * (mean - close) / close,
             )
         )
-    support = sorted((lv for lv in levels if lv.price < close), key=lambda lv: -lv.price)
-    resistance = sorted((lv for lv in levels if lv.price > close), key=lambda lv: lv.price)
+    # Clusters are disjoint price ranges, so at most one can contain the close. A zone is
+    # classified by its bounds, not its mean: one straddling the close is neither side.
+    support = sorted((lv for lv in levels if lv.upper < close), key=lambda lv: -lv.price)
+    resistance = sorted((lv for lv in levels if lv.lower > close), key=lambda lv: lv.price)
+    containing = next((lv for lv in levels if lv.lower <= close <= lv.upper), None)
     return SupportResistance(
-        method=method,
+        method=method(f"{tolerance:,.6g} in price units"),
         lookback=lookback,
         available=True,
+        atr_period=config.atr_period,
+        atr=atr,
+        zone_tolerance=tolerance,
         support=support[: config.sr_max_levels],
         resistance=resistance[: config.sr_max_levels],
+        containing=containing,
     )
 
 

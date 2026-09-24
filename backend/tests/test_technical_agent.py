@@ -5,14 +5,19 @@ import httpx2
 import pytest
 
 from upscale.agents import AgentContext, TechnicalAnalysisAgent
+from upscale.agents.technical import _evidence, _scenarios
 from upscale.orchestrator import Orchestrator
 from upscale.schemas import AgentResult, ChatMessage, ChatRequest
 from upscale.services.coingecko import CoinGeckoProvider
 from upscale.services.market_data import Candle, CandleSeries, MarketDataService, Timeframe
-from upscale.services.technical_analysis import TechnicalAnalysisService
+from upscale.services.technical_analysis import (
+    TechnicalAnalysisConfig,
+    TechnicalAnalysisService,
+    analyze_series,
+)
 
 from .conftest import FOUR_HOURS_MS, LAST_CLOSE_MS, FakeCoinGecko
-from .ta_helpers import make_series, wave
+from .ta_helpers import make_series, swing_series, wave
 
 BUY_SELL_WORDS = (
     "buy", "sell", "long", "short", "entry", "target", "take profit", "stop loss", "should",
@@ -93,7 +98,7 @@ def test_technical_agent_turns_calculations_into_evidence(agent, fake):
         "MACD 12/26/9: line",
         "50-candle range: low $",
         "Trend (rule-based):",
-        "Approximate support: ~$",
+        "Approximate support zones: ~$",
         "does not supply per-candle volume",
     ):
         assert expected in text
@@ -112,6 +117,51 @@ def test_technical_agent_scenarios_are_conditional_not_recommendations(agent, fa
     ).lower()
     assert not any(word in text for word in BUY_SELL_WORDS)
     assert "recommend" not in " ".join(result.evidence).lower()
+
+
+def _swing_analysis(swings: list[float], close: float = 84_000.0):
+    """BTC-like 1m candles around $84,000 with an ATR of ~$28."""
+    series = swing_series(84_000.0, 28.0, swings, last_close=close)
+    return analyze_series(
+        series, TechnicalAnalysisConfig(sr_lookback=len(series.candles), sr_pivot_window=2)
+    )
+
+
+def test_scenarios_break_zones_at_their_bounds():
+    # Resistance zone $84,020.00-$84,044.00 (mean $84,033.00), support $83,950.00-$83,972.00.
+    a = _swing_analysis([83_950.00, 83_972.00, 84_020.00, 84_035.00, 84_044.00])
+    by_name = {s.name: s for s in _scenarios(a)}
+    above = by_name["Break above resistance"]
+    assert above.description == "BTC closes above the resistance zone ~$84,020.00–$84,044.00."
+    assert above.conditions[0] == "A 1m close above ~$84,044.00 (the zone's upper bound)"
+    assert above.invalidation == "Price falls back below ~$84,020.00 (the zone's lower bound)."
+    below = by_name["Break below support"]
+    assert below.conditions[0] == "A 1m close below ~$83,950.00 (the zone's lower bound)"
+    assert below.invalidation == "Price recovers above ~$83,972.00 (the zone's upper bound)."
+    assert by_name["Range holds"].invalidation == (
+        "A 1m close below ~$83,950.00 (support zone's lower bound) or above ~$84,044.00 "
+        "(resistance zone's upper bound)."
+    )
+    text = " ".join(_evidence(a, None, []))
+    assert "resistance zones: ~$84,020.00–$84,044.00 (mean ~$84,033.00, 3 touch(es))" in text
+    assert "ATR" not in text  # used internally for zone width, not shown
+    assert "support zones: ~$83,950.00–$83,972.00 (mean ~$83,961.00, 2 touch(es))" in text
+
+
+def test_single_swing_zone_is_shown_without_a_redundant_mean():
+    a = _swing_analysis([84_044.00])
+    assert "resistance zones: ~$84,044.00 (1 touch(es))" in " ".join(_evidence(a, None, []))
+
+
+def test_zone_containing_the_close_is_reported_not_used_for_scenarios():
+    a = _swing_analysis([84_016.80, 84_025.20], close=84_022.40)
+    assert _scenarios(a) == []
+    text = " ".join(_evidence(a, None, []))
+    assert "support zones: none below the last close" in text
+    assert (
+        "The last close ($84,022.40) is inside the swing zone ~$84,016.80–$84,025.20 "
+        "(mean ~$84,021.00, 2 touch(es)), so that zone is neither support nor resistance." in text
+    )
 
 
 def test_technical_agent_risks_mention_lag_levels_and_volume(agent, fake):
@@ -256,7 +306,7 @@ def test_orchestrator_uses_real_technical_analysis(fake_coingecko):
         for e in analysis.evidence
     )
     assert {s.source for s in analysis.scenarios} == {"technical_analysis"}
-    assert analysis.summary.startswith("[Partly mock]")
+    assert analysis.mock is False  # technical analysis and risk are both real
 
 
 def test_general_question_runs_technical_and_market_together(fake_coingecko):
@@ -265,7 +315,7 @@ def test_general_question_runs_technical_and_market_together(fake_coingecko):
     by_agent = {r.agent: r for r in analysis.agent_results}
     assert by_agent["technical_analysis"].status == "ok"
     assert by_agent["market"].status == "ok"
-    assert by_agent["opportunity"].mock and by_agent["risk"].mock  # still mocks
+    assert by_agent["opportunity"].mock and not by_agent["risk"].mock
     assert "technical_analysis" in by_agent["risk"].findings["reviewed_agents"]
 
 

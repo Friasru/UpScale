@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 from collections.abc import Iterable, Mapping
+from typing import cast
 
 from upscale.agents import Agent, AgentContext, default_agents
 from upscale.routing import RoutingDecision, route
@@ -12,12 +13,14 @@ from upscale.schemas import (
     ChatRequest,
     ChatResponse,
     Evidence,
+    Level,
     Risk,
     Scenario,
     Uncertainty,
 )
 
 AGENT_TIMEOUT_SECONDS = 30.0
+_LEVEL_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
 DISCLAIMER = (
     "UpScale explains evidence, scenarios, risks and uncertainty. It does not give "
     "buy/sell recommendations and is not financial advice."
@@ -118,12 +121,21 @@ class Orchestrator:
                     seen.add(risk.description)
                     risks.append(risk.model_copy(update={"source": risk.source or r.agent}))
 
+        review = next((r for r in ok if r.agent == "risk" and not r.mock), None)
         notes: list[str] = []
-        if mocked := [r.agent for r in results if r.mock]:
-            notes.append(f"Mock placeholder output from: {', '.join(mocked)}.")
         notes += [f"{r.agent} agent failed ({r.error})." for r in failed]
+        if review is not None:
+            notes += [
+                f"Risk review: {reason}."
+                for reason in review.findings.get("uncertainty_reasons", [])
+            ]
         if not results:
             notes.append("No agents were relevant to this request.")
+        if mocked := [r.agent for r in results if r.mock]:
+            notes.append(
+                f"Not built yet: {', '.join(mocked)} (placeholder output, not used as evidence "
+                "and not counted in this uncertainty level)."
+            )
 
         return Analysis(
             mock=mock,
@@ -136,12 +148,34 @@ class Orchestrator:
             evidence=evidence,
             scenarios=scenarios,
             risks=risks,
-            uncertainty=Uncertainty(
-                level="high" if mock or failed or not ok else "medium", notes=notes
-            ),
+            uncertainty=Uncertainty(level=_uncertainty_level(results, review), notes=notes),
             agent_results=results,
             disclaimer=DISCLAIMER,
         )
+
+
+def _uncertainty_level(results: list[AgentResult], review: AgentResult | None) -> Level:
+    """Overall uncertainty from real agents only; mock placeholders never raise it.
+
+    * No real agent produced output: high.
+    * With the real risk review: its deterministic uncertainty level (which already covers
+      its input agents' failures and missing evidence), raised to at least medium if some
+      other real agent failed.
+    * Without a risk review: high if any real agent failed, otherwise medium.
+    """
+    real = [r for r in results if not r.mock]
+    if not any(r.status == "ok" for r in real):
+        return "high"
+    failed = {r.agent for r in real if r.status == "error"}
+    if review is None:
+        return "high" if failed else "medium"
+    level = review.findings.get("uncertainty_level")
+    if level not in _LEVEL_RANK:
+        level = "high"
+    uncovered = failed - set(review.findings.get("reviewed_agents", []))
+    if uncovered and _LEVEL_RANK[level] < _LEVEL_RANK["medium"]:
+        level = "medium"
+    return cast(Level, level)
 
 
 def apply_vision(context: AgentContext, results: Mapping[AgentName, AgentResult]) -> AgentContext:

@@ -1,11 +1,13 @@
 import asyncio
 import json
+import random
 from datetime import timedelta
 
 import httpx2
 import pytest
 
 from upscale.services.coingecko import CoinGeckoProvider
+from upscale.services.indicators import atr
 from upscale.services.market_data import Candle, MarketDataService, UnsupportedTimeframeError
 from upscale.services.technical_analysis import (
     InvalidCandleDataError,
@@ -19,7 +21,7 @@ from upscale.services.technical_analysis import (
 )
 
 from .conftest import FakeCoinGecko, ohlc_rows
-from .ta_helpers import START, make_series, wave
+from .ta_helpers import START, make_series, swing_series, wave
 
 CONFIG = TechnicalAnalysisConfig()
 
@@ -77,7 +79,8 @@ def test_periods_are_configurable():
         {"macd_fast": 26, "macd_slow": 12},
         {"trend_fast_sma": 50, "trend_slow_sma": 20},
         {"sr_lookback": 4, "sr_pivot_window": 3},
-        {"sr_cluster_pct": 0},
+        {"sr_zone_atr_multiple": 0},
+        {"sr_lookback": 14, "atr_period": 14},
         {"candles_to_fetch": 501},
     ],
 )
@@ -162,7 +165,7 @@ def test_support_and_resistance_from_oscillating_prices():
     assert support.price == pytest.approx(89.8, abs=0.5)  # wave low minus spread
     assert resistance.price == pytest.approx(110.2, abs=0.5)
     assert support.touches >= 4 and resistance.touches >= 4
-    assert support.low <= support.price <= support.high
+    assert support.lower <= support.price <= support.upper
     assert support.distance_pct < 0 < resistance.distance_pct
 
 
@@ -179,14 +182,117 @@ def test_levels_are_sorted_nearest_first_and_capped():
     assert all(lv.touches == 2 for lv in s.support + s.resistance)
 
 
-def test_nearby_swing_points_are_grouped_within_tolerance():
-    closes = []
-    for low in (90.0, 90.5, 95.0):
-        closes += [100, 100, low, 100, 100]
-    closes += [100.0] * 5
-    config = TechnicalAnalysisConfig(sr_lookback=len(closes), sr_pivot_window=2, sr_cluster_pct=1.0)
-    s = support_resistance(make_series(closes, spread=0), config)
-    assert [(round(lv.price, 2), lv.touches) for lv in s.support] == [(95.0, 1), (90.25, 2)]
+BASE = 84_000.0
+# BTC-like ATR 14 per timeframe, measured on live Kraken candles around $84k.
+BTC_ATR = {"1m": 28.0, "5m": 106.0, "15m": 262.0, "1h": 602.0, "4h": 1078.0}
+
+
+def _levels(series):
+    config = TechnicalAnalysisConfig(
+        sr_lookback=len(series.candles), sr_pivot_window=2, sr_max_levels=10
+    )
+    return support_resistance(series, config)
+
+
+def _bounds(levels):
+    return [(lv.lower, lv.upper, lv.touches) for lv in levels]
+
+
+def test_zone_tolerance_is_one_atr_at_the_last_candle():
+    series = swing_series(BASE, 28.0, [BASE + 50, BASE - 50])
+    s = support_resistance(series, TechnicalAnalysisConfig(sr_lookback=len(series.candles)))
+    c = series.candles
+    expected = atr([x.high for x in c], [x.low for x in c], [x.close for x in c], 14)[-1]
+    assert s.atr_period == 14
+    assert s.atr == pytest.approx(expected)
+    assert s.zone_tolerance == pytest.approx(expected)
+    assert s.atr == pytest.approx(28.0, rel=0.05)  # the series' typical candle range
+    assert "ATR 14" in s.method
+    doubled = TechnicalAnalysisConfig(sr_lookback=len(c), sr_zone_atr_multiple=2.0)
+    assert support_resistance(series, doubled).zone_tolerance == pytest.approx(2 * expected)
+
+
+@pytest.mark.parametrize("timeframe", list(BTC_ATR))
+def test_distinct_zones_scale_with_each_timeframes_volatility(timeframe):
+    r = BTC_ATR[timeframe]
+    far_support = [BASE - 5.4 * r, BASE - 5.0 * r]
+    near_support = [BASE - 2.6 * r, BASE - 2.3 * r, BASE - 2.0 * r]
+    near_resistance = [BASE + 1.5 * r, BASE + 1.9 * r]
+    far_resistance = [BASE + 4.0 * r]
+    swings = far_support + near_support + near_resistance + far_resistance
+    s = _levels(swing_series(BASE, r, swings, timeframe=timeframe))
+
+    assert s.zone_tolerance == pytest.approx(r, rel=0.05)
+    # Bounds are actual swing prices; distant clusters (2.4+ ATR apart) stay separate.
+    assert _bounds(s.support) == [
+        (near_support[0], near_support[-1], 3),
+        (far_support[0], far_support[-1], 2),
+    ]
+    assert _bounds(s.resistance) == [
+        (near_resistance[0], near_resistance[-1], 2),
+        (far_resistance[0], far_resistance[0], 1),
+    ]
+    assert s.containing is None
+    if timeframe == "1m":
+        # Every swing here spans < 1% of price: the old fixed 1% rule merged them into one zone.
+        assert max(swings) - min(swings) < 0.01 * min(swings)
+
+
+def test_quiet_1m_zones_are_much_tighter_than_4h():
+    swings = [BASE - 3 * BTC_ATR["4h"], BASE + 3 * BTC_ATR["4h"]]
+    quiet_1m = _levels(swing_series(BASE, BTC_ATR["1m"], swings, timeframe="1m"))
+    h4 = _levels(swing_series(BASE, BTC_ATR["4h"], swings, timeframe="4h"))
+    assert quiet_1m.zone_tolerance is not None and h4.zone_tolerance is not None
+    assert quiet_1m.zone_tolerance < h4.zone_tolerance / 20
+    assert quiet_1m.zone_tolerance < 0.0005 * BASE  # well under the old 1% ($840)
+
+
+def test_high_volatility_allows_wider_zones_than_low_volatility():
+    swings = [BASE + 200, BASE + 230, BASE + 260]  # 30 apart
+    quiet = _levels(swing_series(BASE, 20.0, swings))
+    volatile = _levels(swing_series(BASE, 150.0, swings))
+    assert _bounds(quiet.resistance) == [(p, p, 1) for p in swings]
+    assert _bounds(volatile.resistance) == [(BASE + 200, BASE + 260, 3)]
+
+
+def test_zones_do_not_chain_wider_than_the_tolerance():
+    r = 28.0
+    ladder = [BASE + r * (1.0 + 0.7 * i) for i in range(6)]  # each step within one ATR
+    s = _levels(swing_series(BASE, r, ladder))
+    assert s.zone_tolerance is not None
+    assert _bounds(s.resistance) == [
+        (ladder[0], ladder[1], 2),
+        (ladder[2], ladder[3], 2),
+        (ladder[4], ladder[5], 2),
+    ]
+    assert all(lv.upper - lv.lower <= s.zone_tolerance for lv in s.resistance)
+
+
+def test_zone_containing_the_close_is_neither_support_nor_resistance():
+    # Mean ~84,021 is below the 84,022.40 close, so a mean-based rule would call it support.
+    r = 28.0
+    zone = [BASE + 0.6 * r, BASE + 0.9 * r]
+    s = _levels(swing_series(BASE, r, [BASE - 0.6 * r, *zone], last_close=BASE + 0.8 * r))
+    assert s.resistance == []
+    assert _bounds(s.support) == [(BASE - 0.6 * r, BASE - 0.6 * r, 1)]
+    assert s.containing is not None
+    assert (s.containing.lower, s.containing.upper) == (zone[0], zone[1])
+    assert s.containing.price < BASE + 0.8 * r
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_levels_lie_wholly_on_their_side_of_the_close(seed):
+    rng = random.Random(seed)
+    closes = [100.0]
+    for _ in range(149):
+        closes.append(closes[-1] * (1 + rng.uniform(-0.01, 0.01)))
+    s = support_resistance(make_series(closes, spread=0.3), CONFIG)
+    close = closes[-1]
+    for lv in [*s.support, *s.resistance, *([s.containing] if s.containing else [])]:
+        assert lv.lower <= lv.price <= lv.upper
+    assert all(lv.upper < close for lv in s.support)
+    assert all(lv.lower > close for lv in s.resistance)
+    assert s.containing is None or s.containing.lower <= close <= s.containing.upper
 
 
 def test_no_levels_in_a_steady_ramp():
@@ -239,10 +345,47 @@ def test_missing_volume_is_reported_and_not_used():
     assert {i.kind for i in a.indicators} <= {"sma", "ema", "rsi", "macd"}
 
 
-def test_available_volume_is_reported_but_no_volume_indicators_exist_yet():
-    a = analyze_series(make_series(wave(60), volume_available=True))
+def test_available_volume_is_analyzed():
+    series = make_series(wave(60), volume_available=True)
+    volumes = [100.0] * 59 + [250.0]
+    series.candles = [
+        c.model_copy(update={"volume": v}) for c, v in zip(series.candles, volumes, strict=True)
+    ]
+    a = analyze_series(series)
     assert a.volume_available is True
-    assert "no volume-based indicators are implemented" in a.volume_note
+    assert a.volume_note == "Per-candle volume from TestProvider (BTC)."
+    v = a.volume
+    assert v.available and v.unit == "BTC" and v.lookback == 20
+    assert v.last_volume == 250.0
+    assert v.average_volume == pytest.approx(100.0)
+    assert v.relative_volume == pytest.approx(2.5)
+    window = series.candles[-21:]
+    up = sum(c.volume for c in window if c.close > c.open)
+    down = sum(c.volume for c in window if c.close < c.open)
+    total = sum(c.volume for c in window)
+    assert v.up_volume_pct == pytest.approx(100 * up / total)
+    assert v.down_volume_pct == pytest.approx(100 * down / total)
+
+
+def test_volume_needs_enough_candles_and_nonzero_history():
+    short = analyze_series(make_series(wave(15), volume_available=True))
+    assert not short.volume.available
+    assert short.volume.unavailable_reason == "needs 21 candles, only 15 available"
+    assert "relative volume is unavailable" in short.volume_note
+
+    series = make_series(wave(30), volume_available=True)
+    series.candles = [c.model_copy(update={"volume": 0.0}) for c in series.candles]
+    idle = analyze_series(series)
+    assert not idle.volume.available
+    assert "no volume was traded" in idle.volume.unavailable_reason
+
+
+@pytest.mark.parametrize("volume", [float("inf"), float("nan"), None])
+def test_invalid_or_missing_volume_is_rejected(volume):
+    series = make_series(wave(30), volume_available=True)
+    series.candles[5] = series.candles[5].model_copy(update={"volume": volume})
+    with pytest.raises(InvalidCandleDataError, match="volume"):
+        analyze_series(series)
 
 
 # --- Invalid candles -----------------------------------------------------------------------------

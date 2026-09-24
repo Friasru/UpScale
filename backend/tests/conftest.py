@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import math
 import struct
 import zlib
 from collections.abc import Callable, Iterator, Sequence
@@ -16,6 +17,7 @@ from fastapi.testclient import TestClient
 from upscale.main import app
 from upscale.services import market_data_service, news_service, vision_service
 from upscale.services.coingecko import CoinGeckoProvider
+from upscale.services.kraken import KrakenProvider
 from upscale.services.news_sentiment_model import ArticleAssessment, ArticleInput
 from upscale.services.rss_news import DEFAULT_FEEDS, RssNewsProvider
 from upscale.services.vision import ChartReading, CheckedImage
@@ -135,6 +137,88 @@ def fake_coingecko() -> Iterator[FakeCoinGecko]:
     yield fake
     market_data_service.provider, market_data_service.candle_providers = original
     market_data_service.reset()
+
+
+# Open time (s) of the in-progress candle in every fake Kraken response: 2026-09-24T00:00Z,
+# a boundary of every Kraken interval UpScale uses (1m through 1d, all UTC-aligned).
+KRAKEN_NOW_S = 1_790_208_000
+KRAKEN_PAIRS = {"XBTUSD": "XXBTZUSD", "ETHUSD": "XETHZUSD", "SOLUSD": "SOLUSD"}
+KRAKEN_START_PRICES = {"XBTUSD": 64_000.0, "ETHUSD": 3_100.0, "SOLUSD": 150.0}
+
+
+def kraken_rows(
+    count: int, interval_s: int, start_price: float = 100.0, end_open_s: int = KRAKEN_NOW_S
+) -> list[list]:
+    """Kraken-style `[time, open, high, low, close, vwap, volume, trades]` rows, oldest first.
+
+    The last row opens at `end_open_s` and plays the in-progress candle. Prices oscillate
+    so indicators and levels exist; volumes vary and are real base-asset amounts.
+    """
+    rows: list[list] = []
+    previous = start_price
+    for i in range(count):
+        close = start_price * (1 + 0.05 * math.sin(2 * math.pi * i / 20))
+        open_ = previous
+        high, low = max(open_, close) * 1.001, min(open_, close) * 0.999
+        volume = 10.0 + (i % 7) * 1.5
+        rows.append(
+            [
+                end_open_s - (count - 1 - i) * interval_s,
+                f"{open_:.2f}",
+                f"{high:.2f}",
+                f"{low:.2f}",
+                f"{close:.2f}",
+                f"{(high + low) / 2:.2f}",
+                f"{volume:.8f}",
+                40 + i % 5,
+            ]
+        )
+        previous = close
+    return rows
+
+
+def kraken_body(rows: list[list], key: str = "XXBTZUSD") -> bytes:
+    return json.dumps(
+        {"error": [], "result": {key: rows, "last": rows[-1][0] if rows else 0}}
+    ).encode()
+
+
+def kraken_error(*errors: str) -> httpx2.Response:
+    return httpx2.Response(200, content=json.dumps({"error": list(errors)}).encode())
+
+
+class FakeKraken:
+    """Stands in for api.kraken.com/0/public/OHLC (720 rows per request, like Kraken)."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx2.Request] = []
+        self.handler: Callable[[httpx2.Request], httpx2.Response] = self.ohlc
+
+    def ohlc(self, request: httpx2.Request) -> httpx2.Response:
+        pair = request.url.params["pair"]
+        if pair not in KRAKEN_PAIRS:
+            return kraken_error("EQuery:Unknown asset pair")
+        interval_s = int(request.url.params["interval"]) * 60
+        rows = kraken_rows(720, interval_s, KRAKEN_START_PRICES[pair])
+        return httpx2.Response(200, content=kraken_body(rows, KRAKEN_PAIRS[pair]))
+
+    def transport(self) -> httpx2.MockTransport:
+        def handle(request: httpx2.Request) -> httpx2.Response:
+            self.requests.append(request)
+            return self.handler(request)
+
+        return httpx2.MockTransport(handle)
+
+
+@pytest.fixture
+def fake_kraken(fake_coingecko: FakeCoinGecko) -> Iterator[FakeKraken]:
+    """Make the app's shared service prefer a fake Kraken for candles, as in production."""
+    fake = FakeKraken()
+    coingecko = market_data_service.provider
+    assert isinstance(coingecko, CoinGeckoProvider)
+    market_data_service.candle_providers = [KrakenProvider(transport=fake.transport()), coingecko]
+    market_data_service.reset()
+    yield fake
 
 
 def chart_reading_data(**overrides: Any) -> dict[str, Any]:

@@ -6,7 +6,6 @@ from upscale.agents import (
     Agent,
     AgentContext,
     MockOpportunityAgent,
-    MockRiskAgent,
     default_agents,
 )
 from upscale.schemas import AgentResult
@@ -25,7 +24,13 @@ def test_default_agents_cover_every_role_once():
     )
 
 
-LIVE_AGENTS = {"vision", "market", "technical_analysis", "news_sentiment"}  # own test modules
+LIVE_AGENTS = {
+    "vision",
+    "market",
+    "technical_analysis",
+    "news_sentiment",
+    "risk",
+}  # own test modules
 MOCK_AGENTS = [a for a in default_agents() if a.name not in LIVE_AGENTS]
 
 
@@ -48,9 +53,3 @@ def test_opportunity_agent_gives_scenarios_not_recommendations():
         f"{s.name} {s.description} {' '.join(s.conditions)}" for s in result.scenarios
     ).lower()
     assert not any(word in text for word in BUY_SELL_WORDS)
-
-
-def test_risk_agent_flags_failed_agents():
-    failed = AgentResult(agent="market", status="error", mock=False, summary="x", error="boom")
-    result = run(MockRiskAgent(), AgentContext(query="", prior_results={"market": failed}))
-    assert any("market" in risk.description for risk in result.risks)

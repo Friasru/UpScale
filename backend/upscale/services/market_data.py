@@ -3,13 +3,14 @@
 Agents depend on `MarketDataService`. Providers are plain objects implementing
 `MarketDataProvider` (current prices) and/or `CandleProvider` (historical OHLCV); the
 service can combine several candle providers so each timeframe comes from one that
-actually offers it. Providers never synthesize candles they don't have.
+actually offers it, trying them in order of preference. Providers never synthesize,
+resample or relabel candles they don't have.
 """
 
 import asyncio
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal, Protocol, TypeVar, get_args, runtime_checkable
@@ -18,18 +19,22 @@ from pydantic import BaseModel, Field
 
 T = TypeVar("T")
 
-Timeframe = Literal["1m", "5m", "15m", "1h", "4h", "1d"]
+Timeframe = Literal["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 TIMEFRAMES: tuple[Timeframe, ...] = get_args(Timeframe)
 TIMEFRAME_SECONDS: dict[Timeframe, int] = {
     "1m": 60,
     "5m": 5 * 60,
     "15m": 15 * 60,
+    "30m": 30 * 60,
     "1h": 60 * 60,
     "4h": 4 * 60 * 60,
     "1d": 24 * 60 * 60,
 }
 DEFAULT_CANDLES = 100
 MAX_CANDLES = 500  # hard cap per request, whatever the provider could return
+# Candles are cached for this fraction of their timeframe (capped by the service), so a
+# new 1m candle is picked up within ~15 s and a new 5m candle within ~75 s.
+CANDLE_CACHE_FRACTION = 0.25
 
 
 class MarketSnapshot(BaseModel):
@@ -67,11 +72,14 @@ class CandleSeries(BaseModel):
 
     symbol: str
     provider: str
-    provider_id: str
+    provider_id: str  # the provider's own id for the market, e.g. "bitcoin" or "XBTUSD"
+    pair: str | None = None  # traded pair when the provider quotes one, e.g. "BTC/USD"
     timeframe: Timeframe
     candles: list[Candle]
     volume_available: bool
     fetched_at: datetime
+    # Why preferred providers were skipped before this one served the candles, if any.
+    fallback_notes: list[str] = Field(default_factory=list)
 
     @property
     def interval(self) -> timedelta:
@@ -126,7 +134,7 @@ class CandleProvider(Protocol):
 
 
 class RateLimiter:
-    """Sliding-window limit on outgoing provider requests (shared across all assets)."""
+    """Sliding-window limit on outgoing requests to one provider (shared across assets)."""
 
     def __init__(self, max_calls: int, period: float, clock: Callable[[], float] = time.monotonic):
         self.max_calls = max_calls
@@ -154,7 +162,10 @@ class _CandleCacheEntry:
 class MarketDataService:
     """Caches results, rate-limits provider calls, and de-duplicates concurrent requests.
 
-    Only real provider data is ever returned; on failure a `MarketDataError` is raised.
+    Candle providers are listed in order of preference: a timeframe is served by the first
+    provider that offers it, and a later provider offering the same timeframe is only tried
+    when an earlier one fails. Only real provider data is ever returned; if every provider
+    fails a `MarketDataError` is raised.
     """
 
     def __init__(
@@ -165,6 +176,7 @@ class MarketDataService:
         max_candle_cache_ttl: float = 300.0,
         not_found_ttl: float = 600.0,
         max_calls_per_minute: int = 20,
+        provider_calls_per_minute: Mapping[str, int] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ):
         self.provider = provider
@@ -176,8 +188,13 @@ class MarketDataService:
         self.max_candle_cache_ttl = max_candle_cache_ttl
         self.not_found_ttl = not_found_ttl
         self._clock = clock
-        self._limiter = RateLimiter(max_calls_per_minute, 60.0, clock)
+        # Each provider has its own request budget; unlisted providers get the default.
+        self.max_calls_per_minute = max_calls_per_minute
+        self.provider_calls_per_minute = dict(provider_calls_per_minute or {})
+        self._limiters: dict[str, RateLimiter] = {}
         self._snapshots: dict[str, tuple[float, MarketSnapshot]] = {}
+        # (provider, symbol, timeframe) -> entry; the entry records how many candles were
+        # fetched, so a request for up to that many is served from it.
         self._candles: dict[tuple[str, str, Timeframe], _CandleCacheEntry] = {}
         self._not_found: dict[tuple[str, str], float] = {}  # (provider, symbol) -> expiry
         self._locks: dict[object, asyncio.Lock] = {}
@@ -197,7 +214,16 @@ class MarketDataService:
         self._candles.clear()
         self._not_found.clear()
         self._locks.clear()
-        self._limiter = RateLimiter(self._limiter.max_calls, self._limiter.period, self._clock)
+        self._limiters.clear()
+
+    def candle_cache_ttl(self, timeframe: Timeframe) -> float:
+        return min(self.max_candle_cache_ttl, TIMEFRAME_SECONDS[timeframe] * CANDLE_CACHE_FRACTION)
+
+    def _limiter(self, provider_name: str) -> RateLimiter:
+        if provider_name not in self._limiters:
+            calls = self.provider_calls_per_minute.get(provider_name, self.max_calls_per_minute)
+            self._limiters[provider_name] = RateLimiter(calls, 60.0, self._clock)
+        return self._limiters[provider_name]
 
     # --- Current price -----------------------------------------------------------------
 
@@ -227,7 +253,10 @@ class MarketDataService:
     ) -> CandleSeries:
         """The `limit` most recent completed candles, oldest first.
 
-        Raises `InsufficientDataError` if fewer than `min_candles` (default: `limit`) exist.
+        Providers offering `timeframe` are tried in order of preference; a provider that
+        fails (outage, rate limit, unknown asset, bad data, too little history) is skipped
+        and the reason recorded in `fallback_notes`. Raises `InsufficientDataError` if no
+        provider has at least `min_candles` (default: `limit`) candles.
         """
         symbol = symbol.upper()
         tf = self._validate_timeframe(timeframe)
@@ -237,9 +266,25 @@ class MarketDataService:
         if not 1 <= required <= limit:
             raise InvalidRequestError("min_candles must be between 1 and limit")
 
-        provider = next(p for p in self.candle_providers if tf in p.supported_timeframes)
+        providers = [p for p in self.candle_providers if tf in p.supported_timeframes]
+        failures: list[tuple[str, MarketDataError]] = []
+        for provider in providers:
+            try:
+                series = await self._provider_candles(provider, symbol, tf, limit, required)
+            except (MarketDataUnavailableError, AssetNotFoundError, InsufficientDataError) as exc:
+                failures.append((provider.name, exc))
+                continue
+            notes = [f"{name} {tf} candles were unavailable ({exc})" for name, exc in failures]
+            return series.model_copy(
+                update={"candles": series.candles[-limit:], "fallback_notes": notes}
+            )
+        raise _combined_failure(failures)
+
+    async def _provider_candles(
+        self, provider: CandleProvider, symbol: str, tf: Timeframe, limit: int, required: int
+    ) -> CandleSeries:
         key = (provider.name, symbol, tf)
-        ttl = min(self.max_candle_cache_ttl, TIMEFRAME_SECONDS[tf] / 2)
+        ttl = self.candle_cache_ttl(tf)
 
         def cached() -> CandleSeries | None:
             entry = self._candles.get(key)
@@ -258,7 +303,7 @@ class MarketDataService:
                 f"{provider.name} has only {len(series.candles)} {tf} candle(s) for {symbol}; "
                 f"{required} required"
             )
-        return series.model_copy(update={"candles": series.candles[-limit:]})
+        return series
 
     def _validate_timeframe(self, timeframe: str) -> Timeframe:
         supported = self.supported_timeframes
@@ -294,9 +339,9 @@ class MarketDataService:
             self._raise_if_known_unknown(provider_name, symbol)
             if (hit := cached()) is not None:
                 return hit
-            if not self._limiter.try_acquire():
+            if not self._limiter(provider_name).try_acquire():
                 raise MarketDataUnavailableError(
-                    "UpScale's market data request limit was reached; try again in a minute"
+                    f"UpScale's {provider_name} request limit was reached; try again in a minute"
                 )
             try:
                 return await fetch()
@@ -307,3 +352,16 @@ class MarketDataService:
     def _raise_if_known_unknown(self, provider_name: str, symbol: str) -> None:
         if self._not_found.get((provider_name, symbol), 0.0) > self._clock():
             raise AssetNotFoundError(f"{symbol} is not recognized by {provider_name}")
+
+
+def _combined_failure(failures: list[tuple[str, MarketDataError]]) -> MarketDataError:
+    """One error for a request every candidate provider failed, of the most telling type."""
+    if len(failures) == 1:
+        return failures[0][1]
+    message = "; ".join(f"{name}: {exc}" for name, exc in failures)
+    kinds = {type(exc) for _, exc in failures}
+    if kinds == {AssetNotFoundError}:
+        return AssetNotFoundError(message)
+    if kinds <= {AssetNotFoundError, InsufficientDataError}:
+        return InsufficientDataError(message)
+    return MarketDataUnavailableError(message)

@@ -8,7 +8,6 @@ import {
   toDataUrl,
   toSupportedImage,
 } from '../lib/images'
-import { describeDataTransfer, inspectClipboard, pasteLog } from '../lib/pasteDebug'
 import type { ImageAttachment } from '../types/chat'
 
 interface ComposerProps {
@@ -64,7 +63,6 @@ export function Composer({ onSend, disabled }: ComposerProps) {
       return [...prev, ...unique].slice(0, MAX_ATTACHMENTS)
     })
     setError(errors.length ? errors.join(' ') : null)
-    pasteLog('addFiles done', { added: added.length, errors })
   }
 
   function handleFiles(event: ChangeEvent<HTMLInputElement>) {
@@ -73,25 +71,18 @@ export function Composer({ onSend, disabled }: ComposerProps) {
     void addFiles(files)
   }
 
-  async function pasteFromClipboardApi(reason: string) {
-    pasteLog(`falling back to navigator.clipboard.read() (${reason})`)
+  async function pasteFromClipboardApi() {
     try {
       const files = await readClipboardImages()
-      pasteLog('clipboard.read() images', files.map((f) => ({ name: f.name, type: f.type, size: f.size })))
       if (files.length > 0) await addFiles(files)
-    } catch (err) {
-      pasteLog('clipboard.read() failed', String(err))
+    } catch {
+      // Clipboard access denied or unavailable: nothing to attach.
     }
   }
 
   function handlePaste(event: ClipboardEvent) {
     pasteSeen.current = true
     const target = event.target as HTMLElement | null
-    pasteLog('paste event', {
-      target: target?.tagName,
-      inComposer: !!target && !!formRef.current?.contains(target),
-      ...describeDataTransfer(event.clipboardData),
-    })
     // Leave pastes into other text fields alone.
     const editable = target?.closest('input, textarea, [contenteditable="true"]')
     if (editable && !formRef.current?.contains(editable)) return
@@ -99,30 +90,22 @@ export function Composer({ onSend, disabled }: ComposerProps) {
     if (!data) return
 
     const files = imagesFromClipboard(data)
-    pasteLog('images from paste event', files.map((f) => ({ name: f.name, type: f.type, size: f.size })))
     if (files.length > 0) {
       event.preventDefault()
       void addFiles(files)
     } else if (data.types.length === 0) {
       // WebKitGTK can deliver an empty clipboardData for image-only clipboards.
-      void pasteFromClipboardApi('paste event had no data')
+      void pasteFromClipboardApi()
     }
     // Otherwise it's text: keep the default paste.
   }
 
   function handleGlobalKeyDown(event: globalThis.KeyboardEvent) {
-    if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'v') return
-    if (event.shiftKey) {
-      // TEMPORARY: Ctrl+Shift+V dumps the async clipboard contents instead of pasting.
-      event.preventDefault()
-      pasteLog('Ctrl+Shift+V keydown: running clipboard diagnostic')
-      void inspectClipboard()
-      return
-    }
+    if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.key.toLowerCase() !== 'v') return
     pasteSeen.current = false
-    pasteLog('Ctrl+V keydown', { target: (event.target as HTMLElement | null)?.tagName })
+    // WebKitGTK sometimes fires no paste event for image-only clipboards.
     setTimeout(() => {
-      if (!pasteSeen.current) void pasteFromClipboardApi('no paste event after Ctrl+V')
+      if (!pasteSeen.current) void pasteFromClipboardApi()
     }, 100)
   }
 
@@ -139,7 +122,6 @@ export function Composer({ onSend, disabled }: ComposerProps) {
     const onKeyDown = (e: globalThis.KeyboardEvent) => handlers.current.handleGlobalKeyDown(e)
     document.addEventListener('paste', onPaste)
     document.addEventListener('keydown', onKeyDown)
-    pasteLog('listeners attached', { userAgent: navigator.userAgent })
     return () => {
       document.removeEventListener('paste', onPaste)
       document.removeEventListener('keydown', onKeyDown)

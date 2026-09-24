@@ -207,6 +207,91 @@ def chart_reading_data(**overrides: Any) -> dict[str, Any]:
     return data | overrides
 
 
+def chart_transcript_data(**overrides: Any) -> dict[str, Any]:
+    """The flat transport form of `chart_reading_data()`, as Claude returns it."""
+    data: dict[str, Any] = {
+        "is_price_chart": True,
+        "chart_type": "candlestick",
+        "symbol": "BTC",
+        "pair": "BTC/USDT",
+        "exchange": "Binance",
+        "asset_inferred": False,
+        "asset_evidence": "Symbol header top-left",
+        "timeframe": "4h",
+        "timeframe_inferred": False,
+        "timeframe_evidence": "Interval button in toolbar",
+        "price": 64210.5,
+        "price_inferred": False,
+        "price_evidence": "Last price tag",
+        "indicators": [
+            {
+                "name": "RSI",
+                "settings": "14",
+                "values": [{"label": "", "value": 58.2}],
+                "inferred": False,
+                "evidence": "Lower pane legend",
+            },
+            {
+                "name": "EMA",
+                "settings": "",
+                "values": [],
+                "inferred": True,
+                "evidence": "A smooth line that might be a moving average",
+            },
+        ],
+        "levels": [
+            {
+                "kind": "support",
+                "price": 62000.0,
+                "label": "",
+                "source": "drawn_line",
+                "inferred": False,
+                "evidence": "Green horizontal line",
+            },
+            {
+                "kind": "support",
+                "price": 0,
+                "label": "support?",
+                "source": "price_structure",
+                "inferred": True,
+                "evidence": "Cluster of lows",
+            },
+            {
+                "kind": "resistance",
+                "price": 66000.0,
+                "label": "66k",
+                "source": "price_label",
+                "inferred": False,
+                "evidence": "Red line labeled 66k",
+            },
+            {
+                "kind": "user_drawn",
+                "price": 63000.0,
+                "label": "entry zone",
+                "source": "drawn_line",
+                "inferred": False,
+                "evidence": "Dashed line",
+            },
+        ],
+        "lines": [
+            {
+                "kind": "channel",
+                "direction": "rising",
+                "description": "Parallel rising channel drawn from the recent lows",
+                "inferred": False,
+                "evidence": "Two parallel drawn lines",
+            }
+        ],
+        "patterns": [
+            {"name": "ascending triangle", "clear": True, "evidence": "Flat top, rising lows"},
+            {"name": "double top", "clear": False, "evidence": "Two similar highs"},
+        ],
+        "observations": ["Last three candles have long upper wicks."],
+        "uncertainties": ["Volume pane is cropped."],
+    }
+    return data | overrides
+
+
 class FakeVisionModel:
     """Stands in for the Claude vision call. Set `reading`, `error` or `delay` per test."""
 

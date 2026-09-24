@@ -1,7 +1,7 @@
 """Chart screenshot reading: structured schema, image checks, model interface, guardrails.
 
 `VisionService` validates the image, asks a `VisionModel` to transcribe what the chart
-shows into `ChartReading`, then enforces the "never invent" rules deterministically:
+shows into `ChartReading` (Claude fills the flat `ChartTranscript`, which code expands), then enforces the "never invent" rules deterministically:
 only visible indicators are kept, unclear patterns are demoted to uncertainties,
 timeframes are normalized by code (not by the model), and unknowns stay unknown.
 The model sits behind the `VisionModel` protocol; `ClaudeVisionModel` is the default.
@@ -129,6 +129,173 @@ class ChartVision(BaseModel):
     # Items the model returned that UpScale dropped or demoted, with the reason.
     discarded: list[str]
     analyzed_at: datetime
+
+
+# --- Transport schema: what the model is constrained to emit ------------------------------------
+#
+# Structured outputs compile the JSON schema into a grammar, and nullable fields (`anyOf` with
+# null), repeated enums and objects nested inside arrays make that grammar grow quickly; the
+# richer `ChartReading` schema was rejected as too large. So the model fills this deliberately
+# flat shape instead: no unions, no nulls ("" or 0 mean "not readable"), one boolean in place of
+# each visible/inferred basis, and a single list for all horizontal levels. `transcript_to_reading`
+# maps it onto `ChartReading`, and `sanitize` applies UpScale's rules as before.
+
+
+class TranscriptValue(BaseModel):
+    label: str = Field(description='Output name as displayed, e.g. "signal"; "" if unlabeled.')
+    value: float
+
+
+class TranscriptIndicator(BaseModel):
+    name: str = Field(description="Indicator name as displayed, e.g. RSI, EMA, MACD.")
+    settings: str = Field(description='Settings as displayed, e.g. "14"; "" if not shown.')
+    values: list[TranscriptValue] = Field(description="Only numbers printed on the chart.")
+    inferred: bool
+    evidence: str
+
+
+class TranscriptLevel(BaseModel):
+    kind: Literal["support", "resistance", "user_drawn"]
+    price: float = Field(description="Price read from a label or the price scale; 0 if unreadable.")
+    label: str
+    source: Literal["drawn_line", "price_label", "price_structure"]
+    inferred: bool
+    evidence: str
+
+
+class TranscriptLine(BaseModel):
+    kind: Literal["trendline", "channel"]
+    direction: Literal["rising", "falling", "horizontal", "unclear"]
+    description: str
+    inferred: bool
+    evidence: str
+
+
+class TranscriptPattern(BaseModel):
+    name: str
+    clear: bool = Field(description="True only if the visual evidence is unambiguous.")
+    evidence: str
+
+
+class ChartTranscript(BaseModel):
+    """Flat model output for one screenshot; converted into `ChartReading` by code."""
+
+    is_price_chart: bool
+    chart_type: ChartType
+    symbol: str = Field(description='Base ticker as displayed, e.g. "BTC"; "" if not shown.')
+    pair: str = Field(description='Pair exactly as displayed, e.g. "BTC/USDT"; "" if not shown.')
+    exchange: str = Field(description='Exchange or data source if displayed; "" otherwise.')
+    asset_inferred: bool
+    asset_evidence: str
+    timeframe: str = Field(description='Interval exactly as displayed, e.g. "4h", "240"; "".')
+    timeframe_inferred: bool
+    timeframe_evidence: str
+    price: float = Field(description="Current/last price printed on the chart; 0 if unreadable.")
+    price_inferred: bool
+    price_evidence: str
+    indicators: list[TranscriptIndicator]
+    levels: list[TranscriptLevel]
+    lines: list[TranscriptLine]
+    patterns: list[TranscriptPattern]
+    observations: list[str]
+    uncertainties: list[str]
+
+
+def _text(value: str) -> str | None:
+    return value.strip() or None
+
+
+def _price(value: float) -> float | None:
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _basis(present: bool, inferred: bool) -> Literal["visible", "inferred", "unknown"]:
+    if not present:
+        return "unknown"
+    return "inferred" if inferred else "visible"
+
+
+def transcript_to_reading(t: ChartTranscript) -> ChartReading:
+    """Expand the flat transport output into `ChartReading` (before `sanitize`).
+
+    Empty strings and zero prices become None/"unknown", so nothing unreadable looks read.
+    """
+    symbol, pair, exchange = _text(t.symbol), _text(t.pair), _text(t.exchange)
+    timeframe = _text(t.timeframe)
+    price = _price(t.price)
+
+    def level(lv: TranscriptLevel) -> LevelReading:
+        return LevelReading(
+            price=_price(lv.price),
+            label=_text(lv.label),
+            source=lv.source,
+            basis="inferred" if lv.inferred else "visible",
+            evidence=lv.evidence,
+        )
+
+    return ChartReading(
+        is_price_chart=t.is_price_chart,
+        asset=AssetReading(
+            symbol=symbol,
+            pair=pair,
+            exchange=exchange,
+            basis=_basis(bool(symbol or pair), t.asset_inferred),
+            evidence=_text(t.asset_evidence),
+        ),
+        timeframe=TimeframeReading(
+            label=timeframe,
+            basis=_basis(timeframe is not None, t.timeframe_inferred),
+            evidence=_text(t.timeframe_evidence),
+        ),
+        displayed_price=PriceReading(
+            value=price,
+            basis=_basis(price is not None, t.price_inferred),
+            evidence=_text(t.price_evidence),
+        ),
+        chart_type=t.chart_type,
+        indicators=[
+            IndicatorReading(
+                name=ind.name,
+                settings=_text(ind.settings),
+                values=[IndicatorValue(label=_text(v.label), value=v.value) for v in ind.values],
+                basis="inferred" if ind.inferred else "visible",
+                evidence=ind.evidence,
+            )
+            for ind in t.indicators
+        ],
+        support_levels=[level(lv) for lv in t.levels if lv.kind == "support"],
+        resistance_levels=[level(lv) for lv in t.levels if lv.kind == "resistance"],
+        trend_lines=[
+            LineReading(
+                kind=ln.kind,
+                direction=ln.direction,
+                description=ln.description,
+                basis="inferred" if ln.inferred else "visible",
+                evidence=ln.evidence,
+            )
+            for ln in t.lines
+        ],
+        drawn_levels=[
+            DrawnLevel(price=_price(lv.price), label=_text(lv.label), evidence=lv.evidence)
+            for lv in t.levels
+            if lv.kind == "user_drawn" and not lv.inferred
+        ],
+        patterns=[
+            PatternReading(
+                name=p.name, clarity="clear" if p.clear else "tentative", evidence=p.evidence
+            )
+            for p in t.patterns
+        ],
+        observations=t.observations,
+        # A "user-drawn" level the model only inferred is not a drawn line UpScale can rely on.
+        uncertainties=t.uncertainties
+        + [
+            f"Possible user-drawn level{' ' + repr(lv.label) if lv.label else ''}, "
+            f"but not clearly drawn ({lv.evidence})."
+            for lv in t.levels
+            if lv.kind == "user_drawn" and lv.inferred
+        ],
+    )
 
 
 # --- Errors ------------------------------------------------------------------------------------
@@ -259,19 +426,20 @@ Your output is treated as visual evidence, never as live market data.
 
 Rules:
 - Report only what is shown in the image. Never fill in values from memory or estimation.
-- If the asset, pair or timeframe is not readable, set it to null with basis "unknown".
-- Use basis "visible" for things explicitly printed or drawn (labels, legends, price
-  scales, drawn lines). Use "inferred" only for things you deduce from what is drawn,
-  such as support implied by repeated lows; explain the deduction in `evidence`.
+- Use "" for any text you cannot read and 0 for any price you cannot read.
+- Set an `inferred` flag to false only for things explicitly printed or drawn (labels,
+  legends, price scales, drawn lines). Set it to true for things you deduce from what is
+  drawn, such as support implied by repeated lows, and explain the deduction in `evidence`.
 - List an indicator only if it is actually on the chart (legend, pane or plotted line).
   Include a value only if its number is printed on the chart; otherwise leave `values`
   empty. Copy numbers exactly as displayed, without thousands separators.
-- `timeframe.label` is the interval exactly as displayed (e.g. "4h", "240", "1D", "15").
-- Support/resistance levels need a price you can read from a label or the price scale;
-  set price to null if you cannot read one.
-- `drawn_levels` are horizontal lines the user drew themselves.
-- Mark a pattern "clear" only if the visual evidence is unambiguous; otherwise
-  "tentative". Do not list patterns you are merely speculating about.
+- `timeframe` is the interval exactly as displayed (e.g. "4h", "240", "1D", "15").
+- `levels` holds horizontal levels: kind "support" or "resistance" for levels on the chart,
+  "user_drawn" for horizontal lines the user drew themselves. Use price 0 if you cannot
+  read the level's price from a label or the price scale.
+- `lines` holds trendlines and channels.
+- Set a pattern's `clear` to true only if the visual evidence is unambiguous. Do not list
+  patterns you are merely speculating about.
 - Put anything relevant that you could not determine in `uncertainties`.
 - If the image is not a price chart, set is_price_chart to false and leave the lists empty.
 - Do not give trading advice, recommendations, targets or probabilities.
@@ -318,7 +486,7 @@ class ClaudeVisionModel:
         self._timeout = timeout
         self._max_retries = max_retries
         self._client = client
-        self._schema = strict_json_schema(ChartReading)
+        self._schema = strict_json_schema(ChartTranscript)
 
     def _get_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
@@ -398,8 +566,9 @@ class ClaudeVisionModel:
 
 
 def parse_reading(text: str) -> ChartReading:
+    """Validate the model's JSON against `ChartTranscript` and expand it to `ChartReading`."""
     try:
-        return ChartReading.model_validate(json.loads(text))
+        return transcript_to_reading(ChartTranscript.model_validate(json.loads(text)))
     except (json.JSONDecodeError, ValidationError) as exc:
         raise MalformedVisionOutputError(
             "the vision model's output did not match the expected chart schema"

@@ -10,15 +10,18 @@ from anthropic import DefaultAsyncHttpxClient
 
 from upscale.services.vision import (
     ChartReading,
+    ChartTranscript,
     CheckedImage,
     ClaudeVisionModel,
     MalformedVisionOutputError,
     VisionRefusedError,
     VisionUnavailableError,
+    parse_reading,
+    sanitize,
     strict_json_schema,
 )
 
-from .conftest import CHART_PNG, chart_reading_data
+from .conftest import CHART_PNG, chart_reading_data, chart_transcript_data
 
 IMAGE = CheckedImage(
     name="chart.png",
@@ -56,7 +59,7 @@ class FakeAnthropicAPI:
     def __init__(self) -> None:
         self.requests: list[httpx2.Request] = []
         self.response = lambda request: httpx2.Response(
-            200, json=message(json.dumps(chart_reading_data()))
+            200, json=message(json.dumps(chart_transcript_data()))
         )
 
     def model(self) -> ClaudeVisionModel:
@@ -107,20 +110,23 @@ def test_request_shape(api):
     assert "Never fill in values" in body["system"]
 
 
+def _nodes(node):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _nodes(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _nodes(item)
+
+
+def _objects(schema):
+    return [n for n in _nodes(schema) if n.get("type") == "object" and "properties" in n]
+
+
 def test_output_schema_is_strict():
-    schema = strict_json_schema(ChartReading)
-
-    def objects(node):
-        if isinstance(node, dict):
-            if node.get("type") == "object" and "properties" in node:
-                yield node
-            for value in node.values():
-                yield from objects(value)
-        elif isinstance(node, list):
-            for item in node:
-                yield from objects(item)
-
-    found = list(objects(schema))
+    schema = strict_json_schema(ChartTranscript)
+    found = _objects(schema)
     assert len(found) > 5
     for obj in found:
         assert obj["additionalProperties"] is False
@@ -129,11 +135,138 @@ def test_output_schema_is_strict():
     assert '"default"' not in text and '"minimum"' not in text
 
 
+def test_request_sends_the_transport_schema(api):
+    read(api)
+    sent = json.loads(api.requests[0].content)["output_config"]["format"]["schema"]
+    assert sent == strict_json_schema(ChartTranscript)
+
+
+def test_transport_schema_stays_small():
+    """Regression: the richer ChartReading schema compiled to a grammar Anthropic rejected
+    ("The compiled grammar is too large"). Unions (nullable fields), enums, objects and
+    nesting are what grow the grammar, so each is capped well below the old schema's
+    14 unions / 11 enums / 10 objects / 47 properties."""
+    schema = strict_json_schema(ChartTranscript)
+    nodes = list(_nodes(schema))
+    unions = [n for n in nodes if {"anyOf", "oneOf", "allOf"} & n.keys()]
+    type_lists = [n for n in nodes if isinstance(n.get("type"), list)]
+    nulls = [n for n in nodes if n.get("type") == "null"]
+    enums = [n for n in nodes if "enum" in n or "const" in n]
+    objects = _objects(schema)
+    properties = sum(len(o["properties"]) for o in objects)
+
+    assert unions == [] and type_lists == [] and nulls == []
+    assert len(enums) <= 5
+    assert sum(len(e.get("enum", [None])) for e in enums) <= 20
+    assert len(objects) <= 6
+    assert properties <= 42
+    assert len(json.dumps(schema, separators=(",", ":"))) <= 4000
+
+    defs = schema.get("$defs", {})
+
+    def depth(node, seen=()):
+        """Nesting of objects, following $refs (the schema must not be recursive)."""
+        if isinstance(node, dict):
+            if (ref := node.get("$ref")) is not None:
+                name = ref.rsplit("/", 1)[-1]
+                assert name not in seen, "recursive schema"
+                return depth(defs[name], (*seen, name))
+            own = 1 if node.get("type") == "object" else 0
+            children = [v for k, v in node.items() if k != "$defs"]
+            return own + max((depth(c, seen) for c in children), default=0)
+        if isinstance(node, list):
+            return max((depth(c, seen) for c in node), default=0)
+        return 0
+
+    assert depth(schema) <= 3  # root -> indicator -> printed value
+
+
 def test_model_name_is_configurable(api):
     model = api.model()
     model.name = "claude-sonnet-5"
     asyncio.run(model.read_chart(IMAGE))
     assert json.loads(api.requests[0].content)["model"] == "claude-sonnet-5"
+
+
+# --- Transport -> ChartReading --------------------------------------------------------------------
+
+
+def test_transcript_expands_to_the_same_reading_as_before():
+    """The fixture transcript maps onto the richer reading the rest of UpScale consumes."""
+    reading = parse_reading(json.dumps(chart_transcript_data()))
+    assert reading == ChartReading.model_validate(chart_reading_data())
+
+
+def test_blank_transcript_fields_become_unknown():
+    reading = parse_reading(
+        json.dumps(
+            chart_transcript_data(
+                symbol=" ",
+                pair="",
+                exchange="",
+                asset_inferred=True,
+                timeframe="",
+                timeframe_inferred=False,
+                price=0,
+                price_inferred=False,
+            )
+        )
+    )
+    assert (reading.asset.symbol, reading.asset.pair) == (None, None)
+    assert reading.asset.basis == "unknown"
+    assert (reading.timeframe.label, reading.timeframe.basis) == (None, "unknown")
+    assert (reading.displayed_price.value, reading.displayed_price.basis) == (None, "unknown")
+
+
+def test_inferred_flags_stay_inferred():
+    reading = parse_reading(
+        json.dumps(
+            chart_transcript_data(asset_inferred=True, timeframe_inferred=True, price_inferred=True)
+        )
+    )
+    assert reading.asset.basis == reading.timeframe.basis == reading.displayed_price.basis
+    assert reading.asset.basis == "inferred"
+    cleaned, discarded = sanitize(reading)
+    assert [i.name for i in cleaned.indicators] == ["RSI"]
+    assert any("EMA" in d for d in discarded)
+
+
+def test_negative_prices_are_unreadable():
+    level = {
+        "kind": "resistance",
+        "price": -5,
+        "label": "",
+        "source": "price_label",
+        "inferred": False,
+        "evidence": "scale",
+    }
+    reading = parse_reading(json.dumps(chart_transcript_data(price=-1, levels=[level])))
+    assert reading.displayed_price.value is None
+    cleaned, discarded = sanitize(reading)
+    assert cleaned.resistance_levels == []
+    assert "Dropped a resistance level without a readable price." in discarded
+
+
+def test_inferred_user_drawn_level_is_an_uncertainty():
+    level = {
+        "kind": "user_drawn",
+        "price": 61000,
+        "label": "maybe",
+        "source": "drawn_line",
+        "inferred": True,
+        "evidence": "faint line",
+    }
+    reading = parse_reading(json.dumps(chart_transcript_data(levels=[level])))
+    assert reading.drawn_levels == []
+    assert any("Possible user-drawn level 'maybe'" in u for u in reading.uncertainties)
+
+
+def test_non_chart_transcript_yields_no_chart_data():
+    reading = parse_reading(json.dumps(chart_transcript_data(is_price_chart=False)))
+    cleaned, discarded = sanitize(reading)
+    assert cleaned.asset.symbol is None and cleaned.indicators == [] and cleaned.patterns == []
+    assert cleaned.support_levels == cleaned.resistance_levels == cleaned.drawn_levels == []
+    assert "does not look like a price chart" in discarded[0]
 
 
 # --- Malformed output ------------------------------------------------------------------------------
@@ -144,11 +277,13 @@ def test_model_name_is_configurable(api):
     [
         "I think this is a Bitcoin chart.",  # not JSON
         '{"is_price_chart": true}',  # missing fields
-        json.dumps(chart_reading_data(chart_type="hologram")),  # invalid enum
-        json.dumps(chart_reading_data(indicators=[{"name": "RSI"}])),  # incomplete nested item
+        json.dumps(chart_transcript_data(chart_type="hologram")),  # invalid enum
+        json.dumps(chart_transcript_data(indicators=[{"name": "RSI"}])),  # incomplete nested item
+        json.dumps(chart_transcript_data(price=None)),  # null where the schema has none
+        json.dumps(chart_reading_data()),  # the old nested shape is no longer accepted
         "[]",
     ],
-    ids=["prose", "missing-fields", "bad-enum", "bad-nested", "array"],
+    ids=["prose", "missing-fields", "bad-enum", "bad-nested", "null", "old-shape", "array"],
 )
 def test_malformed_output(api, text):
     api.response = lambda r: httpx2.Response(200, json=message(text))

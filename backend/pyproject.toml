@@ -1,0 +1,42 @@
+[project]
+name = "upscale-backend"
+version = "0.1.0"
+description = "UpScale local API: chat endpoint and the agent orchestrator."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.141,<1",
+    "uvicorn>=0.53,<1",
+    "python-dotenv>=1.0,<2",
+    "httpx2>=2.13,<3",
+    "anthropic>=1.8,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["upscale*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]  # long lines are handled by `ruff format`; long strings are allowed
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["upscale"]
+strict = true

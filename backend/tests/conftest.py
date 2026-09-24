@@ -3,16 +3,21 @@ import base64
 import json
 import struct
 import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
+from xml.sax.saxutils import escape
 
 import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
 from upscale.main import app
-from upscale.services import market_data_service, vision_service
+from upscale.services import market_data_service, news_service, vision_service
 from upscale.services.coingecko import CoinGeckoProvider
+from upscale.services.news_sentiment_model import ArticleAssessment, ArticleInput
+from upscale.services.rss_news import DEFAULT_FEEDS, RssNewsProvider
 from upscale.services.vision import ChartReading, CheckedImage
 
 
@@ -332,3 +337,227 @@ def client() -> TestClient:
 @pytest.fixture
 def png_attachment() -> dict[str, str]:
     return {"name": "chart.png", "media_type": "image/png", "data": CHART_PNG}
+
+
+# --- News -------------------------------------------------------------------------------------
+
+
+def news_item(
+    title: str | None,
+    link: str | None,
+    hours_ago: float | None,
+    description: str | None = None,
+    categories: Sequence[str] = (),
+    pub_date: str | None = None,
+) -> dict[str, Any]:
+    """One RSS item. `pub_date` overrides the date computed from `hours_ago`."""
+    if pub_date is None and hours_ago is not None:
+        pub_date = format_datetime(datetime.now(UTC) - timedelta(hours=hours_ago))
+    return {
+        "title": title,
+        "link": link,
+        "pubDate": pub_date,
+        "description": description,
+        "categories": list(categories),
+    }
+
+
+def rss_feed(items: Sequence[dict[str, Any]]) -> bytes:
+    parts = ['<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>t</title>']
+    for item in items:
+        parts.append("<item>")
+        for tag in ("title", "link", "pubDate", "description"):
+            if item.get(tag) is not None:
+                parts.append(f"<{tag}>{escape(item[tag])}</{tag}>")
+        parts += [f"<category>{escape(c)}</category>" for c in item["categories"]]
+        parts.append("</item>")
+    parts.append("</channel></rss>")
+    return "".join(parts).encode()
+
+
+FEED_URLS = {feed.name: feed.url for feed in DEFAULT_FEEDS}
+
+
+def default_news() -> dict[str, list[dict[str, Any]]]:
+    """A realistic snapshot of the default feeds, with times relative to now."""
+    return {
+        "CoinDesk": [
+            news_item(
+                "Bitcoin ETF inflows hit $1B as institutions add exposure",
+                "https://www.coindesk.com/markets/2026/09/24/bitcoin-etf-inflows-hit-1b",
+                3,
+                "Spot bitcoin ETFs recorded their largest daily inflow in months.",
+                ["Markets", "Bitcoin"],
+            ),
+            news_item(
+                "Ethereum developers set date for next network upgrade",
+                "https://www.coindesk.com/tech/2026/09/24/ethereum-upgrade-date",
+                5,
+                "Core developers agreed on a mainnet activation date.",
+                ["Tech", "Ethereum"],
+            ),
+            news_item(
+                "SEC delays decision on crypto custody rules",
+                "https://www.coindesk.com/policy/2026/09/24/sec-delays-custody-rules",
+                10,
+                "The regulator pushed back its timeline by 45 days.",
+                ["Policy"],
+            ),
+            news_item(
+                "Crypto market liquidations top $500M in 24 hours",
+                "https://www.coindesk.com/markets/2026/09/24/liquidations-500m",
+                4,
+                "Leveraged positions were wiped out across major exchanges.",
+                ["Markets"],
+            ),
+            news_item(
+                "Bitcoin hits record high",
+                "https://www.coindesk.com/markets/2026/09/14/bitcoin-record-high",
+                24 * 10,
+                "An old story that should be ignored.",
+                ["Bitcoin"],
+            ),
+        ],
+        "Decrypt": [
+            news_item(
+                "Bitcoin ETF inflows hit $1B as institutions add exposure",
+                "https://decrypt.co/379300/bitcoin-etf-inflows-1b?utm_source=rss",
+                2,
+                '<p style="float:right"><img src="https://img/x.jpg"></p>'
+                "<p>Spot bitcoin ETFs saw inflows &amp; rising volume.</p>",
+                ["Markets"],
+            ),
+            news_item(
+                "Bitcoin miners face pressure as hashprice drops to yearly low",
+                "https://decrypt.co/379200/bitcoin-miners-hashprice-low",
+                8,
+                "Miner revenue per unit of hashrate fell to its lowest level this year.",
+            ),
+            news_item(
+                "Solana network suffers brief outage",
+                "https://decrypt.co/379100/solana-network-outage",
+                20,
+                "Block production halted for about an hour before validators restarted.",
+            ),
+            news_item(
+                "Meta launches AI keychain gadget",
+                "https://decrypt.co/379253/meta-ai-keychain",
+                1,
+                "A palm-sized device for talking to an AI assistant.",
+                ["Artificial Intelligence"],
+            ),
+            news_item(
+                "Bitcoin whale moves 10,000 BTC to an exchange",
+                "https://decrypt.co/379001/bitcoin-whale-exchange",
+                60,
+                "On-chain data shows a large transfer from a long-dormant wallet.",
+                ["Bitcoin"],
+            ),
+        ],
+    }
+
+
+class FakeNewsFeeds:
+    """Stands in for the default feeds' RSS endpoints. Set `items`, or `responses[source]` to
+    an `httpx2.Response` / exception to make one feed fail."""
+
+    def __init__(self) -> None:
+        self.items = default_news()
+        self.responses: dict[str, httpx2.Response | Exception] = {}
+        self.requests: list[httpx2.Request] = []
+
+    def all_urls(self) -> set[str]:
+        return {item["link"] for items in self.items.values() for item in items}
+
+    def all_titles(self) -> set[str]:
+        return {item["title"] for items in self.items.values() for item in items}
+
+    def fail_all(self, response: httpx2.Response | Exception) -> None:
+        for source in FEED_URLS:
+            self.responses[source] = response
+
+    def transport(self) -> httpx2.MockTransport:
+        by_url = {url: name for name, url in FEED_URLS.items()}
+
+        def handle(request: httpx2.Request) -> httpx2.Response:
+            self.requests.append(request)
+            source = by_url.get(str(request.url))
+            if source is None:
+                return httpx2.Response(404)
+            override = self.responses.get(source)
+            if isinstance(override, Exception):
+                raise override
+            if override is not None:
+                return override
+            return httpx2.Response(200, content=rss_feed(self.items.get(source, [])))
+
+        return httpx2.MockTransport(handle)
+
+
+# Title keyword -> (sentiment, impact, reason) used by FakeSentimentModel.
+DEFAULT_LABELS: dict[str, tuple[str, str, str]] = {
+    "inflows": ("bullish", "high", "Large ETF inflows may be relevant to demand for BTC."),
+    "hashprice": ("bearish", "medium", "Miner stress may be relevant to BTC supply."),
+    "whale": ("bearish", "low", "A large exchange deposit may be relevant to supply."),
+    "liquidations": ("bearish", "medium", "Liquidations may be relevant to market leverage."),
+    "sec delays": ("neutral", "medium", "The delay may be relevant to custody regulation."),
+    "upgrade": ("bullish", "medium", "The upgrade may be relevant to Ethereum's roadmap."),
+    "outage": ("bearish", "high", "The outage may be relevant to Solana's reliability."),
+}
+
+
+class FakeSentimentModel:
+    """Stands in for the Claude sentiment call. Labels by title keyword; set `labels`,
+    `error`, `delay` or `respond` per test."""
+
+    name = "fake-sentiment"
+
+    def __init__(self) -> None:
+        self.labels = dict(DEFAULT_LABELS)
+        self.error: Exception | None = None
+        self.delay = 0.0
+        self.respond: Callable[[str, list[ArticleInput]], list[ArticleAssessment]] | None = None
+        self.calls: list[tuple[str, list[ArticleInput]]] = []
+
+    async def classify(
+        self, subject: str, articles: Sequence[ArticleInput]
+    ) -> list[ArticleAssessment]:
+        self.calls.append((subject, list(articles)))
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error:
+            raise self.error
+        if self.respond:
+            return self.respond(subject, list(articles))
+        out = []
+        for a in articles:
+            sentiment, impact, reason = next(
+                (v for k, v in self.labels.items() if k in a.title.lower()),
+                ("neutral", "low", "Routine coverage that may be of limited relevance."),
+            )
+            out.append(
+                ArticleAssessment(id=a.id, sentiment=sentiment, impact=impact, reason=reason)
+            )
+        return out
+
+
+@pytest.fixture(autouse=True)
+def fake_news() -> Iterator[FakeNewsFeeds]:
+    """Point the app's shared news service at fake feeds. No test reads real feeds."""
+    fake = FakeNewsFeeds()
+    original = news_service.provider
+    news_service.provider = RssNewsProvider(transport=fake.transport())
+    news_service.reset()
+    yield fake
+    news_service.provider = original
+    news_service.reset()
+
+
+@pytest.fixture(autouse=True)
+def fake_sentiment() -> Iterator[FakeSentimentModel]:
+    """Point the app's shared news service at a fake sentiment model. No test calls Claude."""
+    fake = FakeSentimentModel()
+    original = news_service.model
+    news_service.model = fake
+    yield fake
+    news_service.model = original

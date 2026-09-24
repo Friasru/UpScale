@@ -5,7 +5,6 @@ import pytest
 from upscale.agents import (
     Agent,
     AgentContext,
-    MockNewsSentimentAgent,
     MockOpportunityAgent,
     MockRiskAgent,
     default_agents,
@@ -26,7 +25,7 @@ def test_default_agents_cover_every_role_once():
     )
 
 
-LIVE_AGENTS = {"vision", "market", "technical_analysis"}  # tested in their own modules
+LIVE_AGENTS = {"vision", "market", "technical_analysis", "news_sentiment"}  # own test modules
 MOCK_AGENTS = [a for a in default_agents() if a.name not in LIVE_AGENTS]
 
 
@@ -39,11 +38,6 @@ def test_every_mock_agent_returns_labeled_mock_result(agent):
     assert result.mock is True
     assert result.summary.startswith("[Mock]")
     assert agent.description
-
-
-def test_news_agent_returns_no_real_data():
-    news = run(MockNewsSentimentAgent(), AgentContext(query="ETH news", assets=["ETH"]))
-    assert news.findings["headlines"][0]["title"].startswith("[Mock]")
 
 
 def test_opportunity_agent_gives_scenarios_not_recommendations():

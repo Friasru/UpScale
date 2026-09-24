@@ -175,10 +175,14 @@ def _summary(decision: RoutingDecision, ok: list[AgentResult], assets: list[str]
 
 
 def _mock_notice(analysis: Analysis) -> str:
-    live = [r.agent for r in analysis.agent_results if not r.mock and r.status == "ok"]
-    notice = "Prototype mode: results marked [Mock] are placeholders. No AI model is connected."
-    if live:
-        notice += f" Live data: {', '.join(live)}."
+    real = [r.agent for r in analysis.agent_results if not r.mock and r.status == "ok"]
+    mocked = [r.agent for r in analysis.agent_results if r.mock]
+    notice = (
+        "Prototype mode: results marked [Mock] are placeholders from agents that are not "
+        f"built yet ({', '.join(mocked)})."
+    )
+    if real:
+        notice += f" Real agents (live data or AI model): {', '.join(real)}."
     return notice
 
 

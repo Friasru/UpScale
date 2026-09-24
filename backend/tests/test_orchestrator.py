@@ -69,6 +69,8 @@ def test_orchestrator_runs_selected_agents_and_combines_results():
     assert analysis.risks and all(r.source for r in analysis.risks)
     assert analysis.uncertainty.level == "high"
     assert response.message.content.startswith("Prototype mode")
+    assert "No AI model is connected" not in response.message.content
+    assert "not built yet (opportunity, risk)" in response.message.content
 
 
 def test_orchestrator_passes_dependency_results_downstream():

@@ -14,6 +14,7 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
+import upscale.agents.education
 from upscale.main import app
 from upscale.services import market_data_service, news_service, vision_service
 from upscale.services.coingecko import CoinGeckoProvider
@@ -645,3 +646,31 @@ def fake_sentiment() -> Iterator[FakeSentimentModel]:
     news_service.model = fake
     yield fake
     news_service.model = original
+
+
+# --- Education ---------------------------------------------------------------------------
+
+
+class FakeExplainerModel:
+    """Stands in for the Claude explanation call. Set `answer` or `error` per test."""
+
+    name = "fake-explainer"
+
+    def __init__(self) -> None:
+        self.answer = "A concise explanation of the concept."
+        self.error: Exception | None = None
+        self.calls: list[str] = []
+
+    async def explain(self, question: str) -> str:
+        self.calls.append(question)
+        if self.error:
+            raise self.error
+        return self.answer
+
+
+@pytest.fixture(autouse=True)
+def fake_explainer(monkeypatch: pytest.MonkeyPatch) -> FakeExplainerModel:
+    """Point the education agent's shared model at a fake. No test calls Claude."""
+    fake = FakeExplainerModel()
+    monkeypatch.setattr(upscale.agents.education, "explainer_model", fake)
+    return fake

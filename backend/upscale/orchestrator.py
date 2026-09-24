@@ -26,6 +26,7 @@ DISCLAIMER = (
     "guarantees or financial advice. SELL means reduce or exit a long position, not open "
     "a short."
 )
+EDUCATION_DISCLAIMER = "General educational explanation, not financial advice."
 
 
 class Orchestrator:
@@ -151,7 +152,7 @@ class Orchestrator:
             risks=risks,
             uncertainty=Uncertainty(level=_uncertainty_level(results, review), notes=notes),
             agent_results=results,
-            disclaimer=DISCLAIMER,
+            disclaimer=EDUCATION_DISCLAIMER if _is_education(decision) else DISCLAIMER,
         )
 
 
@@ -197,7 +198,19 @@ def apply_vision(context: AgentContext, results: Mapping[AgentName, AgentResult]
     return dataclasses.replace(context, **updates)  # type: ignore[arg-type]
 
 
+def _is_education(decision: RoutingDecision) -> bool:
+    return decision.agents == ["education"]
+
+
 def _summary(decision: RoutingDecision, ok: list[AgentResult], assets: list[str]) -> str:
+    if _is_education(decision):
+        # The explanation is the whole reply.
+        if ok:
+            return ok[0].summary
+        return (
+            "I couldn't generate an explanation right now. Please try again in a moment, "
+            "or ask about a specific coin for a live analysis."
+        )
     if not decision.agents:
         return (
             "I couldn't find a crypto question or chart screenshot in your message. "
@@ -230,7 +243,8 @@ def _agent_line(result: AgentResult) -> str:
 
 def render_text(analysis: Analysis) -> str:
     """Plain-text version of the analysis for the chat UI (which renders text, not markdown)."""
-    if not analysis.agent_results:
+    if not analysis.agent_results or analysis.agents_used == ["education"]:
+        # No analysis pipeline ran: the reply is just the summary (or the explanation).
         return analysis.summary
 
     sections: list[str] = []

@@ -23,8 +23,8 @@ export function useChat() {
       abortRef.current = controller
 
       try {
-        const reply = await sendChat(history, controller.signal)
-        setMessages((prev) => [...prev, { ...reply, id: newId() }])
+        const { message: reply, analysis } = await sendChat(history, controller.signal)
+        setMessages((prev) => [...prev, { ...reply, analysis: analysis ?? null, id: newId() }])
       } catch (err) {
         if (controller.signal.aborted) return
         const detail = err instanceof Error ? err.message : String(err)

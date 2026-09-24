@@ -16,12 +16,48 @@ export interface ChatMessage {
   attachments: ImageAttachment[]
 }
 
+export type AgentName =
+  | 'vision'
+  | 'technical_analysis'
+  | 'market'
+  | 'news_sentiment'
+  | 'opportunity'
+  | 'risk'
+  | 'education'
+
+export type Level = 'low' | 'medium' | 'high'
+
+export interface AgentResult {
+  agent: AgentName
+  status: 'ok' | 'error'
+  mock: boolean
+  summary: string
+  /** Agent-specific structured output; see lib/decision.ts for the opportunity shape. */
+  findings: Record<string, unknown>
+  evidence: string[]
+  error: string | null
+}
+
+/** The parts of the backend `Analysis` the UI reads. The backend sends more fields. */
+export interface Analysis {
+  mock: boolean
+  summary: string
+  assets: string[]
+  agents_used: AgentName[]
+  agent_results: AgentResult[]
+  uncertainty: { level: Level; notes: string[] }
+  disclaimer: string
+}
+
 export interface ChatResponse {
   message: ChatMessage
+  analysis?: Analysis | null
 }
 
 /** A message as shown in the UI. */
 export interface UiMessage extends ChatMessage {
   id: string
   error?: boolean
+  /** Structured analysis behind an assistant reply. UI-only; never sent back. */
+  analysis?: Analysis | null
 }

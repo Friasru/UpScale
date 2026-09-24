@@ -2,12 +2,14 @@
 
 from upscale.config import (
     COINGECKO_API_KEY,
+    EXPLAINER_MODEL,
     NEWS_DISABLED_FEEDS,
     NEWS_FEEDS,
     NEWS_MODEL,
     VISION_MODEL,
 )
 from upscale.services.coingecko import CoinGeckoProvider
+from upscale.services.explainer import ClaudeExplainerModel
 from upscale.services.kraken import KrakenProvider
 from upscale.services.market_data import MarketDataService
 from upscale.services.news import NewsService
@@ -33,3 +35,4 @@ news_service = NewsService(
     RssNewsProvider(feeds=configured_feeds(NEWS_FEEDS, NEWS_DISABLED_FEEDS)),
     ClaudeNewsSentimentModel(model=NEWS_MODEL),
 )
+explainer_model = ClaudeExplainerModel(model=EXPLAINER_MODEL)

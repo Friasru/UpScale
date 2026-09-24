@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react'
+import { opportunityFindings } from '../lib/decision'
 import { toDataUrl } from '../lib/images'
 import type { UiMessage } from '../types/chat'
+import { DecisionCard } from './DecisionCard'
 
 interface MessageListProps {
   messages: UiMessage[]
@@ -39,7 +41,7 @@ export function MessageList({ messages, isSending }: MessageListProps) {
               ))}
             </div>
           )}
-          {message.content && <p className="message-text">{message.content}</p>}
+          <MessageBody message={message} />
         </div>
       ))}
       {isSending && (
@@ -52,4 +54,15 @@ export function MessageList({ messages, isSending }: MessageListProps) {
       <div ref={endRef} />
     </div>
   )
+}
+
+function MessageBody({ message }: { message: UiMessage }) {
+  // Decision replies lead with the compact card; everything else is plain text as before.
+  const findings = message.role === 'assistant' ? opportunityFindings(message.analysis) : null
+  if (findings) {
+    return (
+      <DecisionCard findings={findings} fullText={message.content} />
+    )
+  }
+  return message.content ? <p className="message-text">{message.content}</p> : null
 }

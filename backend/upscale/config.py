@@ -37,3 +37,6 @@ NEWS_FEEDS = os.getenv("UPSCALE_NEWS_FEEDS") or None
 NEWS_MODEL = os.getenv("UPSCALE_NEWS_MODEL") or "claude-opus-5"
 # Comma-separated feed names to switch off, e.g. UPSCALE_NEWS_DISABLED_FEEDS="Decrypt".
 NEWS_DISABLED_FEEDS = os.getenv("UPSCALE_NEWS_DISABLED_FEEDS") or None
+# Model that answers general educational questions ("What is RSI?"). Same Anthropic
+# credentials as Vision; without them those questions get an "unavailable" reply.
+EXPLAINER_MODEL = os.getenv("UPSCALE_EXPLAINER_MODEL") or "claude-opus-5"

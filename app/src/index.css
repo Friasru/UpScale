@@ -227,6 +227,99 @@ button:disabled {
   }
 }
 
+/* Decision card (compact BUY / SELL / WAIT) */
+.decision-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.decision {
+  --decision-color: var(--text-muted);
+  align-self: stretch;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--decision-color);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.decision-buy {
+  --decision-color: var(--accent);
+}
+
+.decision-sell {
+  --decision-color: var(--danger);
+}
+
+.decision-action {
+  margin: 0 0 8px;
+  color: var(--decision-color);
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.decision-subject {
+  font-weight: 600;
+}
+
+.decision-muted {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.decision-reason {
+  margin: 6px 0 10px;
+}
+
+.decision-rows {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 10px;
+}
+
+.decision-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.decision-row dt {
+  min-width: 110px;
+  color: var(--text-muted);
+}
+
+.decision-row dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.decision-risk {
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.decision-footnote {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.decision-toggle {
+  font-size: 0.85rem;
+}
+
+.decision-full {
+  align-self: stretch;
+}
+
+.decision-full .decision-subject {
+  margin: 0;
+}
+
 /* Composer */
 .composer-wrap {
   padding-bottom: 14px;

@@ -13,7 +13,15 @@ def run(agent: Agent, context: AgentContext) -> AgentResult:
 def test_default_agents_cover_every_role_once():
     names = [agent.name for agent in default_agents()]
     assert sorted(names) == sorted(
-        ["vision", "technical_analysis", "market", "news_sentiment", "opportunity", "risk"]
+        [
+            "vision",
+            "technical_analysis",
+            "market",
+            "news_sentiment",
+            "opportunity",
+            "risk",
+            "education",
+        ]
     )
 
 

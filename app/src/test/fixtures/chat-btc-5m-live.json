@@ -1,0 +1,1276 @@
+{
+ "message": {
+  "role": "assistant",
+  "content": "WAIT\nBTC 5m: price is inside the zone ~$84,144.90–$84,228.60.\nBuy trigger: 5m close above ~$84,228.60 (upper bound of the price zone ~$84,144.90–$84,228.60), with MACD turning above its signal line and supporting volume\nSell trigger: 5m close below ~$84,144.90 (lower bound of the price zone ~$84,144.90–$84,228.60) and supporting volume\nRisk: Medium · Confidence: Medium\n\nCombined analysis of BTC from 5 agent(s).\n\nAgents:\n• Technical analysis of BTC 5m from 180 Kraken candles (trend: downtrend).\n• Live market data from CoinGecko for BTC.\n• News for BTC: 9 recent article(s) from CoinDesk, Decrypt (retrieved 2026-09-24 22:36 UTC); overall news sentiment: bearish.\n• Overall risk for BTC: medium. BTC is near resistance (~$84,266.90, 0.1% away); BTC is near support (~$84,017.40, 0.2% away); BTC is inside a swing zone (~$84,144.90–$84,228.60); plus 3 more. Uncertainty: low.\n• Opportunity: WAIT\n\nEvidence:\n• BTC 5m: 180 candles from Kraken (BTC/USD) with per-candle volume, 2026-09-24 07:35 UTC to 2026-09-24 22:30 UTC (candle open times); last close $84,160.80.\n• SMA 20: $84,317.53 (last close is below it).\n• SMA 50: $84,371.30 (last close is below it).\n• EMA 20: $84,280.46 (last close is below it).\n• EMA 50: $84,315.69 (last close is below it).\n• RSI 14: 41.9 (between 30 and 70).\n• MACD 12/26/9: line -59.46, signal -29.99, histogram -29.47 (line below signal).\n• 50-candle range: low $83,938.50 (2026-09-24 22:15 UTC) to high $84,624.00 (2026-09-24 19:25 UTC); last close at 32% of the range.\n• Trend (rule-based): downtrend. Close is below SMA 20. SMA 20 is below SMA 50.\n• Approximate support zones: ~$84,017.40 (1 touch(es)), ~$83,866.00–$83,938.50 (mean ~$83,902.25, 2 touch(es)), ~$83,348.90 (1 touch(es)); approximate resistance zones: ~$84,263.00–$84,270.80 (mean ~$84,266.90, 2 touch(es)), ~$84,426.00–$84,515.00 (mean ~$84,458.72, 6 touch(es)), ~$84,624.00 (1 touch(es)).\n• The last close ($84,160.80) is inside the swing zone ~$84,144.90–$84,228.60 (mean ~$84,186.75, 2 touch(es)), so that zone is neither support nor resistance.\n• Per-candle volume from Kraken (BTC).\n• Last 5m candle volume 7.904 BTC is 1.34x the 20-candle average (5.884 BTC); over the last 21 candles 42% of volume traded on candles that closed up and 58% on candles that closed down.\n• Bitcoin (BTC) price: $84,158.00, -0.30% over 24h (CoinGecko, as of 2026-09-24 22:33 UTC).\n• BTC 24h range $82,941.00 – $84,843.00; 24h volume $38.49B; market cap $1.69T.\n• News sentiment for BTC: bearish (1 bullish, 3 bearish, 2 neutral asset-specific article(s); retrieved 2026-09-24 22:36 UTC). This describes the tone of news coverage, not a price forecast.\n• Market-wide news sentiment: neutral. Market-wide sentiment is neutral rather than bullish (as the article count alone would suggest) because stories are weighted by potential impact.\n• [neutral, low impact] CoinDesk (2026-09-24 18:46 UTC, 4h ago): \"Bitcoin just topped a key long-term moving average. Here's what it might mean\" — A headline-only technical observation that bitcoin cleared a long-term moving average, which may be relevant to chart-based sentiment but reports no underlying development.\n• [bearish, medium impact] Decrypt (2026-09-24 16:01 UTC, 7h ago): \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" — Reports that bitcoin's breakout is cooling as bets on Fed rate hikes climb, which may be relevant to macro-driven demand for the asset.\n• [bullish, low impact] CoinDesk (2026-09-24 15:26 UTC, 7h ago): \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" — An analytical piece arguing bitcoin's drawdowns are becoming milder and bull phases may follow, which may be relevant to long-term cycle narratives.\n• [neutral, low impact] CoinDesk (2026-09-24 14:49 UTC, 8h ago): \"Crypto for Advisors:The hidden costs of holding your own bitcoin\" — An advisor-focused explainer on the costs of self-custody, which may be relevant to holders' operational choices rather than to fundamentals.\n• [bearish, medium impact] CoinDesk (2026-09-24 10:30 UTC, 12h ago): \"Bitcoin slides to $83,300 as bond yields hit highest level since 2007\" — Reports bitcoin sliding alongside bond yields reaching their highest level since 2007, which may be relevant to macro liquidity conditions for the asset.\n• [bearish, medium impact] CoinDesk (2026-09-24 10:11 UTC, 12h ago): \"Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000\" — Notes traders pricing in four Fed rate hikes by June 2027 while bitcoin trades lower, which may be relevant to rate-sensitive demand.\n• Conflicting news: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt).\n• Price context (separate from news sentiment): BTC moved -0.30% over 24h (CoinGecko).\n• Overall risk medium from 7 risk factor(s) (0 high, 6 medium, 1 low); evidence reviewed: technical analysis, live market data, news & sentiment. Rule-based, not a forecast.\n• [medium · technical] The last 5m close ($84,160.80) is 0.1% from the approximate resistance zone ~$84,263.00–$84,270.80 (mean ~$84,266.90); price often reacts around such zones in either direction.\n• [medium · technical] The last 5m close ($84,160.80) is 0.2% from the approximate support zone ~$84,017.40 (mean ~$84,017.40); price often reacts around such zones in either direction.\n• [medium · technical] The last 5m close ($84,160.80) sits inside the approximate swing zone ~$84,144.90–$84,228.60 (2 swing point(s)), so that zone is neither clear support nor clear resistance; price often reacts around such zones in either direction.\n• [medium · news/event] Recent coverage of BTC conflicts: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt).\n• [medium · news/event] Recent coverage rated high potential impact: 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk); 'Federal Reserve Unveils Stablecoin Rules on Reserves and Capital' (Decrypt). Developments in these stories can change the backdrop quickly.\n• [medium · news/event] Recent regulatory/macro coverage may affect the backdrop: 'Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb' (Decrypt); 'Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000' (CoinDesk).\n• [low · market] BTC ($84,158.00) is within 1.0% of its 24h high ($84,843.00); conditions at the edge of the recent range can change quickly.\n• Would invalidate or weaken the analysis: A 5m close above SMA 20 (~$84,317.53) would end the current rule-based downtrend classification.\n• Would invalidate or weaken the analysis: Support zone ~$84,017.40; a 5m close below ~$84,017.40 would break it.\n• Would invalidate or weaken the analysis: Resistance zone ~$84,263.00–$84,270.80; a 5m close above ~$84,270.80 would break it.\n• Would invalidate or weaken the analysis: Price is inside the swing zone ~$84,144.90–$84,228.60; a 5m close above ~$84,228.60 or below ~$84,144.90 would take it out of that zone.\n• Would invalidate or weaken the analysis: A move outside the 24h range ($82,941.00 – $84,843.00) would mean conditions have changed from those analyzed.\n• Would invalidate or weaken the analysis: If the story 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk) develops further (for example official action or follow-up reporting), the news backdrop described here could change.\n• Would invalidate or weaken the analysis: New high-impact bullish coverage would weaken the current bearish news read.\n• Decision: WAIT on BTC 5m (bullish 0 vs bearish 5 points; confidence medium). Rule-based, not a forecast.\n• Bearish: Is in a downtrend.\n• Bearish: MACD is below its signal line.\n• Bearish: RSI 42 is weak, not stretched.\n• Bearish: Recent news is bearish.\n• Blocking: Price is inside the zone ~$84,144.90–$84,228.60.\n• Last 5m close: $84,160.80.\n• Live price $84,158.00 (CoinGecko); 24h range $82,941.00 – $84,843.00.\n\nScenarios:\n• Range holds: BTC keeps trading between the support zone ~$84,017.40 and the resistance zone ~$84,263.00–$84,270.80.\n• Break above resistance: BTC closes above the resistance zone ~$84,263.00–$84,270.80.\n• Break below support: BTC closes below the support zone ~$84,017.40.\n\nRisks:\n• [medium] Indicators describe past prices and lag; they do not predict moves.\n• [low] Support/resistance levels are approximate zones from recent swing points.\n• [low] Volume is Kraken's alone, not market-wide; other venues may differ.\n• [low] Market data is a point-in-time snapshot from CoinGecko and may lag.\n• [low] News timing alone does not show that any story caused a price move; news sentiment is not a buy or sell signal.\n• [medium] Technical: The last 5m close ($84,160.80) is 0.1% from the approximate resistance zone ~$84,263.00–$84,270.80 (mean ~$84,266.90); price often reacts around such zones in either direction.\n• [medium] Technical: The last 5m close ($84,160.80) is 0.2% from the approximate support zone ~$84,017.40 (mean ~$84,017.40); price often reacts around such zones in either direction.\n• [medium] Technical: The last 5m close ($84,160.80) sits inside the approximate swing zone ~$84,144.90–$84,228.60 (2 swing point(s)), so that zone is neither clear support nor clear resistance; price often reacts around such zones in either direction.\n• [medium] News/event: Recent coverage of BTC conflicts: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt).\n• [medium] News/event: Recent coverage rated high potential impact: 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk); 'Federal Reserve Unveils Stablecoin Rules on Reserves and Capital' (Decrypt). Developments in these stories can change the backdrop quickly.\n• [medium] News/event: Recent regulatory/macro coverage may affect the backdrop: 'Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb' (Decrypt); 'Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000' (CoinDesk).\n• [low] Market: BTC ($84,158.00) is within 1.0% of its 24h high ($84,843.00); conditions at the edge of the recent range can change quickly.\n\nUncertainty: low\n\nBUY / SELL / WAIT reads are rule-based decision support from the evidence shown, not guarantees or financial advice. SELL means reduce or exit a long position, not open a short.",
+  "attachments": []
+ },
+ "analysis": {
+  "mock": false,
+  "summary": "Combined analysis of BTC from 5 agent(s).",
+  "assets": [
+   "BTC"
+  ],
+  "agents_used": [
+   "technical_analysis",
+   "market",
+   "news_sentiment",
+   "risk",
+   "opportunity"
+  ],
+  "routing": {
+   "technical_analysis": "Decision request (buy, should i): needs full evidence.",
+   "market": "Decision request (buy, should i): needs full evidence.",
+   "news_sentiment": "Decision request (buy, should i): needs full evidence.",
+   "risk": "Risk review runs whenever other agents do.",
+   "opportunity": "Decision request (buy, should i): needs full evidence."
+  },
+  "evidence": [
+   {
+    "source": "technical_analysis",
+    "statement": "BTC 5m: 180 candles from Kraken (BTC/USD) with per-candle volume, 2026-09-24 07:35 UTC to 2026-09-24 22:30 UTC (candle open times); last close $84,160.80."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "SMA 20: $84,317.53 (last close is below it)."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "SMA 50: $84,371.30 (last close is below it)."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "EMA 20: $84,280.46 (last close is below it)."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "EMA 50: $84,315.69 (last close is below it)."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "RSI 14: 41.9 (between 30 and 70)."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "MACD 12/26/9: line -59.46, signal -29.99, histogram -29.47 (line below signal)."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "50-candle range: low $83,938.50 (2026-09-24 22:15 UTC) to high $84,624.00 (2026-09-24 19:25 UTC); last close at 32% of the range."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "Trend (rule-based): downtrend. Close is below SMA 20. SMA 20 is below SMA 50."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "Approximate support zones: ~$84,017.40 (1 touch(es)), ~$83,866.00–$83,938.50 (mean ~$83,902.25, 2 touch(es)), ~$83,348.90 (1 touch(es)); approximate resistance zones: ~$84,263.00–$84,270.80 (mean ~$84,266.90, 2 touch(es)), ~$84,426.00–$84,515.00 (mean ~$84,458.72, 6 touch(es)), ~$84,624.00 (1 touch(es))."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "The last close ($84,160.80) is inside the swing zone ~$84,144.90–$84,228.60 (mean ~$84,186.75, 2 touch(es)), so that zone is neither support nor resistance."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "Per-candle volume from Kraken (BTC)."
+   },
+   {
+    "source": "technical_analysis",
+    "statement": "Last 5m candle volume 7.904 BTC is 1.34x the 20-candle average (5.884 BTC); over the last 21 candles 42% of volume traded on candles that closed up and 58% on candles that closed down."
+   },
+   {
+    "source": "market",
+    "statement": "Bitcoin (BTC) price: $84,158.00, -0.30% over 24h (CoinGecko, as of 2026-09-24 22:33 UTC)."
+   },
+   {
+    "source": "market",
+    "statement": "BTC 24h range $82,941.00 – $84,843.00; 24h volume $38.49B; market cap $1.69T."
+   },
+   {
+    "source": "news_sentiment",
+    "statement": "News sentiment for BTC: bearish (1 bullish, 3 bearish, 2 neutral asset-specific article(s); retrieved 2026-09-24 22:36 UTC). This describes the tone of news coverage, not a price forecast."
+   },
+   {
+    "source": "news_sentiment",
+    "statement": "Market-wide news sentiment: neutral. Market-wide sentiment is neutral rather than bullish (as the article count alone would suggest) because stories are weighted by potential impact."
+   },
+   {
+    "source": "news_sentiment",
+    "statement": "[neutral, low impact] CoinDesk (2026-09-24 18:46 UTC, 4h ago): \"Bitcoin just topped a key long-term moving average. Here's what it might mean\" — A headline-only technical observation that bitcoin cleared a long-term moving average, which may be relevant to chart-based sentiment but reports no underlying development."
+   },
+   {
+    "source": "news_sentiment",
+    "statement": "[bearish, medium impact] Decrypt (2026-09-24 16:01 UTC, 7h ago): \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" — Reports that bitcoin's breakout is cooling as bets on Fed rate hikes climb, which may be relevant to macro-driven demand for the asset."
+   },
+   {
+    "source": "news_sentiment",
+    "statement": "[bullish, low impact] CoinDesk (2026-09-24 15:26 UTC, 7h ago): \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" — An analytical piece arguing bitcoin's drawdowns are becoming milder and bull phases may follow, which may be relevant to long-term cycle narratives."
+   },
+   {
+    "source": "news_sentiment",
+    "statement": "[neutral, low impact] CoinDesk (2026-09-24 14:49 UTC, 8h ago): \"Crypto for Advisors:The hidden costs of holding your own bitcoin\" — An advisor-focused explainer on the costs of self-custody, which may be relevant to holders' operational choices rather than to fundamentals."
+   },
+   {
+    "source": "news_sentiment",
+    "statement": "[bearish, medium impact] CoinDesk (2026-09-24 10:30 UTC, 12h ago): \"Bitcoin slides to $83,300 as bond yields hit highest level since 2007\" — Reports bitcoin sliding alongside bond yields reaching their highest level since 2007, which may be relevant to macro liquidity conditions for the asset."
+   },
+   {
+    "source": "news_sentiment",
+    "statement": "[bearish, medium impact] CoinDesk (2026-09-24 10:11 UTC, 12h ago): \"Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000\" — Notes traders pricing in four Fed rate hikes by June 2027 while bitcoin trades lower, which may be relevant to rate-sensitive demand."
+   },
+   {
+    "source": "news_sentiment",
+    "statement": "Conflicting news: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt)."
+   },
+   {
+    "source": "news_sentiment",
+    "statement": "Price context (separate from news sentiment): BTC moved -0.30% over 24h (CoinGecko)."
+   },
+   {
+    "source": "risk",
+    "statement": "Overall risk medium from 7 risk factor(s) (0 high, 6 medium, 1 low); evidence reviewed: technical analysis, live market data, news & sentiment. Rule-based, not a forecast."
+   },
+   {
+    "source": "risk",
+    "statement": "[medium · technical] The last 5m close ($84,160.80) is 0.1% from the approximate resistance zone ~$84,263.00–$84,270.80 (mean ~$84,266.90); price often reacts around such zones in either direction."
+   },
+   {
+    "source": "risk",
+    "statement": "[medium · technical] The last 5m close ($84,160.80) is 0.2% from the approximate support zone ~$84,017.40 (mean ~$84,017.40); price often reacts around such zones in either direction."
+   },
+   {
+    "source": "risk",
+    "statement": "[medium · technical] The last 5m close ($84,160.80) sits inside the approximate swing zone ~$84,144.90–$84,228.60 (2 swing point(s)), so that zone is neither clear support nor clear resistance; price often reacts around such zones in either direction."
+   },
+   {
+    "source": "risk",
+    "statement": "[medium · news/event] Recent coverage of BTC conflicts: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt)."
+   },
+   {
+    "source": "risk",
+    "statement": "[medium · news/event] Recent coverage rated high potential impact: 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk); 'Federal Reserve Unveils Stablecoin Rules on Reserves and Capital' (Decrypt). Developments in these stories can change the backdrop quickly."
+   },
+   {
+    "source": "risk",
+    "statement": "[medium · news/event] Recent regulatory/macro coverage may affect the backdrop: 'Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb' (Decrypt); 'Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000' (CoinDesk)."
+   },
+   {
+    "source": "risk",
+    "statement": "[low · market] BTC ($84,158.00) is within 1.0% of its 24h high ($84,843.00); conditions at the edge of the recent range can change quickly."
+   },
+   {
+    "source": "risk",
+    "statement": "Would invalidate or weaken the analysis: A 5m close above SMA 20 (~$84,317.53) would end the current rule-based downtrend classification."
+   },
+   {
+    "source": "risk",
+    "statement": "Would invalidate or weaken the analysis: Support zone ~$84,017.40; a 5m close below ~$84,017.40 would break it."
+   },
+   {
+    "source": "risk",
+    "statement": "Would invalidate or weaken the analysis: Resistance zone ~$84,263.00–$84,270.80; a 5m close above ~$84,270.80 would break it."
+   },
+   {
+    "source": "risk",
+    "statement": "Would invalidate or weaken the analysis: Price is inside the swing zone ~$84,144.90–$84,228.60; a 5m close above ~$84,228.60 or below ~$84,144.90 would take it out of that zone."
+   },
+   {
+    "source": "risk",
+    "statement": "Would invalidate or weaken the analysis: A move outside the 24h range ($82,941.00 – $84,843.00) would mean conditions have changed from those analyzed."
+   },
+   {
+    "source": "risk",
+    "statement": "Would invalidate or weaken the analysis: If the story 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk) develops further (for example official action or follow-up reporting), the news backdrop described here could change."
+   },
+   {
+    "source": "risk",
+    "statement": "Would invalidate or weaken the analysis: New high-impact bullish coverage would weaken the current bearish news read."
+   },
+   {
+    "source": "opportunity",
+    "statement": "Decision: WAIT on BTC 5m (bullish 0 vs bearish 5 points; confidence medium). Rule-based, not a forecast."
+   },
+   {
+    "source": "opportunity",
+    "statement": "Bearish: Is in a downtrend."
+   },
+   {
+    "source": "opportunity",
+    "statement": "Bearish: MACD is below its signal line."
+   },
+   {
+    "source": "opportunity",
+    "statement": "Bearish: RSI 42 is weak, not stretched."
+   },
+   {
+    "source": "opportunity",
+    "statement": "Bearish: Recent news is bearish."
+   },
+   {
+    "source": "opportunity",
+    "statement": "Blocking: Price is inside the zone ~$84,144.90–$84,228.60."
+   },
+   {
+    "source": "opportunity",
+    "statement": "Last 5m close: $84,160.80."
+   },
+   {
+    "source": "opportunity",
+    "statement": "Live price $84,158.00 (CoinGecko); 24h range $82,941.00 – $84,843.00."
+   }
+  ],
+  "scenarios": [
+   {
+    "name": "Range holds",
+    "description": "BTC keeps trading between the support zone ~$84,017.40 and the resistance zone ~$84,263.00–$84,270.80.",
+    "conditions": [
+     "5m closes stay between the two zones"
+    ],
+    "invalidation": "A 5m close below ~$84,017.40 (support zone's lower bound) or above ~$84,270.80 (resistance zone's upper bound).",
+    "source": "technical_analysis"
+   },
+   {
+    "name": "Break above resistance",
+    "description": "BTC closes above the resistance zone ~$84,263.00–$84,270.80.",
+    "conditions": [
+     "A 5m close above ~$84,270.80 (the zone's upper bound)",
+     "MACD line staying above its signal line would be consistent with this"
+    ],
+    "invalidation": "Price falls back below ~$84,263.00 (the zone's lower bound).",
+    "source": "technical_analysis"
+   },
+   {
+    "name": "Break below support",
+    "description": "BTC closes below the support zone ~$84,017.40.",
+    "conditions": [
+     "A 5m close below ~$84,017.40 (the zone's lower bound)",
+     "MACD line staying below its signal line would be consistent with this"
+    ],
+    "invalidation": "Price recovers above ~$84,017.40 (the zone's upper bound).",
+    "source": "technical_analysis"
+   }
+  ],
+  "risks": [
+   {
+    "description": "Indicators describe past prices and lag; they do not predict moves.",
+    "severity": "medium",
+    "source": "technical_analysis"
+   },
+   {
+    "description": "Support/resistance levels are approximate zones from recent swing points.",
+    "severity": "low",
+    "source": "technical_analysis"
+   },
+   {
+    "description": "Volume is Kraken's alone, not market-wide; other venues may differ.",
+    "severity": "low",
+    "source": "technical_analysis"
+   },
+   {
+    "description": "Market data is a point-in-time snapshot from CoinGecko and may lag.",
+    "severity": "low",
+    "source": "market"
+   },
+   {
+    "description": "News timing alone does not show that any story caused a price move; news sentiment is not a buy or sell signal.",
+    "severity": "low",
+    "source": "news_sentiment"
+   },
+   {
+    "description": "Technical: The last 5m close ($84,160.80) is 0.1% from the approximate resistance zone ~$84,263.00–$84,270.80 (mean ~$84,266.90); price often reacts around such zones in either direction.",
+    "severity": "medium",
+    "source": "technical_analysis"
+   },
+   {
+    "description": "Technical: The last 5m close ($84,160.80) is 0.2% from the approximate support zone ~$84,017.40 (mean ~$84,017.40); price often reacts around such zones in either direction.",
+    "severity": "medium",
+    "source": "technical_analysis"
+   },
+   {
+    "description": "Technical: The last 5m close ($84,160.80) sits inside the approximate swing zone ~$84,144.90–$84,228.60 (2 swing point(s)), so that zone is neither clear support nor clear resistance; price often reacts around such zones in either direction.",
+    "severity": "medium",
+    "source": "technical_analysis"
+   },
+   {
+    "description": "News/event: Recent coverage of BTC conflicts: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt).",
+    "severity": "medium",
+    "source": "news_sentiment"
+   },
+   {
+    "description": "News/event: Recent coverage rated high potential impact: 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk); 'Federal Reserve Unveils Stablecoin Rules on Reserves and Capital' (Decrypt). Developments in these stories can change the backdrop quickly.",
+    "severity": "medium",
+    "source": "news_sentiment"
+   },
+   {
+    "description": "News/event: Recent regulatory/macro coverage may affect the backdrop: 'Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb' (Decrypt); 'Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000' (CoinDesk).",
+    "severity": "medium",
+    "source": "news_sentiment"
+   },
+   {
+    "description": "Market: BTC ($84,158.00) is within 1.0% of its 24h high ($84,843.00); conditions at the edge of the recent range can change quickly.",
+    "severity": "low",
+    "source": "market"
+   }
+  ],
+  "uncertainty": {
+   "level": "low",
+   "notes": []
+  },
+  "agent_results": [
+   {
+    "agent": "technical_analysis",
+    "status": "ok",
+    "mock": false,
+    "summary": "Technical analysis of BTC 5m from 180 Kraken candles (trend: downtrend).",
+    "findings": {
+     "symbol": "BTC",
+     "timeframe": "5m",
+     "provider": "Kraken",
+     "provider_id": "XBTUSD",
+     "pair": "BTC/USD",
+     "fallback_notes": [],
+     "candle_count": 180,
+     "first_candle_at": "2026-09-24T07:35:00Z",
+     "last_candle_at": "2026-09-24T22:30:00Z",
+     "last_close": 84160.8,
+     "previous_close": 84109.8,
+     "volume_available": true,
+     "volume_note": "Per-candle volume from Kraken (BTC).",
+     "volume": {
+      "lookback": 20,
+      "available": true,
+      "unit": "BTC",
+      "last_volume": 7.9041039,
+      "average_volume": 5.884136688,
+      "relative_volume": 1.3432903277246233,
+      "up_volume_pct": 41.7171394599793,
+      "down_volume_pct": 58.2828605400207,
+      "unavailable_reason": null
+     },
+     "indicators": [
+      {
+       "name": "SMA 20",
+       "kind": "sma",
+       "params": {
+        "period": 20
+       },
+       "available": true,
+       "value": 84317.53000000001,
+       "signal": null,
+       "histogram": null,
+       "unavailable_reason": null
+      },
+      {
+       "name": "SMA 50",
+       "kind": "sma",
+       "params": {
+        "period": 50
+       },
+       "available": true,
+       "value": 84371.29799999995,
+       "signal": null,
+       "histogram": null,
+       "unavailable_reason": null
+      },
+      {
+       "name": "EMA 20",
+       "kind": "ema",
+       "params": {
+        "period": 20
+       },
+       "available": true,
+       "value": 84280.45910197581,
+       "signal": null,
+       "histogram": null,
+       "unavailable_reason": null
+      },
+      {
+       "name": "EMA 50",
+       "kind": "ema",
+       "params": {
+        "period": 50
+       },
+       "available": true,
+       "value": 84315.69081864042,
+       "signal": null,
+       "histogram": null,
+       "unavailable_reason": null
+      },
+      {
+       "name": "RSI 14",
+       "kind": "rsi",
+       "params": {
+        "period": 14
+       },
+       "available": true,
+       "value": 41.931497079024545,
+       "signal": null,
+       "histogram": null,
+       "unavailable_reason": null
+      },
+      {
+       "name": "MACD 12/26/9",
+       "kind": "macd",
+       "params": {
+        "fast": 12,
+        "slow": 26,
+        "signal": 9
+       },
+       "available": true,
+       "value": -59.45643289596774,
+       "signal": -29.99069910486607,
+       "histogram": -29.465733791101666,
+       "unavailable_reason": null
+      }
+     ],
+     "recent_range": {
+      "lookback": 50,
+      "available": true,
+      "high": 84624.0,
+      "high_at": "2026-09-24T19:25:00Z",
+      "low": 83938.5,
+      "low_at": "2026-09-24T22:15:00Z",
+      "close_position_pct": 32.42888402625863,
+      "unavailable_reason": null
+     },
+     "trend": {
+      "method": "Close vs SMA 20 vs SMA 50: uptrend if close > SMA 20 > SMA 50, downtrend if close < SMA 20 < SMA 50, otherwise mixed.",
+      "available": true,
+      "label": "downtrend",
+      "reasons": [
+       "Close is below SMA 20.",
+       "SMA 20 is below SMA 50."
+      ],
+      "unavailable_reason": null
+     },
+     "levels": {
+      "method": "Swing highs/lows (a candle's high or low is the extreme of the 3 candles on each side) over the last 100 candles. Sorted by price, a swing point joins the current zone when it is within 1 x ATR 14 (the average true range at the last candle, 101.854 in price units) of the zone's lowest swing point, so no zone is wider than that. Each zone spans its lowest to highest grouped swing point; support lies wholly below the last close and resistance wholly above it. Levels are approximate zones, not exact prices.",
+      "lookback": 100,
+      "available": true,
+      "atr_period": 14,
+      "atr": 101.854271306813,
+      "zone_tolerance": 101.854271306813,
+      "support": [
+       {
+        "price": 84017.4,
+        "lower": 84017.4,
+        "upper": 84017.4,
+        "touches": 1,
+        "last_touched": "2026-09-24T16:10:00Z",
+        "distance_pct": -0.17038811418143449
+       },
+       {
+        "price": 83902.25,
+        "lower": 83866.0,
+        "upper": 83938.5,
+        "touches": 2,
+        "last_touched": "2026-09-24T22:15:00Z",
+        "distance_pct": -0.30720953222878455
+       },
+       {
+        "price": 83348.9,
+        "lower": 83348.9,
+        "upper": 83348.9,
+        "touches": 1,
+        "last_touched": "2026-09-24T14:50:00Z",
+        "distance_pct": -0.9647009058849354
+       }
+      ],
+      "resistance": [
+       {
+        "price": 84266.9,
+        "lower": 84263.0,
+        "upper": 84270.8,
+        "touches": 2,
+        "last_touched": "2026-09-24T20:55:00Z",
+        "distance_pct": 0.12606819326811444
+       },
+       {
+        "price": 84458.71666666666,
+        "lower": 84426.0,
+        "upper": 84515.0,
+        "touches": 6,
+        "last_touched": "2026-09-24T21:35:00Z",
+        "distance_pct": 0.3539850698504018
+       },
+       {
+        "price": 84624.0,
+        "lower": 84624.0,
+        "upper": 84624.0,
+        "touches": 1,
+        "last_touched": "2026-09-24T19:25:00Z",
+        "distance_pct": 0.5503749964353917
+       }
+      ],
+      "containing": {
+       "price": 84186.75,
+       "lower": 84144.9,
+       "upper": 84228.6,
+       "touches": 2,
+       "last_touched": "2026-09-24T20:25:00Z",
+       "distance_pct": 0.03083383237801576
+      },
+      "unavailable_reason": null
+     },
+     "requested_timeframe": "5m",
+     "requested_timeframe_source": "user",
+     "timeframe_note": null,
+     "candle_source": {
+      "provider": "Kraken",
+      "pair": "BTC/USD",
+      "requested_timeframe": "5m",
+      "actual_timeframe": "5m",
+      "candle_count": 180,
+      "volume_available": true,
+      "fallback_notes": []
+     },
+     "not_analyzed": []
+    },
+    "evidence": [
+     "BTC 5m: 180 candles from Kraken (BTC/USD) with per-candle volume, 2026-09-24 07:35 UTC to 2026-09-24 22:30 UTC (candle open times); last close $84,160.80.",
+     "SMA 20: $84,317.53 (last close is below it).",
+     "SMA 50: $84,371.30 (last close is below it).",
+     "EMA 20: $84,280.46 (last close is below it).",
+     "EMA 50: $84,315.69 (last close is below it).",
+     "RSI 14: 41.9 (between 30 and 70).",
+     "MACD 12/26/9: line -59.46, signal -29.99, histogram -29.47 (line below signal).",
+     "50-candle range: low $83,938.50 (2026-09-24 22:15 UTC) to high $84,624.00 (2026-09-24 19:25 UTC); last close at 32% of the range.",
+     "Trend (rule-based): downtrend. Close is below SMA 20. SMA 20 is below SMA 50.",
+     "Approximate support zones: ~$84,017.40 (1 touch(es)), ~$83,866.00–$83,938.50 (mean ~$83,902.25, 2 touch(es)), ~$83,348.90 (1 touch(es)); approximate resistance zones: ~$84,263.00–$84,270.80 (mean ~$84,266.90, 2 touch(es)), ~$84,426.00–$84,515.00 (mean ~$84,458.72, 6 touch(es)), ~$84,624.00 (1 touch(es)).",
+     "The last close ($84,160.80) is inside the swing zone ~$84,144.90–$84,228.60 (mean ~$84,186.75, 2 touch(es)), so that zone is neither support nor resistance.",
+     "Per-candle volume from Kraken (BTC).",
+     "Last 5m candle volume 7.904 BTC is 1.34x the 20-candle average (5.884 BTC); over the last 21 candles 42% of volume traded on candles that closed up and 58% on candles that closed down."
+    ],
+    "scenarios": [
+     {
+      "name": "Range holds",
+      "description": "BTC keeps trading between the support zone ~$84,017.40 and the resistance zone ~$84,263.00–$84,270.80.",
+      "conditions": [
+       "5m closes stay between the two zones"
+      ],
+      "invalidation": "A 5m close below ~$84,017.40 (support zone's lower bound) or above ~$84,270.80 (resistance zone's upper bound).",
+      "source": null
+     },
+     {
+      "name": "Break above resistance",
+      "description": "BTC closes above the resistance zone ~$84,263.00–$84,270.80.",
+      "conditions": [
+       "A 5m close above ~$84,270.80 (the zone's upper bound)",
+       "MACD line staying above its signal line would be consistent with this"
+      ],
+      "invalidation": "Price falls back below ~$84,263.00 (the zone's lower bound).",
+      "source": null
+     },
+     {
+      "name": "Break below support",
+      "description": "BTC closes below the support zone ~$84,017.40.",
+      "conditions": [
+       "A 5m close below ~$84,017.40 (the zone's lower bound)",
+       "MACD line staying below its signal line would be consistent with this"
+      ],
+      "invalidation": "Price recovers above ~$84,017.40 (the zone's upper bound).",
+      "source": null
+     }
+    ],
+    "risks": [
+     {
+      "description": "Indicators describe past prices and lag; they do not predict moves.",
+      "severity": "medium",
+      "source": null
+     },
+     {
+      "description": "Support/resistance levels are approximate zones from recent swing points.",
+      "severity": "low",
+      "source": null
+     },
+     {
+      "description": "Volume is Kraken's alone, not market-wide; other venues may differ.",
+      "severity": "low",
+      "source": null
+     }
+    ],
+    "confidence": null,
+    "error": null
+   },
+   {
+    "agent": "market",
+    "status": "ok",
+    "mock": false,
+    "summary": "Live market data from CoinGecko for BTC.",
+    "findings": {
+     "provider": "CoinGecko",
+     "quote_currency": "USD",
+     "snapshots": [
+      {
+       "symbol": "BTC",
+       "name": "Bitcoin",
+       "provider": "CoinGecko",
+       "provider_id": "bitcoin",
+       "price_usd": 84158.0,
+       "change_24h_usd": -255.10040398384444,
+       "change_24h_pct": -0.29787,
+       "high_24h_usd": 84843.0,
+       "low_24h_usd": 82941.0,
+       "volume_24h_usd": 38485302473.0,
+       "market_cap_usd": 1690496122951.0,
+       "last_updated": "2026-09-24T22:33:20Z",
+       "fetched_at": "2026-09-24T22:36:58.842738Z"
+      }
+     ],
+     "unavailable": []
+    },
+    "evidence": [
+     "Bitcoin (BTC) price: $84,158.00, -0.30% over 24h (CoinGecko, as of 2026-09-24 22:33 UTC).",
+     "BTC 24h range $82,941.00 – $84,843.00; 24h volume $38.49B; market cap $1.69T."
+    ],
+    "scenarios": [],
+    "risks": [
+     {
+      "description": "Market data is a point-in-time snapshot from CoinGecko and may lag.",
+      "severity": "low",
+      "source": null
+     }
+    ],
+    "confidence": null,
+    "error": null
+   },
+   {
+    "agent": "news_sentiment",
+    "status": "ok",
+    "mock": false,
+    "summary": "News for BTC: 9 recent article(s) from CoinDesk, Decrypt (retrieved 2026-09-24 22:36 UTC); overall news sentiment: bearish.",
+    "findings": {
+     "provider": "Publisher RSS feeds",
+     "reports": [
+      {
+       "asset": "BTC",
+       "subject": "BTC",
+       "overall_news_sentiment": "bearish",
+       "market_news_sentiment": "neutral",
+       "sentiment_basis": null,
+       "market_sentiment_basis": "Market-wide sentiment is neutral rather than bullish (as the article count alone would suggest) because stories are weighted by potential impact.",
+       "sentiment_counts": {
+        "bullish": 1,
+        "bearish": 3,
+        "neutral": 2,
+        "mixed": 0,
+        "unclassified": 0
+       },
+       "asset_story_count": 6,
+       "retrieved_at": "2026-09-24T22:36:59.158295+00:00",
+       "analyzed_at": "2026-09-24T22:36:59.158756+00:00",
+       "provider": "Publisher RSS feeds",
+       "sources": [
+        "CoinDesk",
+        "Decrypt"
+       ],
+       "failed_sources": [],
+       "sentiment_model": "claude-opus-5",
+       "stories": [
+        {
+         "id": "n1",
+         "title": "Bitcoin just topped a key long-term moving average. Here's what it might mean",
+         "source": "CoinDesk",
+         "url": "https://www.coindesk.com/markets/2026/09/24/bitcoin-just-topped-a-key-long-term-moving-average-here-s-what-it-might-mean",
+         "published_at": "2026-09-24T18:46:58Z",
+         "summary": "Bitcoin’s return above its one-year average excited chart watchers. AltcoinPro Research says the more important signal is whether it can stay above its 200-day average.",
+         "tickers": [],
+         "also_reported_by": [],
+         "scope": "asset",
+         "relevance": "headline",
+         "age_hours": 3.8,
+         "stale": false,
+         "model_use": "headline",
+         "sentiment": "neutral",
+         "impact": "low",
+         "impact_reason": "A headline-only technical observation that bitcoin cleared a long-term moving average, which may be relevant to chart-based sentiment but reports no underlying development.",
+         "age": "4h ago"
+        },
+        {
+         "id": "n2",
+         "title": "Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb",
+         "source": "Decrypt",
+         "url": "https://decrypt.co/379189/bitcoins-breakout-cools-fed-rate-hike-bets-climb",
+         "published_at": "2026-09-24T16:01:01Z",
+         "summary": "Bitcoin has slipped back below $85,000 after tagging an eight-month high near $87,400 last week, with rising odds of an October Fed hike taking some air out of the rally.",
+         "tickers": [],
+         "also_reported_by": [],
+         "scope": "asset",
+         "relevance": "headline",
+         "age_hours": 6.6,
+         "stale": false,
+         "model_use": "headline",
+         "sentiment": "bearish",
+         "impact": "medium",
+         "impact_reason": "Reports that bitcoin's breakout is cooling as bets on Fed rate hikes climb, which may be relevant to macro-driven demand for the asset.",
+         "age": "7h ago"
+        },
+        {
+         "id": "n3",
+         "title": "Bitcoin’s bear markets are getting milder. Bull markets may be next",
+         "source": "CoinDesk",
+         "url": "https://www.coindesk.com/markets/2026/09/24/bitcoin-s-bear-markets-are-getting-milder-the-bull-markets-may-be-next",
+         "published_at": "2026-09-24T15:26:34Z",
+         "summary": "Bitcoin’s latest bear market was milder than past crashes as ETFs, institutional investors and a maturing market reshape its cycles.",
+         "tickers": [],
+         "also_reported_by": [],
+         "scope": "asset",
+         "relevance": "headline",
+         "age_hours": 7.2,
+         "stale": false,
+         "model_use": "headline",
+         "sentiment": "bullish",
+         "impact": "low",
+         "impact_reason": "An analytical piece arguing bitcoin's drawdowns are becoming milder and bull phases may follow, which may be relevant to long-term cycle narratives.",
+         "age": "7h ago"
+        },
+        {
+         "id": "n4",
+         "title": "Crypto for Advisors:The hidden costs of holding your own bitcoin",
+         "source": "CoinDesk",
+         "url": "https://www.coindesk.com/coindesk-indices/2026/09/24/crypto-for-advisors-the-hidden-costs-of-holding-your-own-bitcoin",
+         "published_at": "2026-09-24T14:49:28Z",
+         "summary": null,
+         "tickers": [],
+         "also_reported_by": [],
+         "scope": "asset",
+         "relevance": "headline",
+         "age_hours": 7.8,
+         "stale": false,
+         "model_use": "headline",
+         "sentiment": "neutral",
+         "impact": "low",
+         "impact_reason": "An advisor-focused explainer on the costs of self-custody, which may be relevant to holders' operational choices rather than to fundamentals.",
+         "age": "8h ago"
+        },
+        {
+         "id": "n5",
+         "title": "Bitcoin slides to $83,300 as bond yields hit highest level since 2007",
+         "source": "CoinDesk",
+         "url": "https://www.coindesk.com/markets/2026/09/24/bitcoin-steadies-near-usd84-000-after-bond-yields-hit-a-2007-high",
+         "published_at": "2026-09-24T10:30:28Z",
+         "summary": "The 10-year Treasury yield reached its highest since 2007, sending U.S. stocks and crypto lower before Asian and European traders bought the dip.",
+         "tickers": [],
+         "also_reported_by": [],
+         "scope": "asset",
+         "relevance": "headline",
+         "age_hours": 12.1,
+         "stale": false,
+         "model_use": "headline",
+         "sentiment": "bearish",
+         "impact": "medium",
+         "impact_reason": "Reports bitcoin sliding alongside bond yields reaching their highest level since 2007, which may be relevant to macro liquidity conditions for the asset.",
+         "age": "12h ago"
+        },
+        {
+         "id": "n6",
+         "title": "Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000",
+         "source": "CoinDesk",
+         "url": "https://www.coindesk.com/markets/2026/09/24/traders-are-pricing-in-4-fed-rate-hikes-as-bitcoin-slides-below-usd83-000",
+         "published_at": "2026-09-24T10:11:51Z",
+         "summary": "The four-hike path is the most likely outcome, while rising bond yields and a stronger dollar weigh on bitcoin and gold.",
+         "tickers": [],
+         "also_reported_by": [],
+         "scope": "asset",
+         "relevance": "headline",
+         "age_hours": 12.4,
+         "stale": false,
+         "model_use": "headline",
+         "sentiment": "bearish",
+         "impact": "medium",
+         "impact_reason": "Notes traders pricing in four Fed rate hikes by June 2027 while bitcoin trades lower, which may be relevant to rate-sensitive demand.",
+         "age": "12h ago"
+        },
+        {
+         "id": "n7",
+         "title": "U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins",
+         "source": "CoinDesk",
+         "url": "https://www.coindesk.com/policy/2026/09/24/u-s-federal-reserve-moves-on-proposals-to-implement-genius-act-for-stablecoins",
+         "published_at": "2026-09-24T22:28:49Z",
+         "summary": "The Fed proposed rules on putting last year's GENIUS Act into place with regulations, including those governing stablecoin yield programs.",
+         "tickers": [],
+         "also_reported_by": [],
+         "scope": "market",
+         "relevance": "market",
+         "age_hours": 0.1,
+         "stale": false,
+         "model_use": "headline",
+         "sentiment": "neutral",
+         "impact": "high",
+         "impact_reason": "Reports the Federal Reserve advancing proposals to implement the GENIUS Act for stablecoins, a regulatory step that may be relevant to the broader crypto market structure.",
+         "age": "6m ago"
+        },
+        {
+         "id": "n8",
+         "title": "Federal Reserve Unveils Stablecoin Rules on Reserves and Capital",
+         "source": "Decrypt",
+         "url": "https://decrypt.co/379274/federal-reserve-unveils-stablecoin-rules-on-reserves-and-capital",
+         "published_at": "2026-09-24T21:56:03Z",
+         "summary": "The central bank opened two proposals for comment under the GENIUS Act, requiring issuers it supervises to back tokens fully with safe assets and creating an application process for banks seeking to issue stablecoins.",
+         "tickers": [],
+         "also_reported_by": [],
+         "scope": "market",
+         "relevance": "market",
+         "age_hours": 0.7,
+         "stale": false,
+         "model_use": "headline",
+         "sentiment": "neutral",
+         "impact": "high",
+         "impact_reason": "Describes newly unveiled Fed rules on stablecoin reserves and capital, which may be relevant to how dollar-backed tokens operate market-wide.",
+         "age": "42m ago"
+        },
+        {
+         "id": "n9",
+         "title": "U.S. commodities firms can invest in tokenized assets, use blockchain records: CFTC",
+         "source": "CoinDesk",
+         "url": "https://www.coindesk.com/policy/2026/09/24/u-s-commodities-firms-can-invest-in-tokenized-assets-use-blockchain-records-cftc",
+         "published_at": "2026-09-24T20:04:46Z",
+         "summary": "The U.S derivatives regulator is grinding away at further guidance that welcomes tokenization and blockchain recordkeeping as regular industry elements.",
+         "tickers": [],
+         "also_reported_by": [],
+         "scope": "market",
+         "relevance": "market",
+         "age_hours": 2.5,
+         "stale": false,
+         "model_use": "headline",
+         "sentiment": "bullish",
+         "impact": "medium",
+         "impact_reason": "Reports the CFTC permitting commodities firms to invest in tokenized assets and use blockchain records, which may be relevant to institutional adoption of digital assets.",
+         "age": "2h ago"
+        }
+       ],
+       "bullish_evidence": [
+        "[bullish, low impact] CoinDesk (2026-09-24 15:26 UTC, 7h ago): \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" — An analytical piece arguing bitcoin's drawdowns are becoming milder and bull phases may follow, which may be relevant to long-term cycle narratives.",
+        "[bullish, medium impact] [market-wide] CoinDesk (2026-09-24 20:04 UTC, 2h ago): \"U.S. commodities firms can invest in tokenized assets, use blockchain records: CFTC\" — Reports the CFTC permitting commodities firms to invest in tokenized assets and use blockchain records, which may be relevant to institutional adoption of digital assets."
+       ],
+       "bearish_evidence": [
+        "[bearish, medium impact] Decrypt (2026-09-24 16:01 UTC, 7h ago): \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" — Reports that bitcoin's breakout is cooling as bets on Fed rate hikes climb, which may be relevant to macro-driven demand for the asset.",
+        "[bearish, medium impact] CoinDesk (2026-09-24 10:30 UTC, 12h ago): \"Bitcoin slides to $83,300 as bond yields hit highest level since 2007\" — Reports bitcoin sliding alongside bond yields reaching their highest level since 2007, which may be relevant to macro liquidity conditions for the asset.",
+        "[bearish, medium impact] CoinDesk (2026-09-24 10:11 UTC, 12h ago): \"Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000\" — Notes traders pricing in four Fed rate hikes by June 2027 while bitcoin trades lower, which may be relevant to rate-sensitive demand."
+       ],
+       "neutral_mixed_evidence": [
+        "[neutral, low impact] CoinDesk (2026-09-24 18:46 UTC, 4h ago): \"Bitcoin just topped a key long-term moving average. Here's what it might mean\" — A headline-only technical observation that bitcoin cleared a long-term moving average, which may be relevant to chart-based sentiment but reports no underlying development.",
+        "[neutral, low impact] CoinDesk (2026-09-24 14:49 UTC, 8h ago): \"Crypto for Advisors:The hidden costs of holding your own bitcoin\" — An advisor-focused explainer on the costs of self-custody, which may be relevant to holders' operational choices rather than to fundamentals.",
+        "[neutral, high impact] [market-wide] CoinDesk (2026-09-24 22:28 UTC, 6m ago): \"U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins\" — Reports the Federal Reserve advancing proposals to implement the GENIUS Act for stablecoins, a regulatory step that may be relevant to the broader crypto market structure.",
+        "[neutral, high impact] [market-wide] Decrypt (2026-09-24 21:56 UTC, 42m ago): \"Federal Reserve Unveils Stablecoin Rules on Reserves and Capital\" — Describes newly unveiled Fed rules on stablecoin reserves and capital, which may be relevant to how dollar-backed tokens operate market-wide."
+       ],
+       "impact_events": [
+        "[neutral, high impact] [market-wide] CoinDesk (2026-09-24 22:28 UTC, 6m ago): \"U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins\" — Reports the Federal Reserve advancing proposals to implement the GENIUS Act for stablecoins, a regulatory step that may be relevant to the broader crypto market structure.",
+        "[neutral, high impact] [market-wide] Decrypt (2026-09-24 21:56 UTC, 42m ago): \"Federal Reserve Unveils Stablecoin Rules on Reserves and Capital\" — Describes newly unveiled Fed rules on stablecoin reserves and capital, which may be relevant to how dollar-backed tokens operate market-wide.",
+        "[bearish, medium impact] Decrypt (2026-09-24 16:01 UTC, 7h ago): \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" — Reports that bitcoin's breakout is cooling as bets on Fed rate hikes climb, which may be relevant to macro-driven demand for the asset.",
+        "[bearish, medium impact] CoinDesk (2026-09-24 10:30 UTC, 12h ago): \"Bitcoin slides to $83,300 as bond yields hit highest level since 2007\" — Reports bitcoin sliding alongside bond yields reaching their highest level since 2007, which may be relevant to macro liquidity conditions for the asset.",
+        "[bearish, medium impact] CoinDesk (2026-09-24 10:11 UTC, 12h ago): \"Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000\" — Notes traders pricing in four Fed rate hikes by June 2027 while bitcoin trades lower, which may be relevant to rate-sensitive demand.",
+        "[bullish, medium impact] [market-wide] CoinDesk (2026-09-24 20:04 UTC, 2h ago): \"U.S. commodities firms can invest in tokenized assets, use blockchain records: CFTC\" — Reports the CFTC permitting commodities firms to invest in tokenized assets and use blockchain records, which may be relevant to institutional adoption of digital assets."
+       ],
+       "conflicting_evidence": [
+        "Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt)."
+       ],
+       "uncertainty": [],
+       "stale_story_count": 0,
+       "excluded": [
+        "Ignored 20 article(s) older than 7 days.",
+        "Merged 2 duplicate or syndicated article(s)."
+       ],
+       "discarded": []
+      }
+     ],
+     "unavailable": [],
+     "price_context": [
+      {
+       "symbol": "BTC",
+       "change_24h_pct": -0.29787,
+       "provider": "CoinGecko",
+       "statement": "BTC moved -0.30% over 24h (CoinGecko)."
+      }
+     ],
+     "price_note": "Price movement is shown separately and is not used to label news sentiment."
+    },
+    "evidence": [
+     "News sentiment for BTC: bearish (1 bullish, 3 bearish, 2 neutral asset-specific article(s); retrieved 2026-09-24 22:36 UTC). This describes the tone of news coverage, not a price forecast.",
+     "Market-wide news sentiment: neutral. Market-wide sentiment is neutral rather than bullish (as the article count alone would suggest) because stories are weighted by potential impact.",
+     "[neutral, low impact] CoinDesk (2026-09-24 18:46 UTC, 4h ago): \"Bitcoin just topped a key long-term moving average. Here's what it might mean\" — A headline-only technical observation that bitcoin cleared a long-term moving average, which may be relevant to chart-based sentiment but reports no underlying development.",
+     "[bearish, medium impact] Decrypt (2026-09-24 16:01 UTC, 7h ago): \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" — Reports that bitcoin's breakout is cooling as bets on Fed rate hikes climb, which may be relevant to macro-driven demand for the asset.",
+     "[bullish, low impact] CoinDesk (2026-09-24 15:26 UTC, 7h ago): \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" — An analytical piece arguing bitcoin's drawdowns are becoming milder and bull phases may follow, which may be relevant to long-term cycle narratives.",
+     "[neutral, low impact] CoinDesk (2026-09-24 14:49 UTC, 8h ago): \"Crypto for Advisors:The hidden costs of holding your own bitcoin\" — An advisor-focused explainer on the costs of self-custody, which may be relevant to holders' operational choices rather than to fundamentals.",
+     "[bearish, medium impact] CoinDesk (2026-09-24 10:30 UTC, 12h ago): \"Bitcoin slides to $83,300 as bond yields hit highest level since 2007\" — Reports bitcoin sliding alongside bond yields reaching their highest level since 2007, which may be relevant to macro liquidity conditions for the asset.",
+     "[bearish, medium impact] CoinDesk (2026-09-24 10:11 UTC, 12h ago): \"Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000\" — Notes traders pricing in four Fed rate hikes by June 2027 while bitcoin trades lower, which may be relevant to rate-sensitive demand.",
+     "Conflicting news: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt).",
+     "Price context (separate from news sentiment): BTC moved -0.30% over 24h (CoinGecko)."
+    ],
+    "scenarios": [],
+    "risks": [
+     {
+      "description": "News timing alone does not show that any story caused a price move; news sentiment is not a buy or sell signal.",
+      "severity": "low",
+      "source": null
+     }
+    ],
+    "confidence": null,
+    "error": null
+   },
+   {
+    "agent": "risk",
+    "status": "ok",
+    "mock": false,
+    "summary": "Overall risk for BTC: medium. BTC is near resistance (~$84,266.90, 0.1% away); BTC is near support (~$84,017.40, 0.2% away); BTC is inside a swing zone (~$84,144.90–$84,228.60); plus 3 more. Uncertainty: low.",
+    "findings": {
+     "reviewed_agents": [
+      "market",
+      "news_sentiment",
+      "technical_analysis"
+     ],
+     "asset": "BTC",
+     "overall_risk": "medium",
+     "overall_reasons": [
+      "BTC is near resistance (~$84,266.90, 0.1% away)",
+      "BTC is near support (~$84,017.40, 0.2% away)",
+      "BTC is inside a swing zone (~$84,144.90–$84,228.60)",
+      "recent news is conflicting",
+      "2 recent high-impact news item(s)",
+      "regulatory or macro news is in play"
+     ],
+     "uncertainty_level": "low",
+     "uncertainty_reasons": [],
+     "missing_evidence": [],
+     "factors": [
+      {
+       "id": "near_resistance",
+       "category": "technical",
+       "affects": "risk",
+       "severity": "medium",
+       "headline": "BTC is near resistance (~$84,266.90, 0.1% away)",
+       "explanation": "The last 5m close ($84,160.80) is 0.1% from the approximate resistance zone ~$84,263.00–$84,270.80 (mean ~$84,266.90); price often reacts around such zones in either direction.",
+       "source": "technical_analysis",
+       "evidence": [],
+       "weakens_if": "Resistance zone ~$84,263.00–$84,270.80; a 5m close above ~$84,270.80 would break it."
+      },
+      {
+       "id": "near_support",
+       "category": "technical",
+       "affects": "risk",
+       "severity": "medium",
+       "headline": "BTC is near support (~$84,017.40, 0.2% away)",
+       "explanation": "The last 5m close ($84,160.80) is 0.2% from the approximate support zone ~$84,017.40 (mean ~$84,017.40); price often reacts around such zones in either direction.",
+       "source": "technical_analysis",
+       "evidence": [],
+       "weakens_if": "Support zone ~$84,017.40; a 5m close below ~$84,017.40 would break it."
+      },
+      {
+       "id": "inside_level_zone",
+       "category": "technical",
+       "affects": "risk",
+       "severity": "medium",
+       "headline": "BTC is inside a swing zone (~$84,144.90–$84,228.60)",
+       "explanation": "The last 5m close ($84,160.80) sits inside the approximate swing zone ~$84,144.90–$84,228.60 (2 swing point(s)), so that zone is neither clear support nor clear resistance; price often reacts around such zones in either direction.",
+       "source": "technical_analysis",
+       "evidence": [],
+       "weakens_if": "A 5m close above ~$84,228.60 or below ~$84,144.90 would take price out of that zone."
+      },
+      {
+       "id": "news_conflict",
+       "category": "news",
+       "affects": "risk",
+       "severity": "medium",
+       "headline": "recent news is conflicting",
+       "explanation": "Recent coverage of BTC conflicts: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt).",
+       "source": "news_sentiment",
+       "evidence": [],
+       "weakens_if": "Further coverage may tip the balance either way."
+      },
+      {
+       "id": "high_impact_news",
+       "category": "news",
+       "affects": "risk",
+       "severity": "medium",
+       "headline": "2 recent high-impact news item(s)",
+       "explanation": "Recent coverage rated high potential impact: 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk); 'Federal Reserve Unveils Stablecoin Rules on Reserves and Capital' (Decrypt). Developments in these stories can change the backdrop quickly.",
+       "source": "news_sentiment",
+       "evidence": [],
+       "weakens_if": "Follow-up developments in these stories can change the backdrop."
+      },
+      {
+       "id": "macro_regulatory_event",
+       "category": "news",
+       "affects": "risk",
+       "severity": "medium",
+       "headline": "regulatory or macro news is in play",
+       "explanation": "Recent regulatory/macro coverage may affect the backdrop: 'Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb' (Decrypt); 'Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000' (CoinDesk).",
+       "source": "news_sentiment",
+       "evidence": [],
+       "weakens_if": "An official decision or data release can shift the whole market."
+      },
+      {
+       "id": "at_24h_high",
+       "category": "market",
+       "affects": "risk",
+       "severity": "low",
+       "headline": "BTC is trading at its 24h high",
+       "explanation": "BTC ($84,158.00) is within 1.0% of its 24h high ($84,843.00); conditions at the edge of the recent range can change quickly.",
+       "source": "market",
+       "evidence": [],
+       "weakens_if": "A move beyond the 24h high takes price outside the recently observed range."
+      }
+     ],
+     "invalidation_conditions": [
+      {
+       "condition": "A 5m close above SMA 20 (~$84,317.53) would end the current rule-based downtrend classification.",
+       "source": "technical_analysis",
+       "basis": "live_data"
+      },
+      {
+       "condition": "Support zone ~$84,017.40; a 5m close below ~$84,017.40 would break it.",
+       "source": "technical_analysis",
+       "basis": "live_data"
+      },
+      {
+       "condition": "Resistance zone ~$84,263.00–$84,270.80; a 5m close above ~$84,270.80 would break it.",
+       "source": "technical_analysis",
+       "basis": "live_data"
+      },
+      {
+       "condition": "Price is inside the swing zone ~$84,144.90–$84,228.60; a 5m close above ~$84,228.60 or below ~$84,144.90 would take it out of that zone.",
+       "source": "technical_analysis",
+       "basis": "live_data"
+      },
+      {
+       "condition": "A move outside the 24h range ($82,941.00 – $84,843.00) would mean conditions have changed from those analyzed.",
+       "source": "market",
+       "basis": "live_data"
+      },
+      {
+       "condition": "If the story 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk) develops further (for example official action or follow-up reporting), the news backdrop described here could change.",
+       "source": "news_sentiment",
+       "basis": "news"
+      },
+      {
+       "condition": "New high-impact bullish coverage would weaken the current bearish news read.",
+       "source": "news_sentiment",
+       "basis": "news"
+      }
+     ],
+     "conflicting_evidence": [
+      "Recent coverage of BTC conflicts: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt)."
+     ],
+     "data_quality": [],
+     "inputs": [
+      {
+       "agent": "vision",
+       "status": "not_run",
+       "detail": null
+      },
+      {
+       "agent": "technical_analysis",
+       "status": "ok",
+       "detail": null
+      },
+      {
+       "agent": "market",
+       "status": "ok",
+       "detail": null
+      },
+      {
+       "agent": "news_sentiment",
+       "status": "ok",
+       "detail": null
+      }
+     ],
+     "rules": "Overall risk is unknown without live evidence (market data, technical analysis or classified news); high with two high risk factors, or one high factor corroborated by a medium/high factor in another category; medium with any medium or high risk factor; otherwise low. Data-quality and screenshot issues raise uncertainty, not risk."
+    },
+    "evidence": [
+     "Overall risk medium from 7 risk factor(s) (0 high, 6 medium, 1 low); evidence reviewed: technical analysis, live market data, news & sentiment. Rule-based, not a forecast.",
+     "[medium · technical] The last 5m close ($84,160.80) is 0.1% from the approximate resistance zone ~$84,263.00–$84,270.80 (mean ~$84,266.90); price often reacts around such zones in either direction.",
+     "[medium · technical] The last 5m close ($84,160.80) is 0.2% from the approximate support zone ~$84,017.40 (mean ~$84,017.40); price often reacts around such zones in either direction.",
+     "[medium · technical] The last 5m close ($84,160.80) sits inside the approximate swing zone ~$84,144.90–$84,228.60 (2 swing point(s)), so that zone is neither clear support nor clear resistance; price often reacts around such zones in either direction.",
+     "[medium · news/event] Recent coverage of BTC conflicts: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt).",
+     "[medium · news/event] Recent coverage rated high potential impact: 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk); 'Federal Reserve Unveils Stablecoin Rules on Reserves and Capital' (Decrypt). Developments in these stories can change the backdrop quickly.",
+     "[medium · news/event] Recent regulatory/macro coverage may affect the backdrop: 'Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb' (Decrypt); 'Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000' (CoinDesk).",
+     "[low · market] BTC ($84,158.00) is within 1.0% of its 24h high ($84,843.00); conditions at the edge of the recent range can change quickly.",
+     "Would invalidate or weaken the analysis: A 5m close above SMA 20 (~$84,317.53) would end the current rule-based downtrend classification.",
+     "Would invalidate or weaken the analysis: Support zone ~$84,017.40; a 5m close below ~$84,017.40 would break it.",
+     "Would invalidate or weaken the analysis: Resistance zone ~$84,263.00–$84,270.80; a 5m close above ~$84,270.80 would break it.",
+     "Would invalidate or weaken the analysis: Price is inside the swing zone ~$84,144.90–$84,228.60; a 5m close above ~$84,228.60 or below ~$84,144.90 would take it out of that zone.",
+     "Would invalidate or weaken the analysis: A move outside the 24h range ($82,941.00 – $84,843.00) would mean conditions have changed from those analyzed.",
+     "Would invalidate or weaken the analysis: If the story 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk) develops further (for example official action or follow-up reporting), the news backdrop described here could change.",
+     "Would invalidate or weaken the analysis: New high-impact bullish coverage would weaken the current bearish news read."
+    ],
+    "scenarios": [],
+    "risks": [
+     {
+      "description": "Technical: The last 5m close ($84,160.80) is 0.1% from the approximate resistance zone ~$84,263.00–$84,270.80 (mean ~$84,266.90); price often reacts around such zones in either direction.",
+      "severity": "medium",
+      "source": "technical_analysis"
+     },
+     {
+      "description": "Technical: The last 5m close ($84,160.80) is 0.2% from the approximate support zone ~$84,017.40 (mean ~$84,017.40); price often reacts around such zones in either direction.",
+      "severity": "medium",
+      "source": "technical_analysis"
+     },
+     {
+      "description": "Technical: The last 5m close ($84,160.80) sits inside the approximate swing zone ~$84,144.90–$84,228.60 (2 swing point(s)), so that zone is neither clear support nor clear resistance; price often reacts around such zones in either direction.",
+      "severity": "medium",
+      "source": "technical_analysis"
+     },
+     {
+      "description": "News/event: Recent coverage of BTC conflicts: Coverage points both ways: 1 bullish vs 3 bearish article(s), e.g. \"Bitcoin’s bear markets are getting milder. Bull markets may be next\" (CoinDesk) vs \"Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb\" (Decrypt).",
+      "severity": "medium",
+      "source": "news_sentiment"
+     },
+     {
+      "description": "News/event: Recent coverage rated high potential impact: 'U.S. Federal Reserve moves on proposals to implement GENIUS Act for stablecoins' (CoinDesk); 'Federal Reserve Unveils Stablecoin Rules on Reserves and Capital' (Decrypt). Developments in these stories can change the backdrop quickly.",
+      "severity": "medium",
+      "source": "news_sentiment"
+     },
+     {
+      "description": "News/event: Recent regulatory/macro coverage may affect the backdrop: 'Bitcoin Breakout Cools as Fed Rate-Hike Bets Climb' (Decrypt); 'Traders price in 4 Fed rate hikes by June 2027 as bitcoin slides below $83,000' (CoinDesk).",
+      "severity": "medium",
+      "source": "news_sentiment"
+     },
+     {
+      "description": "Market: BTC ($84,158.00) is within 1.0% of its 24h high ($84,843.00); conditions at the edge of the recent range can change quickly.",
+      "severity": "low",
+      "source": "market"
+     }
+    ],
+    "confidence": null,
+    "error": null
+   },
+   {
+    "agent": "opportunity",
+    "status": "ok",
+    "mock": false,
+    "summary": "WAIT\nBTC 5m: price is inside the zone ~$84,144.90–$84,228.60.\nBuy trigger: 5m close above ~$84,228.60 (upper bound of the price zone ~$84,144.90–$84,228.60), with MACD turning above its signal line and supporting volume\nSell trigger: 5m close below ~$84,144.90 (lower bound of the price zone ~$84,144.90–$84,228.60) and supporting volume\nRisk: Medium · Confidence: Medium",
+    "findings": {
+     "asset": "BTC",
+     "timeframe": "5m",
+     "requested_timeframe": "5m",
+     "action": "wait",
+     "confidence": "medium",
+     "setup": null,
+     "confirmed": false,
+     "summary": "BTC 5m: price is inside the zone ~$84,144.90–$84,228.60.",
+     "bullish_score": 0,
+     "bearish_score": 5,
+     "bullish_evidence": [],
+     "bearish_evidence": [
+      {
+       "id": "downtrend",
+       "side": "bearish",
+       "points": 2,
+       "category": "trend",
+       "clause": "is in a downtrend",
+       "source": "technical_analysis"
+      },
+      {
+       "id": "macd",
+       "side": "bearish",
+       "points": 1,
+       "category": "momentum",
+       "clause": "MACD is below its signal line",
+       "source": "technical_analysis"
+      },
+      {
+       "id": "rsi",
+       "side": "bearish",
+       "points": 1,
+       "category": "momentum",
+       "clause": "RSI 42 is weak, not stretched",
+       "source": "technical_analysis"
+      },
+      {
+       "id": "news_tone",
+       "side": "bearish",
+       "points": 1,
+       "category": "news",
+       "clause": "recent news is bearish",
+       "source": "news_sentiment"
+      }
+     ],
+     "blocking_factors": [
+      {
+       "id": "inside_zone",
+       "kind": "blocker",
+       "applies_to": "both",
+       "reason": "price is inside the zone ~$84,144.90–$84,228.60",
+       "source": "technical_analysis"
+      }
+     ],
+     "cautions": [],
+     "bullish_trigger": {
+      "action": "buy",
+      "condition": "5m close above ~$84,228.60 (upper bound of the price zone ~$84,144.90–$84,228.60), with MACD turning above its signal line and supporting volume",
+      "price": 84228.6,
+      "basis": "containing_zone_upper",
+      "zone": {
+       "lower": 84144.9,
+       "upper": 84228.6
+      },
+      "confirmed": false,
+      "live_price_beyond": false
+     },
+     "bearish_trigger": {
+      "action": "sell",
+      "condition": "5m close below ~$84,144.90 (lower bound of the price zone ~$84,144.90–$84,228.60) and supporting volume",
+      "price": 84144.9,
+      "basis": "containing_zone_lower",
+      "zone": {
+       "lower": 84144.9,
+       "upper": 84228.6
+      },
+      "confirmed": false,
+      "live_price_beyond": false
+     },
+     "entry_zone": null,
+     "entry_basis": null,
+     "invalidation": null,
+     "other_invalidations": [],
+     "risk_level": "medium",
+     "uncertainty_level": "low",
+     "missing_evidence": [],
+     "last_close": 84160.8,
+     "live_price": 84158.0,
+     "context": [
+      "Live price $84,158.00 (CoinGecko); 24h range $82,941.00 – $84,843.00."
+     ],
+     "inputs": [
+      {
+       "agent": "vision",
+       "status": "not_run",
+       "detail": null
+      },
+      {
+       "agent": "technical_analysis",
+       "status": "ok",
+       "detail": null
+      },
+      {
+       "agent": "market",
+       "status": "ok",
+       "detail": null
+      },
+      {
+       "agent": "news_sentiment",
+       "status": "ok",
+       "detail": null
+      }
+     ],
+     "sell_meaning": "SELL means reduce or exit a long position. It is not a signal to open a short position.",
+     "rules": "Deterministic rules: the trend sets the candidate (uptrend -> BUY, downtrend -> SELL, mixed -> WAIT). Evidence scores points (trend 2, MACD 1, RSI 1, zone break 2, volume up to 2, news up to 2). BUY/SELL needs no blocking factor, enough points and a clear margin over the opposing side; otherwise WAIT. Triggers and invalidations are closes on the analyzed timeframe at computed zone bounds or moving averages. No probabilities, targets or percentage stops."
+    },
+    "evidence": [
+     "Decision: WAIT on BTC 5m (bullish 0 vs bearish 5 points; confidence medium). Rule-based, not a forecast.",
+     "Bearish: Is in a downtrend.",
+     "Bearish: MACD is below its signal line.",
+     "Bearish: RSI 42 is weak, not stretched.",
+     "Bearish: Recent news is bearish.",
+     "Blocking: Price is inside the zone ~$84,144.90–$84,228.60.",
+     "Last 5m close: $84,160.80.",
+     "Live price $84,158.00 (CoinGecko); 24h range $82,941.00 – $84,843.00."
+    ],
+    "scenarios": [],
+    "risks": [],
+    "confidence": null,
+    "error": null
+   }
+  ],
+  "disclaimer": "BUY / SELL / WAIT reads are rule-based decision support from the evidence shown, not guarantees or financial advice. SELL means reduce or exit a long position, not open a short."
+ }
+}

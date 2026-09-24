@@ -58,6 +58,7 @@ AgentName = Literal[
     "news_sentiment",
     "opportunity",
     "risk",
+    "education",
 ]
 Level = Literal["low", "medium", "high"]
 

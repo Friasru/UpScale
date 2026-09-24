@@ -73,7 +73,45 @@ GENERAL_CRYPTO_AGENTS: tuple[AgentName, ...] = (
 # Risk reviews the evidence agents; opportunity decides last, after the risk review.
 AGENT_ORDER: tuple[AgentName, ...] = (
     "vision", "technical_analysis", "market", "news_sentiment", "risk", "opportunity",
+    "education",
 )
+
+# Trading and crypto concepts a general question ("What is RSI?") can be about, on top of
+# the technical, market and crypto terms above.
+CONCEPT_TERMS = {
+    "overbought", "oversold", "candlestick", "candlesticks", "wick", "wicks", "doji",
+    "divergence", "momentum", "stochastic", "vwap", "atr", "ichimoku", "moving averages",
+    "price action", "consolidation", "pullback", "retracement", "reversal", "stop loss",
+    "stop-loss", "take profit", "take-profit", "leverage", "margin", "liquidation",
+    "limit order", "market order", "spread", "slippage", "order", "orders", "bid", "ask",
+    "wallet", "staking", "halving", "mining", "gas", "whale", "whales", "fomo", "fud",
+    "hodl", "dca", "dollar cost averaging", "bull market", "bear market", "short selling",
+    "long position", "short position", "position sizing", "risk reward", "risk/reward",
+    "drawdown", "scalping", "swing trading", "day trading", "signal", "signals",
+    "golden cross", "death cross", "head and shoulders", "double top", "double bottom",
+    "triangle", "flag", "wedge", "bollinger bands", "fib", "fibonacci retracement",
+    "market cap", "circulating supply", "exchange", "futures", "perpetual", "perps",
+    "options", "hedge", "hedging",
+}
+# "What is/does/are ...", "explain ...", "how does ... work": asking what something means.
+_CONCEPT_QUESTION_RE = re.compile(
+    r"^(?:(?:can|could) you |please )?"
+    r"(?:what(?:'s|’s|s| is| are)\b"
+    r"|what (?:does|do)\b.*\bmeans?\b"
+    r"|how (?:does|do|is|are)\b.*\b(?:work|works|used|calculated|read)\b"
+    r"|explain\b|define\b|meaning of\b|tell me (?:about|what)\b)"
+)
+_ALL_CONCEPTS = (
+    CONCEPT_TERMS
+    | CRYPTO_TERMS
+    | INTENT_KEYWORDS["technical_analysis"]
+    | INTENT_KEYWORDS["market"]
+)
+# Signs the question is about the market right now, which needs live data, not a lesson.
+LIVE_MARKERS = {
+    "now", "right now", "current", "currently", "today", "tonight", "latest", "this week",
+    "at the moment", "doing", "happening", "going", "price of", "trading at", "worth",
+}
 # fmt: on
 
 _WORD_RE = re.compile(r"\$?[A-Za-z][A-Za-z0-9]*")
@@ -128,10 +166,31 @@ def _matched_keywords(text: str, words: set[str], keywords: set[str]) -> list[st
     return sorted(kw for kw in keywords if (kw in text if " " in kw else kw in words))
 
 
+def _concept_question(
+    lowered: str, words: set[str], assets: list[str], has_images: bool
+) -> list[str]:
+    """Concepts asked about when the query is a general "what is X?" question, else [].
+
+    Only questions that name no coin, attach no chart, ask for no decision and don't ask
+    about the market right now count: those keep going through the live pipeline.
+    """
+    if assets or has_images or not _CONCEPT_QUESTION_RE.match(lowered.strip()):
+        return []
+    if _matched_keywords(lowered, words, STANDALONE_DECISION_PHRASES | {"should i"}):
+        return []
+    if _matched_keywords(lowered, words, LIVE_MARKERS):
+        return []
+    return _matched_keywords(lowered, words, _ALL_CONCEPTS)
+
+
 def route(query: str, has_images: bool) -> RoutingDecision:
     lowered = query.lower()
     words = {token.lstrip("$") for token in _WORD_RE.findall(lowered)}
     assets = detect_assets(query)
+
+    if concepts := _concept_question(lowered, words, assets, has_images):
+        why = f"General concept question ({', '.join(concepts)}): explained without live data."
+        return RoutingDecision(reasons={"education": why})
     is_crypto = bool(assets) or bool(words & CRYPTO_TERMS)
 
     reasons: dict[AgentName, str] = {}

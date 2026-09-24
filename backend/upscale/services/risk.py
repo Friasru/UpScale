@@ -58,7 +58,7 @@ AGENT_LABELS: dict[AgentName, str] = {
     "technical_analysis": "Technical analysis",
     "market": "Live market data",
     "news_sentiment": "News & sentiment",
-    "opportunity": "Opportunity scenarios",
+    "opportunity": "Opportunity decision",
     "risk": "Risk review",
 }
 _SEVERITY_RANK: dict[Level, int] = {"low": 0, "medium": 1, "high": 2}

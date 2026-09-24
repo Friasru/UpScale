@@ -219,7 +219,13 @@ def test_screenshot_asset_and_timeframe_flow_downstream(fake_coingecko):
     serve_wave(fake_coingecko)
     response = ask("", chart())
     results = by_agent(response)
-    assert response.analysis.agents_used == ["vision", "technical_analysis", "market", "risk"]
+    assert response.analysis.agents_used == [
+        "vision",
+        "technical_analysis",
+        "market",
+        "risk",
+        "opportunity",
+    ]
     assert response.analysis.assets == ["BTC"]
     assert results["vision"].status == "ok"
     technical = results["technical_analysis"]

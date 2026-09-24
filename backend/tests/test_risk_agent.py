@@ -920,8 +920,9 @@ def test_uncertainty_from_risk_review_can_raise_the_analysis_level():
 )
 def test_risk_is_routed_whenever_other_agents_run(query, images):
     decision = route(query, has_images=bool(images))
-    assert decision.agents[-1] == "risk"
-    assert len(decision.agents) > 1
+    assert "risk" in decision.agents and len(decision.agents) > 1
+    # Risk reviews every evidence agent; only the opportunity decision comes after it.
+    assert decision.agents[decision.agents.index("risk") + 1 :] in ([], ["opportunity"])
 
 
 def test_risk_is_not_routed_for_non_crypto_requests():

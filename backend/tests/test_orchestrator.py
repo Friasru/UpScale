@@ -41,8 +41,8 @@ def test_route_general_crypto_question():
         "technical_analysis",
         "market",
         "news_sentiment",
-        "opportunity",
         "risk",
+        "opportunity",
     ]
 
 
@@ -54,7 +54,13 @@ def test_route_specific_intent_selects_subset():
 
 
 def test_route_screenshot():
-    assert route("", has_images=True).agents == ["vision", "technical_analysis", "market", "risk"]
+    assert route("", has_images=True).agents == [
+        "vision",
+        "technical_analysis",
+        "market",
+        "risk",
+        "opportunity",
+    ]
 
 
 def test_route_ignores_non_crypto_text():
@@ -71,12 +77,12 @@ def test_orchestrator_runs_selected_agents_and_combines_results():
     assert analysis is not None
     assert [r.agent for r in analysis.agent_results] == analysis.agents_used
     assert analysis.evidence and all(e.source in analysis.agents_used for e in analysis.evidence)
-    assert analysis.scenarios
     assert analysis.risks and all(r.source for r in analysis.risks)
-    assert analysis.uncertainty.level == "high"
-    assert response.message.content.startswith("Prototype mode")
-    assert "No AI model is connected" not in response.message.content
-    assert "not built yet (opportunity)" in response.message.content
+    assert analysis.mock is False
+    # The reply leads with the decision block.
+    assert response.message.content.split("\n", 1)[0] in ("BUY", "SELL", "WAIT")
+    assert "Prototype mode" not in response.message.content
+    assert "not built yet" not in response.message.content
 
 
 def test_orchestrator_passes_dependency_results_downstream():
@@ -236,12 +242,11 @@ def test_general_question_uncertainty_follows_real_evidence(fake_coingecko):
     response = ask(Orchestrator(), "What's up with BTC?")
     analysis = response.analysis
     by_agent = {r.agent: r for r in analysis.agent_results}
-    assert by_agent["opportunity"].mock and by_agent["opportunity"].summary.startswith("[Mock]")
-    assert analysis.mock is True
+    opportunity = by_agent["opportunity"]
+    assert opportunity.mock is False and opportunity.status == "ok"
+    assert analysis.mock is False
     risk_level = by_agent["risk"].findings["uncertainty_level"]
     assert risk_level in ("low", "medium")
-    assert analysis.uncertainty.level == risk_level  # not raised to high by the placeholder
-    assert response.message.content.startswith(
-        "Prototype mode: results marked [Mock] are placeholders from agents that are not "
-        "built yet (opportunity)."
-    )
+    assert analysis.uncertainty.level == risk_level
+    assert opportunity.findings["uncertainty_level"] == risk_level
+    assert response.message.content.startswith(opportunity.summary)

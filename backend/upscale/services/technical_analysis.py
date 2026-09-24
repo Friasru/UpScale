@@ -189,6 +189,9 @@ class TechnicalAnalysis(BaseModel):
     first_candle_at: datetime
     last_candle_at: datetime  # open time of the most recent candle
     last_close: float
+    # Close of the candle before the last one, so a break of a zone on the last close can be
+    # told apart from price that was already beyond it. None with a single candle.
+    previous_close: float | None = None
     volume_available: bool
     volume_note: str
     volume: VolumeAnalysis = Field(default_factory=_volume_not_computed)
@@ -264,6 +267,7 @@ def analyze_series(
         first_candle_at=series.candles[0].timestamp,
         last_candle_at=series.candles[-1].timestamp,
         last_close=closes[-1],
+        previous_close=closes[-2] if len(closes) > 1 else None,
         volume_available=series.volume_available,
         volume_note=volume_note,
         volume=volume,

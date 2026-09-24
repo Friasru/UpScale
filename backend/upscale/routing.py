@@ -46,16 +46,33 @@ INTENT_KEYWORDS: dict[AgentName, set[str]] = {
     "opportunity": {
         "opportunity", "opportunities", "setup", "scenario", "scenarios", "outlook",
         "potential", "upside", "downside", "entry", "target", "buy", "sell", "long", "short",
-        "trade", "prediction", "predict", "forecast", "should i",
+        "trade", "prediction", "predict", "forecast", "should i", "best move", "what to do",
+        "what should i do", "good entry", "buy or wait", "buy or sell", "sell or hold",
     },
 }
+# An explicit request for an action. These run the full evidence pipeline, news included,
+# because current news can materially change a decision.
+DECISION_KEYWORDS = {
+    "buy", "sell", "should i", "best move", "what to do", "what should i do", "entry",
+    "good entry", "buy or wait", "buy or sell", "sell or hold",
+}
+# Decision phrases unambiguous enough to route without a coin or crypto word ("What should
+# I do?"); the opportunity agent then asks for an asset if none can be identified.
+STANDALONE_DECISION_PHRASES = {
+    "what should i do", "best move", "buy or wait", "buy or sell", "sell or hold",
+    "good entry", "what to do", "should i buy", "should i sell",
+}
+DECISION_AGENTS: tuple[AgentName, ...] = (
+    "technical_analysis", "market", "news_sentiment", "opportunity",
+)
 
 # Agents used for a crypto question that doesn't ask for anything specific.
 GENERAL_CRYPTO_AGENTS: tuple[AgentName, ...] = (
     "technical_analysis", "market", "news_sentiment", "opportunity",
 )
+# Risk reviews the evidence agents; opportunity decides last, after the risk review.
 AGENT_ORDER: tuple[AgentName, ...] = (
-    "vision", "technical_analysis", "market", "news_sentiment", "opportunity", "risk",
+    "vision", "technical_analysis", "market", "news_sentiment", "risk", "opportunity",
 )
 # fmt: on
 
@@ -122,21 +139,32 @@ def route(query: str, has_images: bool) -> RoutingDecision:
         reasons["vision"] = "Message includes a screenshot."
         reasons["technical_analysis"] = "Screenshots are treated as charts to analyze."
         reasons["market"] = "Live market data to compare with the screenshot."
+        reasons["opportunity"] = "A chart analysis ends with a BUY / SELL / WAIT read."
 
     intents = {
         agent: matched
         for agent, keywords in INTENT_KEYWORDS.items()
         if (matched := _matched_keywords(lowered, words, keywords))
     }
+    decision = _matched_keywords(lowered, words, DECISION_KEYWORDS)
+    standalone = _matched_keywords(lowered, words, STANDALONE_DECISION_PHRASES)
     # Intent keywords alone ("price", "trend") only count when the request is about crypto
     # or comes with a chart, so small talk doesn't trigger the whole pipeline.
-    if is_crypto or has_images:
+    if is_crypto or has_images or standalone:
+        if decision:
+            why = f"Decision request ({', '.join(decision)}): needs full evidence."
+            for agent in DECISION_AGENTS:
+                reasons.setdefault(agent, why)
         for agent, matched in intents.items():
             reasons.setdefault(agent, f"Request mentions: {', '.join(matched)}.")
         if is_crypto and not intents:
             for agent in GENERAL_CRYPTO_AGENTS:
                 reasons.setdefault(agent, "General crypto question.")
 
+    if "opportunity" in reasons:
+        # A BUY / SELL / WAIT read is made from live technical and market evidence.
+        for agent in ("technical_analysis", "market"):
+            reasons.setdefault(agent, "The opportunity decision needs live evidence.")
     if reasons:
         reasons["risk"] = "Risk review runs whenever other agents do."
 

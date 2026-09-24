@@ -107,7 +107,7 @@ def test_orchestrator_includes_live_market_data(fake_coingecko):
     market = next(r for r in analysis.agent_results if r.agent == "market")
     assert market.status == "ok" and market.mock is False
     assert any(e.source == "market" and "$150.00" in e.statement for e in analysis.evidence)
-    assert analysis.summary.startswith("[Partly mock]")
+    assert analysis.summary == "Combined analysis of SOL from 5 agent(s)."
     markets = [r for r in fake_coingecko.requests if r.url.path.endswith("/coins/markets")]
     assert markets[0].url.params["ids"] == "solana"
 
@@ -125,8 +125,10 @@ def test_orchestrator_continues_when_market_agent_fails(fake_coingecko):
         for name, r in by_agent.items()
         if name not in ("market", "technical_analysis")
     )
-    assert analysis.scenarios and analysis.risks
+    assert analysis.risks
     assert not any(e.source == "market" for e in analysis.evidence)
+    # Without technical evidence the decision is WAIT.
+    assert by_agent["opportunity"].findings["action"] == "wait"
     assert any("market agent failed" in n for n in analysis.uncertainty.notes)
     assert any("Live market data failed" in r.description for r in analysis.risks)
     assert "market: failed" in response.message.content

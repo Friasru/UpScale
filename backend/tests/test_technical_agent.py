@@ -315,7 +315,11 @@ def test_general_question_runs_technical_and_market_together(fake_coingecko):
     by_agent = {r.agent: r for r in analysis.agent_results}
     assert by_agent["technical_analysis"].status == "ok"
     assert by_agent["market"].status == "ok"
-    assert by_agent["opportunity"].mock and not by_agent["risk"].mock
+    assert not by_agent["opportunity"].mock and not by_agent["risk"].mock
+    assert (
+        by_agent["opportunity"].findings["timeframe"]
+        == by_agent["technical_analysis"].findings["timeframe"]
+    )
     assert "technical_analysis" in by_agent["risk"].findings["reviewed_agents"]
 
 

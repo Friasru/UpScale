@@ -22,8 +22,9 @@ from upscale.schemas import (
 AGENT_TIMEOUT_SECONDS = 30.0
 _LEVEL_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
 DISCLAIMER = (
-    "UpScale explains evidence, scenarios, risks and uncertainty. It does not give "
-    "buy/sell recommendations and is not financial advice."
+    "BUY / SELL / WAIT reads are rule-based decision support from the evidence shown, not "
+    "guarantees or financial advice. SELL means reduce or exit a long position, not open "
+    "a short."
 )
 
 
@@ -220,6 +221,13 @@ def _mock_notice(analysis: Analysis) -> str:
     return notice
 
 
+def _agent_line(result: AgentResult) -> str:
+    if result.agent == "opportunity" and not result.mock:
+        # The full decision block is shown above; list only the action line here.
+        return f"Opportunity: {result.summary.splitlines()[0]}"
+    return result.summary
+
+
 def render_text(analysis: Analysis) -> str:
     """Plain-text version of the analysis for the chat UI (which renders text, not markdown)."""
     if not analysis.agent_results:
@@ -228,11 +236,22 @@ def render_text(analysis: Analysis) -> str:
     sections: list[str] = []
     if analysis.mock:
         sections.append(_mock_notice(analysis))
+    # The decision leads: fast decision support is the point of the reply.
+    decision = next(
+        (
+            r
+            for r in analysis.agent_results
+            if r.agent == "opportunity" and r.status == "ok" and not r.mock
+        ),
+        None,
+    )
+    if decision is not None:
+        sections.append(decision.summary)
     sections.append(analysis.summary)
     sections.append(
         "Agents:\n"
         + "\n".join(
-            f"• {r.summary if r.status == 'ok' else f'{r.agent}: failed ({r.error})'}"
+            f"• {_agent_line(r)}" if r.status == "ok" else f"• {r.agent}: failed ({r.error})"
             for r in analysis.agent_results
         )
     )

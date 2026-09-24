@@ -18,16 +18,16 @@ def test_chat_text(client):
     body = ChatResponse.model_validate(response.json())  # full structured response is valid
     assert body.message.role == "assistant"
     assert body.analysis is not None
-    assert body.analysis.mock is True
+    assert body.analysis.mock is False
     assert body.analysis.assets == ["BTC"]
     assert body.analysis.agents_used == [
         "technical_analysis",
         "market",
         "news_sentiment",
-        "opportunity",
         "risk",
+        "opportunity",
     ]
-    assert "Mock" in body.message.content
+    assert body.message.content.split("\n", 1)[0] in ("BUY", "SELL", "WAIT")
     assert "Bitcoin (BTC) price: $64,000.00" in body.message.content  # from the fake CoinGecko
 
 
@@ -44,14 +44,15 @@ def test_chat_structured_response_fields(client):
         "disclaimer",
     ):
         assert key in analysis
-    assert analysis["uncertainty"]["level"] == "high"
-    assert analysis["scenarios"] and all(
-        s["source"] == "opportunity" for s in analysis["scenarios"]
-    )
+    assert analysis["uncertainty"]["level"] in ("low", "medium", "high")
+    assert all(s["source"] == "technical_analysis" for s in analysis["scenarios"])
     assert {r["agent"]: r["mock"] for r in analysis["agent_results"]} == {
-        "opportunity": True,
+        "technical_analysis": False,
+        "market": False,
         "risk": False,
+        "opportunity": False,
     }
+    assert analysis["agent_results"][-1]["findings"]["action"] in ("buy", "sell", "wait")
     assert set(analysis["routing"]) == set(analysis["agents_used"])
 
 
@@ -59,7 +60,13 @@ def test_chat_with_image_only(client, png_attachment):
     response = post_chat(client, attachments=[png_attachment])
     assert response.status_code == 200
     analysis = response.json()["analysis"]
-    assert analysis["agents_used"] == ["vision", "technical_analysis", "market", "risk"]
+    assert analysis["agents_used"] == [
+        "vision",
+        "technical_analysis",
+        "market",
+        "risk",
+        "opportunity",
+    ]
     vision = analysis["agent_results"][0]
     assert vision["agent"] == "vision" and vision["mock"] is False
     [chart] = vision["findings"]["charts"]

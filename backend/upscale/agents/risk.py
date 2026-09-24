@@ -1,6 +1,13 @@
 from upscale.agents.base import Agent, AgentContext
 from upscale.schemas import AgentResult, Risk
-from upscale.services.risk import AGENT_LABELS, RiskAssessment, RiskConfig, assess, category_label
+from upscale.services.risk import (
+    AGENT_LABELS,
+    RiskAssessment,
+    RiskConfig,
+    assess,
+    category_label,
+    profile_from_results,
+)
 
 MAX_SUMMARY_REASONS = 3
 
@@ -25,7 +32,10 @@ class RiskAgent(Agent):
         self.config = config
 
     async def run(self, context: AgentContext) -> AgentResult:
-        a = assess(context.prior_results, context.primary_asset, self.config)
+        profile = profile_from_results(
+            context.prior_results, context.primary_asset, context.asset_identity
+        )
+        a = assess(context.prior_results, context.primary_asset, self.config, profile)
         return AgentResult(
             agent=self.name,
             mock=False,
@@ -83,4 +93,5 @@ def _evidence(a: RiskAssessment) -> list[str]:
         f"Would invalidate or weaken the analysis: {c.condition}" for c in a.invalidation_conditions
     ]
     lines += [f"Missing evidence: {m}." for m in a.missing_evidence]
+    lines += [f"Asset profile: {note}" for note in a.profile_notes]
     return lines

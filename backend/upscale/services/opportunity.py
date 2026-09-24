@@ -40,8 +40,9 @@ from pydantic import BaseModel, Field, ValidationError
 
 from upscale.formatting import usd, usd_zone
 from upscale.schemas import AgentName, AgentResult, Level
+from upscale.services.asset_profile import EVIDENCE_LABELS, CryptoAssetProfile, upper_first
 from upscale.services.news import Story
-from upscale.services.risk import InputState, RiskAssessment, collect_inputs
+from upscale.services.risk import InputState, RiskAssessment, apply_profile, collect_inputs
 from upscale.services.technical_analysis import Level as PriceLevel
 from upscale.services.technical_analysis import TechnicalAnalysis
 
@@ -195,6 +196,8 @@ class OpportunityAssessment(BaseModel):
     inputs: list[InputState] = Field(default_factory=list)
     sell_meaning: str = SELL_MEANING
     rules: str = RULES
+    # What kind of asset this is and which evidence matters for it (None: no profile).
+    asset_profile: CryptoAssetProfile | None = None
 
 
 # --- Evidence ----------------------------------------------------------------------------
@@ -225,8 +228,10 @@ def _risk_review(prior: Mapping[AgentName, AgentResult], asset: str) -> RiskAsse
     return review if review.asset == asset else None
 
 
-def _gather(prior: Mapping[AgentName, AgentResult], asset: str) -> _Evidence:
-    inputs = collect_inputs(prior, asset)
+def _gather(
+    prior: Mapping[AgentName, AgentResult], asset: str, profile: CryptoAssetProfile | None
+) -> _Evidence:
+    inputs = apply_profile(collect_inputs(prior, asset), profile)
     context: list[str] = []
     missing: list[str] = []
 
@@ -234,6 +239,7 @@ def _gather(prior: Mapping[AgentName, AgentResult], asset: str) -> _Evidence:
     extra = inputs.technical_extra or {}
     if technical is None:
         missing.append("Live technical analysis for this asset")
+    missing += _profile_missing(profile)
 
     snapshot = inputs.snapshot
     live_price = snapshot.price_usd if snapshot is not None else None
@@ -563,9 +569,70 @@ def _risk_rules(risk: RiskAssessment | None, read: _Read) -> None:
         read.block("uncertainty_high", "both", f"uncertainty is high ({why})", "risk")
 
 
+def _profile_missing(profile: CryptoAssetProfile | None) -> list[str]:
+    """Decision-critical evidence (beyond technical analysis, which is always checked)
+    that UpScale can't provide for this kind of asset."""
+    if profile is None:
+        return []
+    return [
+        f"{upper_first(EVIDENCE_LABELS[e.evidence])} ({e.reason})"
+        for e in profile.unavailable_critical()
+        if e.evidence != "technical_structure"
+    ]
+
+
+def _profile_factors(profile: CryptoAssetProfile | None) -> list[Factor]:
+    """Blockers and cautions the asset's profile adds.
+
+    * Missing decision-critical evidence for its category blocks both actions.
+    * An asset of unknown type (e.g. a ticker-only match) lowers confidence.
+
+    For major crypto and large-cap altcoins technical analysis is the only decision-critical
+    evidence and the identity is exact, so neither applies and their decisions are unchanged.
+    """
+    if profile is None:
+        return []
+    factors = [
+        Factor(
+            id="profile_evidence_missing",
+            kind="blocker",
+            applies_to="both",
+            reason=(
+                f"{EVIDENCE_LABELS[e.evidence]} is essential for a {profile.category_label} "
+                "but isn't available"
+            ),
+            source="opportunity",
+        )
+        for e in profile.unavailable_critical()
+        if e.evidence != "technical_structure"
+    ]
+    if profile.category == "unknown_crypto":
+        why = (
+            f"{profile.symbol} was matched by ticker only, so the data may belong to another "
+            "token with the same ticker"
+            if profile.identity_ambiguous
+            else f"what kind of asset {profile.symbol} is couldn't be established"
+        )
+        factors.append(
+            Factor(
+                id="asset_profile_unknown",
+                kind="caution",
+                applies_to="both",
+                reason=why,
+                source="opportunity",
+            )
+        )
+    return factors
+
+
+def _technical_is_critical(profile: CryptoAssetProfile | None) -> bool:
+    return profile is None or "technical_structure" in profile.decision_critical_evidence
+
+
 # Most decisive first: the summary names the first two blockers.
 _BLOCKER_ORDER = (
     "no_technical",
+    "profile_evidence_missing",
     "risk_high",
     "uncertainty_high",
     "live_beyond_invalidation",
@@ -801,6 +868,7 @@ def assess(
     prior: Mapping[AgentName, AgentResult],
     asset: str | None,
     config: OpportunityConfig | None = None,
+    profile: CryptoAssetProfile | None = None,
 ) -> OpportunityAssessment:
     cfg = config or OpportunityConfig()
     if asset is None:
@@ -833,19 +901,25 @@ def assess(
             missing_evidence=["An asset to analyze (name a coin, e.g. BTC)"],
         )
 
-    ev = _gather(prior, asset)
+    ev = _gather(prior, asset, profile)
     t, risk = ev.technical, ev.risk
     risk_level: RiskLevel = risk.overall_risk if risk else "unavailable"
     uncertainty: UncertaintyLevel = risk.uncertainty_level if risk else "unavailable"
+    profile_factors = _profile_factors(profile)
 
     if t is None:
-        blocker = Factor(
-            id="no_technical",
-            kind="blocker",
-            applies_to="both",
-            reason=f"there is no live technical analysis for {asset}",
-            source="opportunity",
-        )
+        blockers = [f for f in profile_factors if f.kind == "blocker"]
+        if _technical_is_critical(profile) or not blockers:
+            blockers.insert(
+                0,
+                Factor(
+                    id="no_technical",
+                    kind="blocker",
+                    applies_to="both",
+                    reason=f"there is no live technical analysis for {asset}",
+                    source="opportunity",
+                ),
+            )
         return OpportunityAssessment(
             asset=asset,
             timeframe=None,
@@ -853,13 +927,13 @@ def assess(
             action="wait",
             confidence="low",
             confirmed=False,
-            summary=_summary(asset, None, "wait", [], [blocker]),
+            summary=_summary(asset, None, "wait", [], blockers),
             bullish_score=0,
             bearish_score=0,
             bullish_evidence=[],
             bearish_evidence=[],
-            blocking_factors=[blocker],
-            cautions=[],
+            blocking_factors=blockers,
+            cautions=[f for f in profile_factors if f.kind == "caution"],
             bullish_trigger=None,
             bearish_trigger=None,
             risk_level=risk_level,
@@ -868,9 +942,11 @@ def assess(
             live_price=ev.live_price,
             context=ev.context,
             inputs=ev.inputs,
+            asset_profile=profile,
         )
 
     read = _technical_rules(t, cfg)
+    read.factors += profile_factors
     if ev.news_stories:
         _news_rules(ev.news_stories, ev.news_overall, read)
     _risk_rules(risk, read)
@@ -973,4 +1049,5 @@ def assess(
         live_price=ev.live_price,
         context=ev.context,
         inputs=ev.inputs,
+        asset_profile=profile,
     )

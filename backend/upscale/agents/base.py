@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
 from upscale.schemas import AgentName, AgentResult, ChatMessage, ImageAttachment
+from upscale.services.asset_profile import AssetIdentity
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,9 @@ class AgentContext:
     timeframe_source: Literal["user", "screenshot"] | None = None
     # Where `assets` came from: the user's text, or a screenshot when the text named none.
     assets_source: Literal["user", "screenshot"] | None = None
+    # Exact identity of the primary asset (e.g. chain + mint address) when known; without
+    # it the ticker in `assets` is resolved through UpScale's asset registry.
+    asset_identity: AssetIdentity | None = None
     # Results from agents that ran earlier in this turn, keyed by agent name.
     prior_results: dict[AgentName, AgentResult] = field(default_factory=dict)
 

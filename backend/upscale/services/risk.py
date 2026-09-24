@@ -32,6 +32,7 @@ news:
 * ``low`` otherwise.
 """
 
+import dataclasses
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -41,6 +42,15 @@ from pydantic import BaseModel, Field, ValidationError
 
 from upscale.formatting import usd, usd_zone
 from upscale.schemas import AgentName, AgentResult, Level
+from upscale.services.asset_profile import (
+    EVIDENCE_LABELS,
+    AssetIdentity,
+    CryptoAssetProfile,
+    Observations,
+    build_profile,
+    upper_first,
+    usable,
+)
 from upscale.services.market_data import MarketSnapshot
 from upscale.services.news import Story
 from upscale.services.technical_analysis import Level as PriceLevel
@@ -135,6 +145,10 @@ class RiskAssessment(BaseModel):
     data_quality: list[str]
     inputs: list[InputState]
     rules: str
+    # What kind of asset this is and which evidence matters for it (None: no profile).
+    asset_profile: CryptoAssetProfile | None = None
+    # How the profile qualifies this review, e.g. thresholds not calibrated for the asset.
+    profile_notes: list[str] = Field(default_factory=list)
 
 
 # What would invalidate or weaken the analysis, per rule (factors may set a specific one).
@@ -292,6 +306,118 @@ _PARSERS = {
     "market": _parse_market,
     "news_sentiment": _parse_news,
 }
+
+
+# --- Asset profile ---------------------------------------------------------------------------
+
+# Evidence the rules below already assess (and report as missing) themselves; the profile
+# adds whatever else its category requires.
+BUILTIN_EVIDENCE = frozenset({"technical_structure", "market_snapshot", "news"})
+_TICKER_KEYED_AGENTS: tuple[AgentName, ...] = ("technical_analysis", "market", "news_sentiment")
+
+
+def observations(inputs: Inputs) -> Observations:
+    return Observations(
+        snapshot=inputs.snapshot,
+        technical=inputs.technical,
+        states={name: (s.status, s.detail) for name, s in inputs.states.items()},
+    )
+
+
+def profile_from_results(
+    prior: Mapping[AgentName, AgentResult],
+    asset: str | None,
+    identity: AssetIdentity | None = None,
+) -> CryptoAssetProfile | None:
+    """The asset's profile, using what this turn's agents reported about it.
+
+    An explicit `identity` (e.g. chain + mint) wins over the bare ticker when it names the
+    same asset.
+    """
+    target: AssetIdentity | str | None = asset
+    if identity is not None and (asset is None or identity.symbol in (None, asset)):
+        target = identity
+    return build_profile(target, observations(collect_inputs(prior, asset)))
+
+
+def apply_profile(inputs: Inputs, profile: CryptoAssetProfile | None) -> Inputs:
+    """Drop evidence the profile says doesn't belong to this asset or can't be trusted.
+
+    * Ticker-keyed data (Kraken, CoinGecko, news) for a contract token whose ticker isn't
+      proven to be its own: it may describe another token with the same ticker.
+    * Technical analysis on too little history for the asset's category.
+    """
+    if profile is None:
+        return inputs
+    if not profile.ticker_data_attributable:
+        detail = (
+            f"ticker-matched data can't be tied to {profile.canonical_id}; another token may "
+            f"share the ticker {profile.symbol}"
+        )
+        for name in _TICKER_KEYED_AGENTS:
+            if inputs.states[name].status == "ok":
+                inputs.states[name] = InputState(agent=name, status="no_data", detail=detail)
+        inputs.technical = inputs.technical_extra = inputs.snapshot = inputs.news = None
+    elif not profile.technical_usable and inputs.technical is not None:
+        status = profile.evidence_status("technical_structure")
+        inputs.states["technical_analysis"] = InputState(
+            agent="technical_analysis",
+            status="no_data",
+            detail=status.reason if status else "not enough candle history",
+        )
+        inputs.technical = inputs.technical_extra = None
+    return inputs
+
+
+def risk_config_for(
+    profile: CryptoAssetProfile | None, base: RiskConfig | None = None
+) -> RiskConfig:
+    """Risk thresholds for this asset: the base config plus its category's overrides."""
+    cfg = base or RiskConfig()
+    if profile is None or not profile.risk_overrides:
+        return cfg
+    return dataclasses.replace(cfg, **profile.risk_overrides)
+
+
+def profile_factors(profile: CryptoAssetProfile) -> tuple[list[RiskFactor], list[str]]:
+    """Required evidence for this kind of asset that UpScale can't provide, as an
+    uncertainty factor, plus the matching missing-evidence lines."""
+    gaps = [
+        e
+        for e in profile.evidence
+        if e.requirement == "required" and e.evidence not in BUILTIN_EVIDENCE and not usable(e)
+    ]
+    if not gaps:
+        return [], []
+    labels = [EVIDENCE_LABELS[e.evidence] for e in gaps]
+    critical = any(e.decision_critical for e in gaps)
+    factor = RiskFactor(
+        id="profile_evidence_unavailable",
+        category="data_quality",
+        affects="uncertainty",
+        severity="high" if critical else "medium",
+        headline=f"evidence essential for a {profile.category_label} is unavailable",
+        explanation=(
+            f"For a {profile.category_label}, {', '.join(labels)} "
+            f"{'is' if len(labels) == 1 else 'are'} required, but UpScale can't provide "
+            f"{'it' if len(labels) == 1 else 'them'} for {profile.symbol} yet."
+        ),
+        source="risk",
+        evidence=[f"{EVIDENCE_LABELS[e.evidence]}: {e.reason}" for e in gaps],
+        weakens_if="Unassessed liquidity, holder or token-safety risks can dominate price action.",
+    )
+    missing = [f"{upper_first(EVIDENCE_LABELS[e.evidence])} ({e.reason})" for e in gaps]
+    return [factor], missing
+
+
+def profile_notes(profile: CryptoAssetProfile) -> list[str]:
+    if profile.risk_thresholds_calibrated:
+        return []
+    return [
+        f"{profile.symbol} is profiled as a {profile.category_label}. Move and range "
+        "thresholds were designed for major crypto and haven't been adapted to this kind "
+        "of asset yet, so market-move severities here are provisional."
+    ]
 
 
 # --- Rules ---------------------------------------------------------------------------------
@@ -1182,9 +1308,10 @@ def assess(
     prior: Mapping[AgentName, AgentResult],
     asset: str | None,
     config: RiskConfig | None = None,
+    profile: CryptoAssetProfile | None = None,
 ) -> RiskAssessment:
-    cfg = config or RiskConfig()
-    inputs = collect_inputs(prior, asset)
+    cfg = risk_config_for(profile, config)
+    inputs = apply_profile(collect_inputs(prior, asset), profile)
     factors = input_factors(inputs)
     if inputs.snapshot is not None:
         factors += market_factors(inputs.snapshot, cfg)
@@ -1195,6 +1322,8 @@ def assess(
     if inputs.news is not None:
         factors += news_factors(inputs.news, inputs.technical)
     factors += screenshot_factors(inputs, cfg)
+    extra_factors, extra_missing = profile_factors(profile) if profile else ([], [])
+    factors += extra_factors
     for f in factors:
         f.weakens_if = f.weakens_if or WEAKENS.get(f.id) or _agent_failure_weakens(f)
     factors.sort(key=lambda f: (f.affects != "risk", -_SEVERITY_RANK[f.severity]))
@@ -1222,6 +1351,7 @@ def assess(
         )
     overall = overall_risk(factors, has_evidence)
     missing, missing_types = _missing(inputs)
+    missing += extra_missing
     uncertainty = uncertainty_level(factors, missing_types, overall)
 
     risk_factors = [f for f in factors if f.affects == "risk"]
@@ -1267,6 +1397,8 @@ def assess(
         data_quality=[f.explanation for f in factors if f.category == "data_quality"],
         inputs=list(inputs.states.values()),
         rules=RULES,
+        asset_profile=profile,
+        profile_notes=profile_notes(profile) if profile else [],
     )
 
 

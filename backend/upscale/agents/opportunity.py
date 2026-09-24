@@ -7,6 +7,7 @@ from upscale.services.opportunity import (
     Trigger,
     assess,
 )
+from upscale.services.risk import profile_from_results
 
 ACTION_LABELS = {"buy": "BUY", "sell": "SELL", "wait": "WAIT"}
 
@@ -32,7 +33,10 @@ class OpportunityAgent(Agent):
         self.config = config
 
     async def run(self, context: AgentContext) -> AgentResult:
-        a = assess(context.prior_results, context.primary_asset, self.config)
+        profile = profile_from_results(
+            context.prior_results, context.primary_asset, context.asset_identity
+        )
+        a = assess(context.prior_results, context.primary_asset, self.config, profile)
         return AgentResult(
             agent=self.name,
             mock=False,

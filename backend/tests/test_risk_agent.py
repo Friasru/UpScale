@@ -855,7 +855,13 @@ def test_agent_summary_explains_the_level():
 
 
 def test_agent_declares_input_dependencies():
-    assert set(RiskAgent.depends_on) == {"vision", "technical_analysis", "market", "news_sentiment"}
+    assert set(RiskAgent.depends_on) == {
+        "vision",
+        "technical_analysis",
+        "market",
+        "dex_market",
+        "news_sentiment",
+    }
 
 
 # --- Orchestrator and routing ---------------------------------------------------------------

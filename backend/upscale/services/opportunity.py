@@ -43,6 +43,7 @@ from upscale.schemas import AgentName, AgentResult, Level
 from upscale.services.asset_profile import EVIDENCE_LABELS, CryptoAssetProfile, upper_first
 from upscale.services.news import Story
 from upscale.services.risk import InputState, RiskAssessment, apply_profile, collect_inputs
+from upscale.services.solana_dex import SolanaDexSnapshot
 from upscale.services.technical_analysis import Level as PriceLevel
 from upscale.services.technical_analysis import TechnicalAnalysis
 
@@ -215,6 +216,7 @@ class _Evidence:
     context: list[str]
     missing: list[str]
     inputs: list[InputState]
+    dex: SolanaDexSnapshot | None = None
 
 
 def _risk_review(prior: Mapping[AgentName, AgentResult], asset: str) -> RiskAssessment | None:
@@ -241,10 +243,18 @@ def _gather(
         missing.append("Live technical analysis for this asset")
     missing += _profile_missing(profile)
 
-    snapshot = inputs.snapshot
+    snapshot, dex = inputs.snapshot, inputs.dex
     live_price = snapshot.price_usd if snapshot is not None else None
+    if dex is not None:
+        if live_price is None:
+            live_price = dex.price_usd
+        context.append(
+            f"DEX price {usd(dex.price_usd)} on {dex.dex} ({dex.quote_symbol or 'unknown quote'} "
+            f"pool), liquidity {usd(dex.liquidity_usd)} ({dex.provider})."
+        )
     if snapshot is None:
-        missing.append("Live market snapshot")
+        if dex is None:
+            missing.append("Live market snapshot")
     else:
         line = f"Live price {usd(snapshot.price_usd)} ({snapshot.provider})"
         if snapshot.low_24h_usd is not None and snapshot.high_24h_usd is not None:
@@ -294,6 +304,7 @@ def _gather(
         context=context,
         missing=missing,
         inputs=list(inputs.states.values()),
+        dex=dex,
     )
 
 
@@ -598,8 +609,8 @@ def _profile_factors(profile: CryptoAssetProfile | None) -> list[Factor]:
             kind="blocker",
             applies_to="both",
             reason=(
-                f"{EVIDENCE_LABELS[e.evidence]} is essential for a {profile.category_label} "
-                "but isn't available"
+                f"a {profile.category_label} needs {EVIDENCE_LABELS[e.evidence]}, which "
+                "isn't available yet"
             ),
             source="opportunity",
         )
@@ -625,6 +636,24 @@ def _profile_factors(profile: CryptoAssetProfile | None) -> list[Factor]:
     return factors
 
 
+def _dex_factors(risk: RiskAssessment | None) -> list[Factor]:
+    """The Risk review's DEX findings: high severity blocks acting, anything else is a
+    caution. They can only ever add reasons to WAIT, never a reason to act."""
+    if risk is None:
+        return []
+    return [
+        Factor(
+            id=f.id,
+            kind="blocker" if f.severity == "high" else "caution",
+            applies_to="both",
+            reason=f"DEX market: {f.headline}",
+            source="dex_market",
+        )
+        for f in risk.factors
+        if f.category == "dex"
+    ]
+
+
 def _technical_is_critical(profile: CryptoAssetProfile | None) -> bool:
     return profile is None or "technical_structure" in profile.decision_critical_evidence
 
@@ -633,6 +662,11 @@ def _technical_is_critical(profile: CryptoAssetProfile | None) -> bool:
 _BLOCKER_ORDER = (
     "no_technical",
     "profile_evidence_missing",
+    "dex_liquidity_missing",
+    "dex_low_liquidity",
+    "dex_new_pool",
+    "dex_extreme_move",
+    "dex_flow_imbalance",
     "risk_high",
     "uncertainty_high",
     "live_beyond_invalidation",
@@ -905,7 +939,7 @@ def assess(
     t, risk = ev.technical, ev.risk
     risk_level: RiskLevel = risk.overall_risk if risk else "unavailable"
     uncertainty: UncertaintyLevel = risk.uncertainty_level if risk else "unavailable"
-    profile_factors = _profile_factors(profile)
+    profile_factors = _profile_factors(profile) + _dex_factors(risk)
 
     if t is None:
         blockers = [f for f in profile_factors if f.kind == "blocker"]

@@ -9,12 +9,14 @@ from upscale.config import (
     VISION_MODEL,
 )
 from upscale.services.coingecko import CoinGeckoProvider
+from upscale.services.dexscreener import DexScreenerProvider
 from upscale.services.explainer import ClaudeExplainerModel
 from upscale.services.kraken import KrakenProvider
 from upscale.services.market_data import MarketDataService
 from upscale.services.news import NewsService
 from upscale.services.news_sentiment_model import ClaudeNewsSentimentModel
 from upscale.services.rss_news import RssNewsProvider, configured_feeds
+from upscale.services.solana_dex import SolanaDexService
 from upscale.services.technical_analysis import TechnicalAnalysisService
 from upscale.services.vision import ClaudeVisionModel, VisionService
 
@@ -30,6 +32,8 @@ market_data_service = MarketDataService(
     provider_calls_per_minute={_kraken.name: 30},
 )
 technical_analysis_service = TechnicalAnalysisService(market_data_service)
+# Solana DEX pools by exact mint. DEX Screener allows 300 requests per minute; stay well below.
+solana_dex_service = SolanaDexService(DexScreenerProvider(), max_calls_per_minute=60)
 vision_service = VisionService(ClaudeVisionModel(model=VISION_MODEL))
 news_service = NewsService(
     RssNewsProvider(feeds=configured_feeds(NEWS_FEEDS, NEWS_DISABLED_FEEDS)),

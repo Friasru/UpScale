@@ -18,7 +18,7 @@ ASSET_ALIASES: dict[str, str] = {
     "avax": "AVAX", "avalanche": "AVAX",
     "ltc": "LTC", "litecoin": "LTC",
     "trx": "TRX", "tron": "TRX",
-    "shib": "SHIB", "pepe": "PEPE",
+    "shib": "SHIB", "pepe": "PEPE", "bonk": "BONK", "wif": "WIF", "dogwifhat": "WIF",
     "chainlink": "LINK", "polkadot": "DOT", "toncoin": "TON",
 }
 # Tickers that are also common English words: only matched as uppercase or with a $ prefix.
@@ -72,9 +72,12 @@ GENERAL_CRYPTO_AGENTS: tuple[AgentName, ...] = (
 )
 # Risk reviews the evidence agents; opportunity decides last, after the risk review.
 AGENT_ORDER: tuple[AgentName, ...] = (
-    "vision", "technical_analysis", "market", "news_sentiment", "risk", "opportunity",
-    "education",
+    "vision", "technical_analysis", "market", "dex_market", "news_sentiment", "risk",
+    "opportunity", "education",
 )
+# Agents that look an asset up by ticker. They are skipped when the user gives an exact
+# Solana mint: a ticker can't be tied to one mint, so their data could be another token's.
+TICKER_AGENTS: tuple[AgentName, ...] = ("technical_analysis", "market", "news_sentiment")
 
 # Trading and crypto concepts a general question ("What is RSI?") can be about, on top of
 # the technical, market and crypto terms above.
@@ -115,6 +118,9 @@ LIVE_MARKERS = {
 # fmt: on
 
 _WORD_RE = re.compile(r"\$?[A-Za-z][A-Za-z0-9]*")
+# A Solana address: 32-44 base58 characters, not part of a longer alphanumeric string (so
+# the tail of an 0x... EVM address never matches).
+_SOLANA_MINT_RE = re.compile(r"(?<![0-9A-Za-z])[1-9A-HJ-NP-Za-km-z]{32,44}(?![0-9A-Za-z])")
 _TIMEFRAME_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("30m", re.compile(r"\b30[ -]?(?:m|min|mins|minutes?)\b")),
     ("15m", re.compile(r"\b15[ -]?(?:m|min|mins|minutes?)\b")),
@@ -129,6 +135,8 @@ _TIMEFRAME_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 @dataclass
 class RoutingDecision:
     assets: list[str] = field(default_factory=list)
+    # Exact Solana mint address from the request, if any (the token's identity).
+    token_address: str | None = None
     # Chart timeframe the user asked for ("1m", "5m", "15m", "30m", "1h", "4h", "1d"), if any.
     timeframe: str | None = None
     # Selected agents (in AGENT_ORDER) mapped to the reason each was selected.
@@ -153,6 +161,42 @@ def detect_assets(text: str) -> list[str]:
         if symbol and symbol not in found:
             found.append(symbol)
     return found
+
+
+def detect_solana_mint(text: str) -> str | None:
+    """First Solana mint address in the text, e.g. a pasted token address."""
+    match = _SOLANA_MINT_RE.search(text)
+    return match.group(0) if match else None
+
+
+def add_agent(decision: RoutingDecision, agent: AgentName, reason: str) -> RoutingDecision:
+    """The same decision with one more agent, keeping AGENT_ORDER."""
+    reasons = decision.reasons | {agent: decision.reasons.get(agent, reason)}
+    ordered = {a: reasons[a] for a in AGENT_ORDER if a in reasons}
+    return RoutingDecision(
+        assets=decision.assets,
+        token_address=decision.token_address,
+        timeframe=decision.timeframe,
+        reasons=ordered,
+    )
+
+
+def _route_mint(mint: str, query: str, has_images: bool) -> RoutingDecision:
+    """A request naming an exact Solana mint: DEX data by mint, then risk and a decision."""
+    reasons: dict[AgentName, str] = {}
+    if has_images:
+        reasons["vision"] = "Message includes a screenshot."
+    reasons["dex_market"] = (
+        f"Solana mint {mint}: exact token identity, so pools are looked up by mint. "
+        "Ticker-based agents (technical, market, news) are skipped because a ticker can't "
+        "be tied to one mint."
+    )
+    reasons["risk"] = "Risk review runs whenever other agents do."
+    reasons["opportunity"] = "A token analysis ends with a BUY / SELL / WAIT read."
+    ordered = {agent: reasons[agent] for agent in AGENT_ORDER if agent in reasons}
+    return RoutingDecision(
+        assets=[mint], token_address=mint, timeframe=detect_timeframe(query), reasons=ordered
+    )
 
 
 def detect_timeframe(text: str) -> str | None:
@@ -184,6 +228,8 @@ def _concept_question(
 
 
 def route(query: str, has_images: bool) -> RoutingDecision:
+    if mint := detect_solana_mint(query):
+        return _route_mint(mint, query, has_images)
     lowered = query.lower()
     words = {token.lstrip("$") for token in _WORD_RE.findall(lowered)}
     assets = detect_assets(query)

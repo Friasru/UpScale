@@ -51,13 +51,15 @@ from upscale.services.asset_profile import (
     upper_first,
     usable,
 )
+from upscale.services.asset_registry import DEFAULT_REGISTRY
 from upscale.services.market_data import MarketSnapshot
 from upscale.services.news import Story
+from upscale.services.solana_dex import PoolCandidate, SolanaDexSnapshot, Window
 from upscale.services.technical_analysis import Level as PriceLevel
 from upscale.services.technical_analysis import TechnicalAnalysis
 from upscale.services.vision import ChartVision
 
-RiskCategory = Literal["market", "technical", "news", "screenshot", "data_quality"]
+RiskCategory = Literal["market", "technical", "news", "screenshot", "data_quality", "dex"]
 Affects = Literal["risk", "uncertainty"]
 OverallRisk = Literal["low", "medium", "high", "unknown"]
 InputStatus = Literal["ok", "no_data", "failed", "not_run", "unreadable"]
@@ -67,6 +69,7 @@ AGENT_LABELS: dict[AgentName, str] = {
     "vision": "Screenshot reading",
     "technical_analysis": "Technical analysis",
     "market": "Live market data",
+    "dex_market": "Solana DEX market data",
     "news_sentiment": "News & sentiment",
     "opportunity": "Opportunity decision",
     "risk": "Risk review",
@@ -78,6 +81,7 @@ _CATEGORY_LABELS: dict[RiskCategory, str] = {
     "news": "news/event",
     "screenshot": "screenshot",
     "data_quality": "data quality",
+    "dex": "DEX market",
 }
 # Macro and regulatory topics, matched on headlines of fresh medium/high-impact stories.
 _EVENT_WORDS = re.compile(
@@ -181,6 +185,12 @@ WEAKENS: dict[str, str] = {
     "screenshot_unreadable": "Unread parts of the chart may contain relevant information.",
     "screenshot_not_chart": "Nothing from the screenshot could be used.",
     "screenshot_partially_read": "Unread screenshots may contain relevant information.",
+    "dex_low_liquidity": "A liquidity withdrawal or large sell can move the price sharply.",
+    "dex_new_pool": "Price discovery in a new pool is unstable; early levels may not hold.",
+    "dex_extreme_move": "A move this fast can reverse just as quickly.",
+    "dex_flow_imbalance": "One-sided flow can flip abruptly when early buyers or sellers exit.",
+    "dex_liquidity_missing": "Without reported liquidity, exit cost can't be judged.",
+    "dex_competing_pools": "Prices may differ between pools; the chosen primary may not be the real market.",
 }
 
 RULES = (
@@ -221,6 +231,8 @@ class Inputs:
     market_unavailable: list[str] | None = None
     news: NewsInput | None = None
     other_failures: list[AgentResult] | None = None
+    dex: SolanaDexSnapshot | None = None
+    dex_candidates: list[PoolCandidate] | None = None  # pools found when none was usable
 
 
 def collect_inputs(prior: Mapping[AgentName, AgentResult], asset: str | None) -> Inputs:
@@ -250,7 +262,58 @@ def collect_inputs(prior: Mapping[AgentName, AgentResult], asset: str | None) ->
             status="ok" if found else "no_data",
             detail=None if found else result.summary,
         )
+    if "dex_market" in prior:
+        _collect_dex(inputs, prior["dex_market"])
     return inputs
+
+
+def _collect_dex(inputs: Inputs, result: AgentResult) -> None:
+    """DEX data is only reviewed when the DEX agent ran, so other assets' reviews are
+    unchanged."""
+    if result.mock or result.status == "error":
+        status: InputStatus = "not_run" if result.mock else "failed"
+        inputs.states["dex_market"] = InputState(
+            agent="dex_market", status=status, detail=result.error
+        )
+        return
+    try:
+        raw = result.findings.get("snapshot")
+        snapshot = SolanaDexSnapshot.model_validate(raw) if raw is not None else None
+        candidates = [
+            PoolCandidate.model_validate(c) for c in result.findings.get("candidates", [])
+        ]
+    except (ValidationError, TypeError, ValueError) as exc:
+        inputs.states["dex_market"] = InputState(
+            agent="dex_market", status="unreadable", detail=type(exc).__name__
+        )
+        return
+    mint = result.findings.get("mint")
+    symbol = snapshot.symbol if snapshot is not None else None
+    if not _dex_belongs(inputs.asset, mint if isinstance(mint, str) else None, symbol):
+        inputs.states["dex_market"] = InputState(
+            agent="dex_market",
+            status="no_data",
+            detail=f"DEX data is for {mint}, not {inputs.asset}",
+        )
+        return
+    inputs.dex = snapshot
+    inputs.dex_candidates = candidates if snapshot is None else None
+    inputs.states["dex_market"] = InputState(
+        agent="dex_market",
+        status="ok" if snapshot is not None else "no_data",
+        detail=None if snapshot is not None else result.summary,
+    )
+
+
+def _dex_belongs(asset: str | None, mint: str | None, symbol: str | None) -> bool:
+    """Whether DEX data fetched for `mint` is about `asset` (the mint itself, the symbol the
+    DEX reported for it, or a registered asset whose mint it is)."""
+    if mint is None:
+        return False
+    if asset is None or asset in (mint, symbol):
+        return True
+    entry = DEFAULT_REGISTRY.by_symbol(asset)
+    return entry is not None and entry.chain == "solana" and entry.address == mint
 
 
 def _parse_vision(inputs: Inputs, findings: Mapping[str, Any]) -> bool:
@@ -320,6 +383,7 @@ def observations(inputs: Inputs) -> Observations:
     return Observations(
         snapshot=inputs.snapshot,
         technical=inputs.technical,
+        dex=inputs.dex,
         states={name: (s.status, s.detail) for name, s in inputs.states.items()},
     )
 
@@ -346,9 +410,19 @@ def apply_profile(inputs: Inputs, profile: CryptoAssetProfile | None) -> Inputs:
     * Ticker-keyed data (Kraken, CoinGecko, news) for a contract token whose ticker isn't
       proven to be its own: it may describe another token with the same ticker.
     * Technical analysis on too little history for the asset's category.
+    * DEX data fetched for a different mint than the asset's.
     """
     if profile is None:
         return inputs
+    if inputs.dex is not None and not (
+        profile.chain == "solana" and profile.address == inputs.dex.mint
+    ):
+        inputs.states["dex_market"] = InputState(
+            agent="dex_market",
+            status="no_data",
+            detail=f"DEX data is for {inputs.dex.canonical_id}, not {profile.canonical_id}",
+        )
+        inputs.dex = None
     if not profile.ticker_data_attributable:
         detail = (
             f"ticker-matched data can't be tied to {profile.canonical_id}; another token may "
@@ -1108,6 +1182,214 @@ def input_factors(inputs: Inputs) -> list[RiskFactor]:
     return factors
 
 
+# --- Solana DEX market ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DexRiskConfig:
+    """Thresholds for DEX-traded tokens. Separate from `RiskConfig`: moves and depth that
+    are extreme for BTC are ordinary for a small DEX token, and vice versa."""
+
+    liquidity_high_usd: float = 25_000.0  # primary pool liquidity below this: high
+    liquidity_medium_usd: float = 100_000.0  # ... below this: medium
+    pool_age_high_hours: float = 24.0  # primary pool younger than this: high
+    pool_age_medium_hours: float = 72.0  # ... younger than this: medium
+    move_m5_medium_pct: float = 15.0  # |5-minute price change| at or above this: medium
+    move_m5_high_pct: float = 30.0
+    move_h1_medium_pct: float = 25.0  # |1-hour price change|
+    move_h1_high_pct: float = 50.0
+    # Buy (or sell) share of trades at or above this: imbalanced. Needs enough trades.
+    imbalance_medium_share: float = 0.80
+    imbalance_high_share: float = 0.90
+    imbalance_min_txns: int = 20
+    imbalance_windows: tuple[Window, ...] = ("h1", "h24")  # first with enough trades is used
+
+    def __post_init__(self) -> None:
+        if not 0 < self.liquidity_high_usd <= self.liquidity_medium_usd:
+            raise ValueError("liquidity thresholds must satisfy 0 < high <= medium")
+        if not 0 < self.pool_age_high_hours <= self.pool_age_medium_hours:
+            raise ValueError("pool age thresholds must satisfy 0 < high <= medium")
+        if not (
+            0 < self.move_m5_medium_pct <= self.move_m5_high_pct
+            and 0 < self.move_h1_medium_pct <= self.move_h1_high_pct
+        ):
+            raise ValueError("move thresholds must satisfy 0 < medium <= high")
+        if not 0.5 < self.imbalance_medium_share <= self.imbalance_high_share <= 1:
+            raise ValueError("imbalance shares must satisfy 0.5 < medium <= high <= 1")
+        if self.imbalance_min_txns < 1:
+            raise ValueError("imbalance_min_txns must be positive")
+
+
+NO_SAFETY_CHECK = (
+    "Token authorities and holder concentration aren't checked yet, so this is not "
+    "rug-pull detection."
+)
+
+
+def _below(value: float, high: float, medium: float) -> Level | None:
+    return "high" if value < high else "medium" if value < medium else None
+
+
+def dex_factors(d: SolanaDexSnapshot, cfg: DexRiskConfig) -> list[RiskFactor]:
+    """Risk from the token's primary DEX pool, relative to DEX-token thresholds."""
+    factors: list[RiskFactor] = []
+    label = d.symbol or d.canonical_id
+    pool = f"{d.dex} pool {d.pair_address}"
+    sev = _below(d.liquidity_usd, cfg.liquidity_high_usd, cfg.liquidity_medium_usd)
+    if sev is not None:
+        factors.append(
+            RiskFactor(
+                id="dex_low_liquidity",
+                category="dex",
+                affects="risk",
+                severity=sev,
+                headline=f"{label}'s primary pool holds only {usd(d.liquidity_usd)} of liquidity",
+                explanation=(
+                    f"The primary {pool} holds {usd(d.liquidity_usd)} of liquidity (below "
+                    f"{usd(cfg.liquidity_high_usd if sev == 'high' else cfg.liquidity_medium_usd)}"
+                    "): a modest sell can move the price sharply and exits may be costly. "
+                    + NO_SAFETY_CHECK
+                ),
+                source="dex_market",
+                evidence=[f"liquidity {usd(d.liquidity_usd)} ({d.provider})"],
+            )
+        )
+    if d.pool_age_hours is not None:
+        sev = _below(d.pool_age_hours, cfg.pool_age_high_hours, cfg.pool_age_medium_hours)
+        if sev is not None:
+            factors.append(
+                RiskFactor(
+                    id="dex_new_pool",
+                    category="dex",
+                    affects="risk",
+                    severity=sev,
+                    headline=f"the primary pool is only {d.pool_age_hours:.0f} hours old",
+                    explanation=(
+                        f"The primary {pool} was created {d.pool_age_hours:.0f} hours ago, "
+                        "so there is almost no trading history to judge it by."
+                    ),
+                    source="dex_market",
+                )
+            )
+    moves: list[tuple[Level, str]] = []
+    move_rules: tuple[tuple[Window, float, float], ...] = (
+        ("m5", cfg.move_m5_medium_pct, cfg.move_m5_high_pct),
+        ("h1", cfg.move_h1_medium_pct, cfg.move_h1_high_pct),
+    )
+    for window, medium, high in move_rules:
+        w = d.window(window)
+        if w is not None and w.price_change_pct is not None:
+            level = _threshold(abs(w.price_change_pct), medium, high)
+            if level is not None:
+                span = "5 minutes" if window == "m5" else "1 hour"
+                moves.append((level, f"{w.price_change_pct:+.1f}% in {span}"))
+    if moves:
+        sev = _max_severity(*(lv for lv, _ in moves)) or "medium"
+        what = " and ".join(text for _, text in moves)
+        factors.append(
+            RiskFactor(
+                id="dex_extreme_move",
+                category="dex",
+                affects="risk",
+                severity=sev,
+                headline=f"{label} moved {what}",
+                explanation=(
+                    f"{label} moved {what} in its primary pool, extreme even for a DEX token."
+                ),
+                source="dex_market",
+            )
+        )
+    for window in cfg.imbalance_windows:
+        w = d.window(window)
+        if w is None or w.buys is None or w.sells is None or (w.txns or 0) < cfg.imbalance_min_txns:
+            continue
+        share = w.buys / (w.buys + w.sells)
+        side, top = ("buys", share) if share >= 0.5 else ("sells", 1 - share)
+        level = (
+            "high"
+            if top >= cfg.imbalance_high_share
+            else "medium"
+            if top >= cfg.imbalance_medium_share
+            else None
+        )
+        if level is not None:
+            span = {"m5": "5m", "h1": "1h", "h6": "6h", "h24": "24h"}[window]
+            factors.append(
+                RiskFactor(
+                    id="dex_flow_imbalance",
+                    category="dex",
+                    affects="risk",
+                    severity=level,
+                    headline=f"{100 * top:.0f}% of {span} trades were {side}",
+                    explanation=(
+                        f"{w.buys:,} buys vs {w.sells:,} sells over {span} in the primary pool: "
+                        f"{100 * top:.0f}% {side}. One-sided flow this strong is unusual and "
+                        "can reverse abruptly."
+                    ),
+                    source="dex_market",
+                )
+            )
+        break  # only the first window with enough trades
+    if not d.primary_clear:
+        factors.append(
+            RiskFactor(
+                id="dex_competing_pools",
+                category="dex",
+                affects="uncertainty",
+                severity="medium",
+                headline="several pools compete, so the primary market is unclear",
+                explanation=(
+                    "The primary pool isn't clearly the token's main market: "
+                    + "; ".join(d.ambiguity)
+                    + "."
+                ),
+                source="dex_market",
+            )
+        )
+    return factors
+
+
+def dex_candidate_factors(
+    candidates: Sequence[PoolCandidate], cfg: DexRiskConfig
+) -> list[RiskFactor]:
+    """Pools exist but none could be used as the market: say why, as evidence."""
+    if not candidates:
+        return []
+    reported = [c.liquidity_usd for c in candidates if c.liquidity_usd is not None]
+    if not reported:
+        return [
+            RiskFactor(
+                id="dex_liquidity_missing",
+                category="dex",
+                affects="uncertainty",
+                severity="high",
+                headline="no pool for this token reports its liquidity",
+                explanation=(
+                    f"{len(candidates)} pool(s) exist for this mint but none reports USD "
+                    "liquidity, so how much can be traded (or exited) can't be assessed."
+                ),
+                source="dex_market",
+            )
+        ]
+    deepest = max(reported)
+    sev = _below(deepest, cfg.liquidity_high_usd, cfg.liquidity_medium_usd) or "medium"
+    return [
+        RiskFactor(
+            id="dex_low_liquidity",
+            category="dex",
+            affects="risk",
+            severity=sev,
+            headline=f"no usable pool: the deepest holds {usd(deepest)} of liquidity",
+            explanation=(
+                f"{len(candidates)} pool(s) exist for this mint, but none is liquid, active "
+                f"and priced enough to count as its market (deepest: {usd(deepest)}). "
+                + NO_SAFETY_CHECK
+            ),
+            source="dex_market",
+        )
+    ]
+
+
 # --- Invalidation conditions ---------------------------------------------------------------
 
 
@@ -1286,10 +1568,10 @@ def _missing(inputs: Inputs) -> tuple[list[str], int]:
 
     missing: list[str] = []
     types = 0
-    if inputs.snapshot is None and inputs.technical is None:
+    if inputs.snapshot is None and inputs.technical is None and inputs.dex is None:
         types += 1
         missing.append(f"Live price data ({why('market')})")
-    elif inputs.snapshot is None:
+    elif inputs.snapshot is None and inputs.dex is None:
         missing.append(f"Live market snapshot: 24h change and range ({why('market')})")
     if inputs.technical is None:
         types += 1
@@ -1309,8 +1591,10 @@ def assess(
     asset: str | None,
     config: RiskConfig | None = None,
     profile: CryptoAssetProfile | None = None,
+    dex_config: DexRiskConfig | None = None,
 ) -> RiskAssessment:
     cfg = risk_config_for(profile, config)
+    dex_cfg = dex_config or DexRiskConfig()
     inputs = apply_profile(collect_inputs(prior, asset), profile)
     factors = input_factors(inputs)
     if inputs.snapshot is not None:
@@ -1322,6 +1606,10 @@ def assess(
     if inputs.news is not None:
         factors += news_factors(inputs.news, inputs.technical)
     factors += screenshot_factors(inputs, cfg)
+    if inputs.dex is not None:
+        factors += dex_factors(inputs.dex, dex_cfg)
+    elif inputs.dex_candidates:
+        factors += dex_candidate_factors(inputs.dex_candidates, dex_cfg)
     extra_factors, extra_missing = profile_factors(profile) if profile else ([], [])
     factors += extra_factors
     for f in factors:
@@ -1331,6 +1619,8 @@ def assess(
     has_evidence = (
         inputs.snapshot is not None
         or inputs.technical is not None
+        or inputs.dex is not None
+        or bool(inputs.dex_candidates)
         or (inputs.news is not None and any(s.sentiment for s in inputs.news.focus))
     )
     if not has_evidence:

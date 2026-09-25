@@ -1,7 +1,9 @@
 from upscale.agents.base import Agent, AgentContext
 from upscale.schemas import AgentResult, Risk
+from upscale.services.asset_profile import upper_first
 from upscale.services.risk import (
     AGENT_LABELS,
+    DexRiskConfig,
     RiskAssessment,
     RiskConfig,
     assess,
@@ -26,16 +28,19 @@ class RiskAgent(Agent):
         "Concrete risks, overall risk level, uncertainty and invalidation conditions derived "
         "from the other agents' evidence."
     )
-    depends_on = ("vision", "technical_analysis", "market", "news_sentiment")
+    depends_on = ("vision", "technical_analysis", "market", "dex_market", "news_sentiment")
 
-    def __init__(self, config: RiskConfig | None = None):
+    def __init__(self, config: RiskConfig | None = None, dex_config: DexRiskConfig | None = None):
         self.config = config
+        self.dex_config = dex_config
 
     async def run(self, context: AgentContext) -> AgentResult:
         profile = profile_from_results(
             context.prior_results, context.primary_asset, context.asset_identity
         )
-        a = assess(context.prior_results, context.primary_asset, self.config, profile)
+        a = assess(
+            context.prior_results, context.primary_asset, self.config, profile, self.dex_config
+        )
         return AgentResult(
             agent=self.name,
             mock=False,
@@ -47,7 +52,7 @@ class RiskAgent(Agent):
             evidence=_evidence(a),
             risks=[
                 Risk(
-                    description=f"{category_label(f.category).capitalize()}: {f.explanation}",
+                    description=f"{upper_first(category_label(f.category))}: {f.explanation}",
                     severity=f.severity,
                     source=f.source,
                 )

@@ -20,8 +20,9 @@ class AgentContext:
     # Chart timeframe to analyze, if any (e.g. "4h"), and where it came from.
     timeframe: str | None = None
     timeframe_source: Literal["user", "screenshot"] | None = None
-    # Where `assets` came from: the user's text, or a screenshot when the text named none.
-    assets_source: Literal["user", "screenshot"] | None = None
+    # Where `assets` came from: the user's text, a screenshot when the text named none, or
+    # an exact Solana mint (then the asset is the mint until DEX data names its symbol).
+    assets_source: Literal["user", "screenshot", "mint"] | None = None
     # Exact identity of the primary asset (e.g. chain + mint address) when known; without
     # it the ticker in `assets` is resolved through UpScale's asset registry.
     asset_identity: AssetIdentity | None = None

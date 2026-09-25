@@ -9,6 +9,7 @@ Replace an agent by writing a new `Agent` subclass with the same
 """
 
 from upscale.agents.base import Agent, AgentContext
+from upscale.agents.dex_market import DexMarketAgent
 from upscale.agents.education import EducationAgent
 from upscale.agents.market import MarketAgent
 from upscale.agents.news_sentiment import NewsSentimentAgent
@@ -23,6 +24,7 @@ def default_agents() -> list[Agent]:
         VisionAgent(),
         TechnicalAnalysisAgent(),
         MarketAgent(),
+        DexMarketAgent(),
         NewsSentimentAgent(),
         RiskAgent(),
         OpportunityAgent(),
@@ -33,6 +35,7 @@ def default_agents() -> list[Agent]:
 __all__ = [
     "Agent",
     "AgentContext",
+    "DexMarketAgent",
     "EducationAgent",
     "MarketAgent",
     "NewsSentimentAgent",

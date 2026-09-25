@@ -17,6 +17,7 @@ def test_default_agents_cover_every_role_once():
             "vision",
             "technical_analysis",
             "market",
+            "dex_market",
             "news_sentiment",
             "opportunity",
             "risk",
@@ -37,6 +38,7 @@ def test_opportunity_decides_after_every_evidence_agent():
         "vision",
         "technical_analysis",
         "market",
+        "dex_market",
         "news_sentiment",
         "risk",
     }

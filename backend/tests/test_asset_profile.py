@@ -232,9 +232,9 @@ def test_stablecoin_from_metadata_peg() -> None:
 
 
 def test_unknown_ticker_is_ambiguous_unknown_crypto() -> None:
-    p = profile("WIF")
+    p = profile("XYZT")
     assert p.category == "unknown_crypto"
-    assert p.canonical_id == "symbol:WIF"
+    assert p.canonical_id == "symbol:XYZT"
     assert p.identity_basis == "symbol_only"
     assert p.identity_ambiguous
     assert p.capability("kraken_ohlcv").status == "unknown"
@@ -242,10 +242,10 @@ def test_unknown_ticker_is_ambiguous_unknown_crypto() -> None:
 
 
 def test_unknown_ticker_stays_unknown_even_with_a_large_live_market_cap() -> None:
-    snap = market(symbol="WIF", price=2.0).findings["snapshots"][0]
+    snap = market(symbol="XYZT", price=2.0).findings["snapshots"][0]
     snap["market_cap_usd"] = 500e9
-    obs = observations(collect_inputs(prior(_market(snap)), "WIF"))
-    p = profile("WIF", observed=obs)
+    obs = observations(collect_inputs(prior(_market(snap)), "XYZT"))
+    p = profile("XYZT", observed=obs)
     assert p.category == "unknown_crypto"
     assert p.market_cap_class == "mega"
     assert "ticker-only" in (p.market_cap_basis or "")
@@ -378,9 +378,12 @@ def test_capabilities_are_explicit_for_every_asset() -> None:
     assert caps["kraken_ohlcv"].status == "available" and not caps["kraken_ohlcv"].verified
     assert caps["coingecko_snapshot"].status == "available"
     assert caps["news"].status == "available"
-    for missing in ("dex", "onchain", "social", "derivatives"):
+    for missing in ("onchain", "social", "derivatives"):
         assert caps[missing].status == "unavailable"  # type: ignore[index]
         assert "No provider" in caps[missing].reason  # type: ignore[index]
+    # DEX data is integrated, but only for Solana tokens identified by mint.
+    assert caps["dex"].status == "unavailable"
+    assert "Solana mint" in caps["dex"].reason
 
 
 def test_capabilities_are_verified_by_this_turns_results() -> None:
@@ -408,16 +411,21 @@ def test_unconfirmed_kraken_listing_is_unknown_not_assumed() -> None:
 
 
 def test_integrating_a_provider_changes_capabilities_and_plan() -> None:
-    without = profile(new_solana_token())
-    with_dex = profile(
+    without = profile(
+        new_solana_token(), integrated=frozenset({"kraken_ohlcv", "coingecko_snapshot", "news"})
+    )
+    default = profile(new_solana_token())
+    with_onchain = profile(
         new_solana_token(),
         integrated=frozenset({"kraken_ohlcv", "coingecko_snapshot", "news", "dex", "onchain"}),
     )
     assert without.capability("dex").status == "unavailable"
-    assert with_dex.capability("dex").status == "available"
-    assert with_dex.capability("onchain").status == "available"
+    assert status(without, "dex_liquidity") == "unavailable"
+    assert default.capability("dex").status == "available"  # looked up by mint
+    assert status(default, "dex_liquidity") == "expected"
+    assert with_onchain.capability("onchain").status == "available"
     # Data exists, but no agent analyzes it yet: reported, not faked.
-    assert status(with_dex, "dex_liquidity") == "not_analyzed"
+    assert status(with_onchain, "token_authorities") == "not_analyzed"
 
 
 # --- Required evidence and plan --------------------------------------------------------------
@@ -430,7 +438,7 @@ def test_integrating_a_provider_changes_capabilities_and_plan() -> None:
         ("SOL", {"technical_structure", "market_snapshot", "news"}),
         ("DOGE", {"technical_structure", "market_snapshot"}),
         ("USDT", {"peg_stability", "issuer_risk", "market_snapshot"}),
-        ("WIF", {"technical_structure", "market_snapshot"}),
+        ("XYZT", {"technical_structure", "market_snapshot"}),
     ],
 )
 def test_required_evidence_per_category(symbol: str, required: set[str]) -> None:
@@ -456,9 +464,12 @@ def test_major_and_large_cap_plans_match_the_current_pipeline(symbol: str) -> No
 def test_new_dex_token_plan_prioritizes_dex_and_safety_evidence() -> None:
     p = profile(new_solana_token())
     assert [s.evidence for s in p.analysis_plan[:5]] == p.required_evidence
-    assert all(s.status == "unavailable" for s in p.analysis_plan[:5])
+    assert step(p, "dex_liquidity").agent == "dex_market"
+    assert {step(p, e).status for e in ("dex_liquidity", "buy_sell_flow", "pool_age")} == {"run"}
+    assert step(p, "token_authorities").status == "unavailable"
+    assert step(p, "holder_concentration").status == "unavailable"
     assert step(p, "technical_structure").status == "skip"
-    assert planned_agents(p) == ["risk", "opportunity"]
+    assert planned_agents(p) == ["dex_market", "risk", "opportunity"]
 
 
 def _registered_new_token() -> AssetRegistry:
@@ -519,7 +530,7 @@ def test_risk_flags_missing_essential_evidence_for_a_new_dex_token() -> None:
     assert factor.severity == "high" and factor.affects == "uncertainty"
     assert review.uncertainty_level == "high"
     assert review.overall_risk == "unknown"  # missing evidence is not high risk
-    assert any("DEX pool liquidity" in m for m in review.missing_evidence)
+    assert any("mint/freeze authorities" in m for m in review.missing_evidence)
     assert any("holder concentration" in m.lower() for m in review.missing_evidence)
     assert review.profile_notes  # thresholds not calibrated for this kind of asset
 
@@ -652,9 +663,9 @@ def test_stablecoin_never_gets_buy_or_sell_from_indicators() -> None:
 
 
 def test_ticker_only_unknown_asset_lowers_confidence() -> None:
-    results = prior(*_fix_symbols(full_buy(symbol="WIF"), "WIF"))
-    p = profile_from_results(results, "WIF")
-    decision = opportunity_service.assess(results, "WIF", profile=p)
+    results = prior(*_fix_symbols(full_buy(symbol="XYZT"), "XYZT"))
+    p = profile_from_results(results, "XYZT")
+    decision = opportunity_service.assess(results, "XYZT", profile=p)
     caution = next(f for f in decision.cautions if f.id == "asset_profile_unknown")
     assert "ticker only" in caution.reason
 

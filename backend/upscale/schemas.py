@@ -55,6 +55,7 @@ AgentName = Literal[
     "vision",
     "technical_analysis",
     "market",
+    "dex_market",
     "news_sentiment",
     "opportunity",
     "risk",

@@ -46,6 +46,7 @@ from upscale.services.asset_registry import (
     normalize_address,
 )
 from upscale.services.market_data import MarketSnapshot
+from upscale.services.solana_dex import SolanaDexSnapshot
 from upscale.services.technical_analysis import TechnicalAnalysis, TechnicalAnalysisConfig
 
 Category = Literal[
@@ -102,7 +103,7 @@ CAPABILITIES: tuple[DataCapability, ...] = (
 )
 # Providers UpScale has today. Anything else is reported as unavailable.
 INTEGRATED_CAPABILITIES: frozenset[DataCapability] = frozenset(
-    {"kraken_ohlcv", "coingecko_snapshot", "news"}
+    {"kraken_ohlcv", "coingecko_snapshot", "news", "dex"}
 )
 CAPABILITY_LABELS: dict[DataCapability, str] = {
     "kraken_ohlcv": "Kraken OHLCV candles",
@@ -158,6 +159,9 @@ EVIDENCE_AGENT: dict[EvidenceType, AgentName] = {
     "technical_structure": "technical_analysis",
     "market_snapshot": "market",
     "news": "news_sentiment",
+    "dex_liquidity": "dex_market",
+    "buy_sell_flow": "dex_market",
+    "pool_age": "dex_market",
 }
 
 
@@ -183,6 +187,9 @@ class ProfileConfig:
     established_min_age_days: int = 365  # a mid-cap alt counts as established after this
     memecoin_min_age_days: int = 180
     new_token_max_age_days: int = 90
+    # Primary-pool liquidity that counts as a substantial market for a DEX-only memecoin
+    # (liquidity, not the provider's self-reported market cap, is the size evidence).
+    established_dex_liquidity_usd: float = 1e6
     # 24h traded volume (centralized markets) and pool liquidity (DEX tokens), USD.
     volume_bands: tuple[float, float, float, float] = (1e9, 100e6, 10e6, 1e6)
     pool_liquidity_bands: tuple[float, float, float, float] = (50e6, 5e6, 1e6, 100e3)
@@ -545,6 +552,7 @@ class Observations:
 
     snapshot: MarketSnapshot | None = None
     technical: TechnicalAnalysis | None = None
+    dex: SolanaDexSnapshot | None = None  # keyed by mint, so never ticker-ambiguous
     # Input agent -> (status, detail), with the statuses of `risk.InputState`.
     states: Mapping[AgentName, tuple[str, str | None]] = field(default_factory=dict)
 
@@ -556,10 +564,21 @@ class _Facts:
     live_cap_basis: str | None
     cap_class: MarketCapClass | None  # classification tier: static if known, else live
     cap_basis: str | None
-    age_days: int | None
-    pool_age_days: int | None
+    age_days: int | None  # from the static launch date
+    pool_age_days: int | None  # primary pool
+    first_pool_age_days: int | None  # oldest pool: a lower bound on the token's age
+    dex_liquidity_usd: float | None
+    dex_liquidity_basis: str | None
     cex: bool | None
     dex: bool | None
+
+    @property
+    def token_age_days(self) -> int | None:
+        """Best available age: launch date, else the oldest pool, else the primary pool."""
+        for age in (self.age_days, self.first_pool_age_days, self.pool_age_days):
+            if age is not None:
+                return age
+        return None
 
 
 def build_profile(
@@ -580,17 +599,18 @@ def build_profile(
         return None
     cfg = config or ProfileConfig()
     now = now or datetime.now(UTC)
-    obs = observed or Observations()
-    if not resolved.ticker_data_attributable:
-        # Ticker-keyed data would describe whichever token owns the ticker, not this one.
-        obs = Observations()
     meta = resolved.metadata
+    obs = _attributable_observations(observed or Observations(), resolved)
+    if obs.dex is not None and meta.symbol == "?" and obs.dex.symbol:
+        # A mint-only identity takes its label from DEX data for that exact mint. The
+        # label is display only: identity stays the mint.
+        meta = meta.model_copy(update={"symbol": obs.dex.symbol, "name": meta.name or obs.dex.name})
     facts = _facts(meta, resolved, obs, cfg, now)
     category, reasons = classify(meta, facts, resolved, cfg)
     spec = categories[category]
     caps = _capabilities(resolved, obs, integrated)
     evidence = _evidence(spec, caps, obs, meta)
-    liquidity, liquidity_basis = _liquidity(meta, obs.snapshot, facts, cfg)
+    liquidity, liquidity_basis = _liquidity(obs.snapshot, facts, cfg)
     volatility, volatility_basis = _volatility(obs.snapshot, cfg)
     return CryptoAssetProfile(
         canonical_id=resolved.canonical_id,
@@ -636,6 +656,29 @@ def build_profile(
     )
 
 
+def dex_matches(dex: SolanaDexSnapshot | None, meta: AssetMetadata) -> bool:
+    """DEX data belongs to this asset only when it was fetched for this exact mint."""
+    return dex is not None and meta.chain == "solana" and dex.mint == meta.address
+
+
+def _attributable_observations(obs: Observations, resolved: ResolvedIdentity) -> Observations:
+    dex_ok = dex_matches(obs.dex, resolved.metadata)
+    if resolved.ticker_data_attributable:
+        if dex_ok or obs.dex is None:
+            return obs
+        return Observations(
+            snapshot=obs.snapshot,
+            technical=obs.technical,
+            states={k: v for k, v in obs.states.items() if k != "dex_market"},
+        )
+    # Ticker-keyed data would describe whichever token owns the ticker, not this one;
+    # mint-keyed DEX data is kept when it is for this exact mint.
+    return Observations(
+        dex=obs.dex if dex_ok else None,
+        states={k: v for k, v in obs.states.items() if k == "dex_market"},
+    )
+
+
 def _age_days(start: date | datetime | None, now: datetime) -> int | None:
     if start is None:
         return None
@@ -678,7 +721,15 @@ def _facts(
     market_cap = live_cap if live_cap is not None else meta.market_cap_usd
     live_cls: MarketCapClass | None = None
     live_basis: str | None = None
-    if market_cap is not None:
+    dex = obs.dex
+    dex_reported_cap = False
+    if market_cap is None and dex is not None and dex.market_cap_usd is not None:
+        # Shown for context only: a DEX-reported market cap is supply x pool price, so it
+        # never decides the category (a thin pool can make it arbitrarily large).
+        market_cap, dex_reported_cap = dex.market_cap_usd, True
+        live_cls = cap_class(market_cap, cfg)
+        live_basis = f"reported by {dex.provider} (supply x pool price); not used to classify"
+    elif market_cap is not None:
         live_cls = cap_class(market_cap, cfg)
         source = (
             f"live {obs.snapshot.provider} market cap"
@@ -689,7 +740,7 @@ def _facts(
     # Static tier first, so classification doesn't flip with daily price moves.
     cls: MarketCapClass | None = _CAP_CLASSES.get(meta.classification_cap_tier or "")
     basis = f"static classification metadata, {meta.source}; not live market data" if cls else None
-    if cls is None:
+    if cls is None and not dex_reported_cap:
         cls, basis = live_cls, live_basis
     cex = meta.cex_listed
     if cex is None and (meta.kraken_pair or _served_by(obs, "Kraken")):
@@ -701,9 +752,14 @@ def _facts(
         cap_class=cls,
         cap_basis=basis,
         age_days=_age_days(meta.launched, now),
-        pool_age_days=_age_days(meta.pool_created_at, now),
+        pool_age_days=_age_days(dex.pair_created_at if dex else meta.pool_created_at, now),
+        first_pool_age_days=_age_days(dex.first_pool_created_at, now) if dex else None,
+        dex_liquidity_usd=dex.liquidity_usd if dex else meta.liquidity_usd,
+        dex_liquidity_basis=(
+            f"{dex.provider} primary pool, {dex.dex} {dex.pair_address}" if dex else meta.source
+        ),
         cex=cex,
-        dex=meta.dex_listed,
+        dex=True if dex is not None else meta.dex_listed,
     )
 
 
@@ -724,8 +780,7 @@ def classify(
     if "stablecoin" in meta.tags or meta.peg:
         return "stablecoin", [f"Stablecoin{f' pegged to {meta.peg}' if meta.peg else ''}."]
 
-    ages = [a for a in (facts.age_days, facts.pool_age_days) if a is not None]
-    age = min(ages) if ages else None
+    age = facts.token_age_days
     if facts.dex is True and facts.cex is not True:
         if age is None or age < cfg.new_token_max_age_days:
             when = (
@@ -741,9 +796,15 @@ def classify(
     cap = facts.cap_class
     if "meme" in meta.tags:
         old = age is not None and age >= cfg.memecoin_min_age_days
-        liquid = cap in ("mega", "large", "mid") or facts.cex is True
+        deep_pool = (facts.dex_liquidity_usd or 0) >= cfg.established_dex_liquidity_usd
+        liquid = cap in ("mega", "large", "mid") or facts.cex is True or deep_pool
         if old and liquid:
-            depth = f"{cap} market cap" if cap in ("mega", "large", "mid") else "listed on a CEX"
+            if cap in ("mega", "large", "mid"):
+                depth = f"{cap} market-cap tier"
+            elif facts.cex is True:
+                depth = "listed on a CEX"
+            else:
+                depth = f"${facts.dex_liquidity_usd:,.0f} DEX pool liquidity"
             return "established_memecoin", [
                 "Memecoin.",
                 f"{age} days of history (at least {cfg.memecoin_min_age_days}).",
@@ -756,7 +817,10 @@ def classify(
                 + ("" if age is None else f" (has {age})")
             )
         if not liquid:
-            missing.append("a mid-or-larger market cap or a centralized-exchange listing")
+            missing.append(
+                "a mid-or-larger market-cap tier, a centralized-exchange listing, or "
+                f"${cfg.established_dex_liquidity_usd:,.0f}+ DEX pool liquidity"
+            )
         return "unknown_crypto", [f"Memecoin without {' and '.join(missing)}."]
 
     if cap == "mega":
@@ -780,6 +844,11 @@ def classify(
         if value is None
     ]
     reason = "Characteristics don't match a known category"
+    if facts.dex is True and facts.cex is not True and age is not None:
+        reason = (
+            f"DEX-traded for {age} days, so not a new DEX token, but not tagged as a "
+            "memecoin or another known kind of asset"
+        )
     if unknowns:
         reason += f" (unknown: {', '.join(unknowns)})"
     return "unknown_crypto", [reason + "."]
@@ -804,11 +873,12 @@ def _band(value: float, bands: tuple[float, ...], labels: tuple[T, ...]) -> T:
 
 
 def _liquidity(
-    meta: AssetMetadata, snapshot: MarketSnapshot | None, facts: _Facts, cfg: ProfileConfig
+    snapshot: MarketSnapshot | None, facts: _Facts, cfg: ProfileConfig
 ) -> tuple[LiquidityClass | None, str | None]:
-    if facts.dex is True and facts.cex is not True and meta.liquidity_usd is not None:
-        cls = _band(meta.liquidity_usd, cfg.pool_liquidity_bands, _LIQUIDITY_LABELS)
-        return cls, f"DEX pool liquidity ${meta.liquidity_usd:,.0f} ({meta.source})"
+    liquidity = facts.dex_liquidity_usd
+    if facts.dex is True and facts.cex is not True and liquidity is not None:
+        cls = _band(liquidity, cfg.pool_liquidity_bands, _LIQUIDITY_LABELS)
+        return cls, f"DEX pool liquidity ${liquidity:,.0f} ({facts.dex_liquidity_basis})"
     if snapshot is not None and snapshot.volume_24h_usd is not None:
         cls = _band(snapshot.volume_24h_usd, cfg.volume_bands, _LIQUIDITY_LABELS)
         return cls, f"24h volume ${snapshot.volume_24h_usd:,.0f} ({snapshot.provider})"
@@ -909,6 +979,8 @@ def _integrated_status(
             "CoinGecko would pick the largest coin with this ticker, which may be a "
             "different token.",
         )
+    if cap == "dex":
+        return _dex_status(meta, obs, status, detail, result)
     if cap != "news":
         return _future_provider_status(cap, meta, result)
     if status == "ok":
@@ -920,6 +992,31 @@ def _integrated_status(
     return result(
         "unknown", False, "Headlines are matched by ticker only and may be about another token."
     )
+
+
+def _dex_status(
+    meta: AssetMetadata,
+    obs: Observations,
+    status: str,
+    detail: str | None,
+    result: Callable[[CapabilityState, bool, str], CapabilityStatus],
+) -> CapabilityStatus:
+    if meta.chain != "solana" or not meta.address:
+        return result(
+            "unavailable",
+            False,
+            f"UpScale's DEX data covers Solana tokens identified by mint; {meta.symbol} has "
+            "no Solana mint.",
+        )
+    if obs.dex is not None:
+        return result(
+            "available",
+            True,
+            f"{obs.dex.provider} reported {len(obs.dex.candidates)} pool(s) for this mint.",
+        )
+    if status in ("failed", "no_data"):
+        return result("unavailable", True, f"No usable DEX pool this turn: {detail}.")
+    return result("available", False, f"DEX pools are looked up by mint {meta.address}.")
 
 
 def _future_provider_status(
@@ -989,6 +1086,8 @@ def _evidence_state(
             f"{label} yet."
         )
     status, detail = obs.states.get(agent, ("not_run", None))
+    if status == "ok" and agent == "dex_market" and obs.dex is not None:
+        return _dex_evidence(e, obs.dex)
     if status == "ok" and (e != "technical_structure" or obs.technical is not None):
         return "available", "Reported this turn."
     if status in ("failed", "no_data", "unreadable"):
@@ -1010,6 +1109,29 @@ def _candles(obs: Observations, meta: AssetMetadata) -> int | None:
 def _conditional_technical(spec: CategoryProfile, obs: Observations, meta: AssetMetadata) -> bool:
     """Technical has a minimum history for this category that hasn't been checked yet."""
     return spec.technical_min_candles is not None and _candles(obs, meta) is None
+
+
+def _dex_evidence(e: EvidenceType, dex: SolanaDexSnapshot) -> tuple[EvidenceState, str]:
+    """DEX evidence is available only for the fields the provider actually reported."""
+    where = f"{dex.provider}, {dex.dex} pool {dex.pair_address}"
+    if e == "pool_age":
+        if dex.pair_created_at is None:
+            return "unavailable", f"{dex.provider} didn't report when the pool was created."
+        return "available", f"Pool created {dex.pair_created_at:%Y-%m-%d %H:%M} UTC ({where})."
+    if e == "buy_sell_flow":
+        if not any(w.buys is not None and w.sells is not None for w in dex.windows):
+            return "unavailable", f"{dex.provider} didn't report buy/sell counts."
+        return "available", f"Buy/sell counts reported ({where})."
+    return "available", f"${dex.liquidity_usd:,.0f} liquidity ({where})."
+
+
+def wants_dex_data(profile: CryptoAssetProfile) -> bool:
+    """True when this kind of asset calls for DEX evidence and UpScale can fetch it
+    (a Solana token identified by mint)."""
+    dex_evidence = {"dex_liquidity", "buy_sell_flow", "pool_age"}
+    return profile.capability("dex").status != "unavailable" and any(
+        e.evidence in dex_evidence and e.weight != "not_used" for e in profile.evidence
+    )
 
 
 def _plan(evidence: list[EvidenceStatus], conditional_technical: bool) -> list[PlannedStep]:
@@ -1047,10 +1169,7 @@ def _missing_metadata(meta: AssetMetadata, facts: _Facts) -> list[str]:
         ("name", meta.name),
         ("chain", meta.chain),
         ("market cap", facts.cap_class),
-        (
-            "launch / pool creation date",
-            facts.age_days if facts.age_days is not None else facts.pool_age_days,
-        ),
+        ("launch / pool creation date", facts.token_age_days),
         ("centralized-exchange listing", facts.cex),
         ("DEX listing", facts.dex),
     )

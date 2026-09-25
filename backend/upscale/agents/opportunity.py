@@ -27,7 +27,7 @@ class OpportunityAgent(Agent):
         "BUY / SELL / WAIT decision support from the other agents' evidence, with trigger, "
         "invalidation, risk and confidence."
     )
-    depends_on = ("vision", "technical_analysis", "market", "news_sentiment", "risk")
+    depends_on = ("vision", "technical_analysis", "market", "dex_market", "news_sentiment", "risk")
 
     def __init__(self, config: OpportunityConfig | None = None):
         self.config = config

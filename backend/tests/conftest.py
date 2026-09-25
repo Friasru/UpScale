@@ -16,8 +16,9 @@ from fastapi.testclient import TestClient
 
 import upscale.agents.education
 from upscale.main import app
-from upscale.services import market_data_service, news_service, vision_service
+from upscale.services import market_data_service, news_service, solana_dex_service, vision_service
 from upscale.services.coingecko import CoinGeckoProvider
+from upscale.services.dexscreener import DexScreenerProvider
 from upscale.services.kraken import KrakenProvider
 from upscale.services.news_sentiment_model import ArticleAssessment, ArticleInput
 from upscale.services.rss_news import DEFAULT_FEEDS, RssNewsProvider
@@ -138,6 +139,44 @@ def fake_coingecko() -> Iterator[FakeCoinGecko]:
     yield fake
     market_data_service.provider, market_data_service.candle_providers = original
     market_data_service.reset()
+
+
+class FakeDexScreener:
+    """Stands in for api.dexscreener.com. `pairs` maps a mint to the pair objects its
+    /token-pairs endpoint returns (unknown mints get an empty list, as the real API does)."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx2.Request] = []
+        self.pairs: dict[str, list[Any]] = {}
+        self.handler: Callable[[httpx2.Request], httpx2.Response] = self.token_pairs
+
+    def token_pairs(self, request: httpx2.Request) -> httpx2.Response:
+        mint = request.url.path.rsplit("/", 1)[-1]
+        return httpx2.Response(200, content=json.dumps(self.pairs.get(mint, [])))
+
+    def transport(self) -> httpx2.MockTransport:
+        def handle(request: httpx2.Request) -> httpx2.Response:
+            self.requests.append(request)
+            return self.handler(request)
+
+        return httpx2.MockTransport(handle)
+
+
+# Wall-clock "now" for DEX pool ages in tests.
+DEX_NOW = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def fake_dexscreener() -> Iterator[FakeDexScreener]:
+    """Point the app's shared Solana DEX service at a fake DEX Screener."""
+    fake = FakeDexScreener()
+    original = (solana_dex_service.provider, solana_dex_service.now)
+    solana_dex_service.provider = DexScreenerProvider(transport=fake.transport())
+    solana_dex_service.now = lambda: DEX_NOW
+    solana_dex_service.reset()
+    yield fake
+    solana_dex_service.provider, solana_dex_service.now = original
+    solana_dex_service.reset()
 
 
 # Open time (s) of the in-progress candle in every fake Kraken response: 2026-09-24T00:00Z,

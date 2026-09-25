@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping
 from typing import cast
 
 from upscale.agents import Agent, AgentContext, default_agents
-from upscale.routing import RoutingDecision, route
+from upscale.routing import RoutingDecision, add_agent, route
 from upscale.schemas import (
     AgentName,
     AgentResult,
@@ -18,6 +18,7 @@ from upscale.schemas import (
     Scenario,
     Uncertainty,
 )
+from upscale.services.asset_profile import AssetIdentity, build_profile, wants_dex_data
 
 AGENT_TIMEOUT_SECONDS = 30.0
 _LEVEL_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
@@ -48,12 +49,19 @@ class Orchestrator:
         latest = request.messages[-1]
         query = latest.content.strip()
         decision = route(query, has_images=bool(latest.attachments))
+        identity = (
+            AssetIdentity(chain="solana", address=decision.token_address)
+            if decision.token_address
+            else None
+        )
+        decision = with_profile_agents(decision, identity)
         base_context = AgentContext(
             query=query,
             attachments=latest.attachments,
             history=request.messages[:-1],
             assets=decision.assets,
-            assets_source="user" if decision.assets else None,
+            assets_source="mint" if identity else "user" if decision.assets else None,
+            asset_identity=identity,
             timeframe=decision.timeframe,
             timeframe_source="user" if decision.timeframe else None,
         )
@@ -180,6 +188,28 @@ def _uncertainty_level(results: list[AgentResult], review: AgentResult | None) -
     return cast(Level, level)
 
 
+def with_profile_agents(
+    decision: RoutingDecision, identity: AssetIdentity | None
+) -> RoutingDecision:
+    """Add agents the asset's profile calls for: DEX data for Solana tokens whose kind of
+    asset needs it (new DEX tokens, established memecoins). BTC and other assets without a
+    Solana mint never get it."""
+    if not decision.agents or _is_education(decision) or "dex_market" in decision.reasons:
+        return decision
+    target: AssetIdentity | str | None = identity or (
+        decision.assets[0] if decision.assets else None
+    )
+    profile = build_profile(target)
+    if profile is None or not wants_dex_data(profile):
+        return decision
+    return add_agent(
+        decision,
+        "dex_market",
+        f"{profile.symbol} is a {profile.category_label} with a Solana mint, so DEX pool "
+        "data is relevant.",
+    )
+
+
 def apply_vision(context: AgentContext, results: Mapping[AgentName, AgentResult]) -> AgentContext:
     """Context for the next agents: prior results, plus the screenshot's asset/timeframe
     when the user's text didn't specify them (explicit user requests always win)."""
@@ -195,6 +225,13 @@ def apply_vision(context: AgentContext, results: Mapping[AgentName, AgentResult]
         )
         if not context.timeframe and isinstance(timeframe, str):
             updates |= {"timeframe": timeframe, "timeframe_source": "screenshot"}
+    dex = results.get("dex_market")
+    if context.assets_source == "mint" and dex and dex.status == "ok" and not dex.mock:
+        # The mint stays the identity; the symbol DEX data reports is just its label.
+        snapshot = dex.findings.get("snapshot")
+        symbol = snapshot.get("symbol") if isinstance(snapshot, dict) else None
+        if isinstance(symbol, str) and symbol:
+            updates["assets"] = [symbol]
     return dataclasses.replace(context, **updates)  # type: ignore[arg-type]
 
 

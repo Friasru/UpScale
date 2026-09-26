@@ -52,7 +52,9 @@ from upscale.services.market_data import (
 )
 
 CHAIN = SOLANA  # default chain (the module predates multi-chain support)
-Window = Literal["m5", "h1", "h6", "h24"]
+# Rolling windows a provider may report. DEX Screener reports `WINDOWS`; GeckoTerminal also
+# reports 15m and 30m (used by Scout).
+Window = Literal["m5", "m15", "m30", "h1", "h6", "h24"]
 WINDOWS: tuple[Window, ...] = ("m5", "h1", "h6", "h24")
 
 
@@ -73,6 +75,9 @@ class WindowStats(BaseModel):
     sells: int | None = None
     volume_usd: float | None = None
     price_change_pct: float | None = None
+    # Distinct buying / selling wallets, when the provider reports them.
+    buyers: int | None = None
+    sellers: int | None = None
 
     @property
     def txns(self) -> int | None:

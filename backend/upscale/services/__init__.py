@@ -8,6 +8,8 @@ from upscale.config import (
     NEWS_DISABLED_FEEDS,
     NEWS_FEEDS,
     NEWS_MODEL,
+    SCOUT_CONFIG,
+    SCOUT_DB_PATH,
     SOLANA_RPC_URL,
     VISION_MODEL,
 )
@@ -23,6 +25,13 @@ from upscale.services.market_data import MarketDataService
 from upscale.services.news import NewsService
 from upscale.services.news_sentiment_model import ClaudeNewsSentimentModel
 from upscale.services.rss_news import RssNewsProvider, configured_feeds
+from upscale.services.scout import (
+    DexScreenerDiscoveryProvider,
+    GeckoTerminalDiscoveryProvider,
+    ScoutService,
+    ScoutSnapshotStore,
+    load_scout_config,
+)
 from upscale.services.solana_chain import (
     HeliusProvider,
     SolanaChainProvider,
@@ -79,3 +88,15 @@ news_service = NewsService(
     ClaudeNewsSentimentModel(model=NEWS_MODEL),
 )
 explainer_model = ClaudeExplainerModel(model=EXPLAINER_MODEL)
+
+# Scout: token discovery (not wired into chat or UI yet). The snapshot store is opened on
+# first use, so importing this module never touches the disk.
+scout_config = load_scout_config(SCOUT_CONFIG)
+scout_service = ScoutService(
+    [
+        GeckoTerminalDiscoveryProvider(scout_config),
+        DexScreenerDiscoveryProvider(scout_config),
+    ],
+    ScoutSnapshotStore(SCOUT_DB_PATH),
+    scout_config,
+)

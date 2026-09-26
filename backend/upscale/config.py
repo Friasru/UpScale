@@ -49,3 +49,9 @@ SOLANA_RPC_URL = os.getenv("UPSCALE_SOLANA_RPC_URL") or None
 # Pages of 1,000 token accounts Helius may scan per mint for holder concentration. A token
 # with more holders gets lower-bound (incomplete) figures, flagged as such.
 HELIUS_MAX_HOLDER_PAGES = int(os.getenv("UPSCALE_HELIUS_MAX_HOLDER_PAGES") or 10)
+
+# Scout (token discovery). Snapshots are stored in a local SQLite file, created on first use.
+SCOUT_DB_PATH = os.getenv("UPSCALE_SCOUT_DB") or str(Path.home() / ".upscale" / "scout.sqlite3")
+# Optional JSON overriding Scout's validated thresholds, e.g.
+# UPSCALE_SCOUT_CONFIG='{"chains": ["solana", "base"], "filters": {"min_liquidity_usd": 5000}}'
+SCOUT_CONFIG = os.getenv("UPSCALE_SCOUT_CONFIG") or None

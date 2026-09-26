@@ -23,3 +23,9 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Local data and tool caches
+*.sqlite3
+*.sqlite3-*
+.mypy_cache/
+.ruff_cache/

@@ -40,3 +40,12 @@ NEWS_DISABLED_FEEDS = os.getenv("UPSCALE_NEWS_DISABLED_FEEDS") or None
 # Model that answers general educational questions ("What is RSI?"). Same Anthropic
 # credentials as Vision; without them those questions get an "unavailable" reply.
 EXPLAINER_MODEL = os.getenv("UPSCALE_EXPLAINER_MODEL") or "claude-opus-5"
+
+# On-chain token safety (Solana). Helius is preferred (its API also counts holders); any
+# other Solana JSON-RPC URL works too, without holder counts. Without either, on-chain
+# safety is reported as unavailable. Keys are never logged or shown in errors.
+HELIUS_API_KEY = os.getenv("UPSCALE_HELIUS_API_KEY") or None
+SOLANA_RPC_URL = os.getenv("UPSCALE_SOLANA_RPC_URL") or None
+# Pages of 1,000 token accounts Helius may scan per mint for holder concentration. A token
+# with more holders gets lower-bound (incomplete) figures, flagged as such.
+HELIUS_MAX_HOLDER_PAGES = int(os.getenv("UPSCALE_HELIUS_MAX_HOLDER_PAGES") or 10)

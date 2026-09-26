@@ -860,6 +860,7 @@ def test_agent_declares_input_dependencies():
         "technical_analysis",
         "market",
         "dex_market",
+        "onchain_safety",
         "news_sentiment",
     }
 

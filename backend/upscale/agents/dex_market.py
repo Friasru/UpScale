@@ -1,8 +1,9 @@
+import upscale.services as services
 from upscale.agents.base import Agent, AgentContext
 from upscale.formatting import usd, usd_compact
 from upscale.schemas import AgentResult
-from upscale.services import solana_dex_service
 from upscale.services.asset_registry import DEFAULT_REGISTRY
+from upscale.services.chains import DEX_CHAINS, chain_label, normalize_address
 from upscale.services.market_data import AssetNotFoundError, InvalidRequestError, MarketDataError
 from upscale.services.solana_dex import (
     NoUsablePoolError,
@@ -14,66 +15,86 @@ from upscale.services.solana_dex import (
 
 WINDOW_LABELS = {"m5": "5m", "h1": "1h", "h6": "6h", "h24": "24h"}
 NOT_CHECKED = (
-    "Not checked yet: token mint/freeze authorities and holder concentration. This is "
-    "market data, not rug-pull detection."
+    "This is market data only: token authorities and holder concentration come from the "
+    "on-chain safety review when it is available."
 )
 
 
-def target_mint(context: AgentContext) -> str | None:
-    """The Solana mint to look up: the exact identity if given, else the registry's mint
-    for the named asset. Never a ticker search."""
+def target_token(context: AgentContext) -> tuple[str, str] | None:
+    """(chain, address) of the token to look up: the exact identity if given, else the
+    registry's address for the named asset. Never a ticker search."""
     identity = context.asset_identity
-    if identity is not None and identity.chain == "solana" and identity.address:
-        return identity.address
+    if identity is not None and identity.chain in DEX_CHAINS and identity.address:
+        return identity.chain, normalize_address(
+            identity.chain, identity.address
+        ) or identity.address
     if context.primary_asset:
         entry = DEFAULT_REGISTRY.by_symbol(context.primary_asset)
-        if entry is not None and entry.chain == "solana" and entry.address:
-            return entry.address
+        if entry is not None and entry.chain in DEX_CHAINS and entry.address:
+            return entry.chain, entry.address
     return None
 
 
+def target_mint(context: AgentContext) -> str | None:
+    """The Solana mint to look up (on-chain data is Solana-only for now)."""
+    token = target_token(context)
+    return token[1] if token is not None and token[0] == "solana" else None
+
+
 class DexMarketAgent(Agent):
-    """Live Solana DEX market data for a token identified by its exact mint address.
+    """Live DEX market data for a token identified by chain + exact contract/mint address.
 
     Discovers the token's pools, picks the primary market deterministically, and reports
     price, liquidity, trades, volume and price changes exactly as the provider returned
-    them. All I/O goes through `SolanaDexService`; it never looks a token up by ticker.
+    them. Data comes from the `dex_market` capability; it never looks a token up by ticker.
     """
 
     name = "dex_market"
     description = (
-        "Solana DEX pools for an exact mint: primary pool, price, liquidity, buys/sells, "
-        "volume, price changes and pool age."
+        "DEX pools for an exact token address (Solana and EVM chains): primary pool, price, "
+        "liquidity, buys/sells, volume, price changes and pool age."
     )
 
     def __init__(self, service: SolanaDexService | None = None):
-        self.service = service or solana_dex_service
+        self._service = service
+
+    @property
+    def service(self) -> SolanaDexService:
+        return self._service or services.provider_registry.dex
 
     async def run(self, context: AgentContext) -> AgentResult:
         provider = self.service.provider_name
-        mint = target_mint(context)
+        token = target_token(context)
         base: dict[str, object] = {
             "provider": provider,
-            "mint": mint,
+            "mint": token[1] if token else None,
+            "chain": token[0] if token else None,
             "snapshot": None,
             "candidates": [],
         }
-        if mint is None:
+        if token is None:
             return AgentResult(
                 agent=self.name,
                 mock=False,
-                summary="No Solana mint address was identified, so no DEX data was requested.",
-                findings=base | {"unavailable": "no Solana mint address"},
+                summary="No token address was identified, so no DEX data was requested.",
+                findings=base | {"unavailable": "no token address"},
             )
-        canonical = f"solana:{mint}"
+        chain, mint = token
+        canonical = f"{chain}:{mint}"
         base["canonical_id"] = canonical
         try:
-            snapshot = await self.service.get_snapshot(mint)
+            market = context.trade.market if context.trade else None
+            snapshot = await self.service.get_snapshot(
+                mint,
+                chain,
+                dex=market.requested_dex if market else None,
+                pool=market.requested_pool if market else None,
+            )
         except NoUsablePoolError as exc:
             return AgentResult(
                 agent=self.name,
                 mock=False,
-                summary=f"No usable Solana DEX market for {canonical}: {exc}.",
+                summary=f"No usable {chain_label(chain)} DEX market for {canonical}: {exc}.",
                 findings=base
                 | {
                     "unavailable": str(exc),
@@ -85,7 +106,7 @@ class DexMarketAgent(Agent):
             return AgentResult(
                 agent=self.name,
                 mock=False,
-                summary=f"No Solana DEX market data for {canonical}: {exc}.",
+                summary=f"No {chain_label(chain)} DEX market data for {canonical}: {exc}.",
                 findings=base | {"unavailable": str(exc)},
             )
         except MarketDataError as exc:
@@ -93,7 +114,7 @@ class DexMarketAgent(Agent):
                 agent=self.name,
                 status="error",
                 mock=False,
-                summary=f"Solana DEX data is unavailable right now ({exc}).",
+                summary=f"DEX data is unavailable right now ({exc}).",
                 findings=base,
                 error=str(exc),
             )

@@ -16,6 +16,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from upscale.services.chains import normalize_address
 from upscale.services.kraken import resolve_pair
 
 REGISTRY_AS_OF = "2026-09"
@@ -173,17 +174,6 @@ class AssetRegistry:
 
     def has_symbol(self, symbol: str) -> bool:
         return symbol.upper() in self._by_symbol
-
-
-# EVM addresses are case-insensitive hex; Solana mints (base58) and others are not.
-_EVM_CHAINS = {"ethereum", "bnb-chain", "arbitrum", "optimism", "base", "polygon", "avalanche"}
-
-
-def normalize_address(chain: str | None, address: str | None) -> str | None:
-    if address is None:
-        return None
-    address = address.strip()
-    return address.lower() if chain in _EVM_CHAINS else address
 
 
 DEFAULT_REGISTRY = AssetRegistry()

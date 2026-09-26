@@ -1,14 +1,22 @@
+from typing import Any
+
+import upscale.services as services
 from upscale.agents.base import Agent, AgentContext
 from upscale.formatting import usd, usd_zone
 from upscale.schemas import AgentResult, Risk, Scenario
 from upscale.services import technical_analysis_service
-from upscale.services.market_data import MarketDataError
+from upscale.services.chains import same_address
+from upscale.services.market_data import TIMEFRAMES, MarketDataError, Timeframe
+from upscale.services.solana_dex import SolanaDexSnapshot
+from upscale.services.strategy import strategy_for
 from upscale.services.technical_analysis import (
     InvalidCandleDataError,
     Level,
     TechnicalAnalysis,
     TechnicalAnalysisService,
+    analyze_series,
 )
+from upscale.services.technical_pool import alternate_pools
 
 TIME_FORMAT = "%Y-%m-%d %H:%M UTC"
 
@@ -25,7 +33,8 @@ class TechnicalAnalysisAgent(Agent):
         "SMA/EMA, RSI, MACD, recent range, relative volume, rule-based trend and approximate "
         "levels."
     )
-    depends_on = ("vision",)
+    # Vision can name the asset; DEX data names the pool whose candles a token trades on.
+    depends_on = ("vision", "dex_market")
 
     def __init__(self, service: TechnicalAnalysisService | None = None):
         self.service = service or technical_analysis_service
@@ -37,6 +46,20 @@ class TechnicalAnalysisAgent(Agent):
             if context.attachments:
                 note += " Screenshot contents are not read yet; name the coin to analyze it."
             return AgentResult(agent=self.name, mock=False, summary=note, findings={})
+        pool = _pool(context)
+        identity = context.asset_identity
+        if identity is not None and identity.address and pool is not None:
+            if (
+                not same_address(pool.chain, pool.mint, identity.address)
+                or pool.chain != identity.chain
+            ):
+                pool = None  # another token's pool: never used
+        if identity is not None and identity.address:
+            # A contract token: only its own pool's candles describe it, never a ticker's.
+            if pool is None:
+                reason = "no usable DEX pool was found, so there are no candles for this token"
+                return self._failure(symbol, reason)
+            return await self._run_pool(context, symbol, pool, None)
 
         try:
             timeframe, fallback_note = self.service.resolve_timeframe(context.timeframe)
@@ -46,15 +69,107 @@ class TechnicalAnalysisAgent(Agent):
                 )
             analysis = await self.service.analyze(symbol, timeframe)
         except (MarketDataError, InvalidCandleDataError) as exc:
-            return AgentResult(
-                agent=self.name,
-                status="error",
-                mock=False,
-                summary=f"Technical analysis could not be performed for {symbol}: {exc}.",
-                findings={"symbol": symbol},
-                error=str(exc),
-            )
+            if pool is not None:
+                # Fallback for a listed token that also trades in a DEX pool: that exact
+                # pool's candles, recorded as such (never another token's).
+                note = f"Exchange candles were unavailable ({exc}); used DEX pool candles."
+                return await self._run_pool(context, symbol, pool, note)
+            return self._failure(symbol, str(exc))
+        return self._result(context, analysis, fallback_note)
 
+    def _failure(self, symbol: str, reason: str) -> AgentResult:
+        return AgentResult(
+            agent=self.name,
+            status="error",
+            mock=False,
+            summary=f"Technical analysis could not be performed for {symbol}: {reason}.",
+            findings={"symbol": symbol},
+            error=reason,
+        )
+
+    async def _run_pool(
+        self, context: AgentContext, symbol: str, pool: SolanaDexSnapshot, note: str | None
+    ) -> AgentResult:
+        registry = services.provider_registry
+        strategy = strategy_for(context.trade.profile if context.trade else None)
+        cfg = strategy.technical
+        supported = [tf for tf in TIMEFRAMES if tf in registry.dex_candles.supported_timeframes]
+        requested = context.timeframe
+        timeframe: Timeframe = next(
+            (tf for tf in supported if tf == requested),
+            cfg.default_timeframe if cfg.default_timeframe in supported else supported[0],
+        )
+        fallback_note = note
+        if requested is not None and requested != timeframe:
+            fallback_note = (
+                f"{requested} candles aren't available for DEX pools; analyzed {timeframe} "
+                f"instead (available: {', '.join(supported)})."
+            )
+        pool_cfg = strategy.technical_pool
+        market = context.trade.market if context.trade else None
+        explicit = bool(market and (market.requested_dex or market.requested_pool))
+
+        async def analyze_pool(address: str) -> tuple[TechnicalAnalysis | None, str | None]:
+            try:
+                series = await registry.pool_candles(
+                    pool.chain,
+                    address,
+                    timeframe,
+                    cfg.candles_to_fetch,
+                    symbol=symbol,
+                    canonical_id=pool.canonical_id,  # every candidate pool is this token's
+                )
+                return analyze_series(series, cfg), None
+            except (MarketDataError, InvalidCandleDataError) as exc:
+                return None, str(exc)
+
+        analysis, error = await analyze_pool(pool.pair_address)
+        pools: dict[str, Any] = {
+            "market_pool": {"address": pool.pair_address, "dex": pool.dex},
+            "technical_pool": {"address": pool.pair_address, "dex": pool.dex},
+            "fallback_reason": None,
+            "rejected": [],
+            "price_rejected": [],
+            "explicit_venue": explicit,
+        }
+        have = analysis.candle_count if analysis else 0
+        if have < pool_cfg.min_candles and explicit:
+            pools["rejected"].append(
+                "no other pool was considered: the trader asked for this DEX/pool"
+            )
+        elif have < pool_cfg.min_candles:
+            alternates = alternate_pools(pool, pool_cfg)
+            pools["rejected"] += alternates.rejected
+            pools["price_rejected"] = alternates.price_rejected
+            for alt in alternates.pools[: pool_cfg.max_alternates]:
+                alt_analysis, alt_error = await analyze_pool(alt.pair_address)
+                alt_have = alt_analysis.candle_count if alt_analysis else 0
+                if alt_analysis is None or alt_have < pool_cfg.min_candles:
+                    pools["rejected"].append(
+                        f"{alt.dex} pool {alt.pair_address}: "
+                        + (alt_error or f"only {alt_have} consecutive closed {timeframe} candles")
+                    )
+                    continue
+                pools["technical_pool"] = {"address": alt.pair_address, "dex": alt.dex}
+                pools["fallback_reason"] = (
+                    f"the market pool ({pool.dex} {pool.pair_address}) has only {have} "
+                    f"consecutive closed {timeframe} candles (needs {pool_cfg.min_candles}); "
+                    f"used {alt.dex} pool {alt.pair_address}: same token, "
+                    f"${alt.liquidity_usd or 0:,.0f} liquidity, {alt.txns_24h} trades in 24h, "
+                    f"price within {pool_cfg.max_price_divergence_pct:g}% of the market pool"
+                )
+                analysis = alt_analysis
+                break
+        if analysis is None:
+            return self._failure(symbol, error or "no candles")
+        result = self._result(context, analysis, fallback_note)
+        result.findings["pools"] = pools
+        result.evidence.insert(1, _pool_line(pools))
+        return result
+
+    def _result(
+        self, context: AgentContext, analysis: TechnicalAnalysis, fallback_note: str | None
+    ) -> AgentResult:
         others = context.assets[1:]
         return AgentResult(
             agent=self.name,
@@ -82,6 +197,33 @@ class TechnicalAnalysisAgent(Agent):
         )
 
 
+def _pool_line(pools: dict[str, Any]) -> str:
+    market, technical = pools["market_pool"], pools["technical_pool"]
+    if pools["fallback_reason"]:
+        return (
+            f"Market pool: {market['dex']} {market['address']}. Technical candles: "
+            f"{technical['dex']} {technical['address']}, because {pools['fallback_reason']}."
+        )
+    line = f"Market and technical pool: {market['dex']} {market['address']}."
+    if pools["rejected"]:
+        line += " Other pools not used: " + "; ".join(pools["rejected"]) + "."
+    return line
+
+
+def _pool(context: AgentContext) -> SolanaDexSnapshot | None:
+    """The primary DEX pool the DEX agent selected for this asset, if any."""
+    dex = context.prior_results.get("dex_market")
+    if dex is None or dex.status != "ok" or dex.mock:
+        return None
+    raw = dex.findings.get("snapshot")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return SolanaDexSnapshot.model_validate(raw)
+    except ValueError:
+        return None
+
+
 def _label(analysis: TechnicalAnalysis) -> str:
     return f"{analysis.symbol} {analysis.timeframe}"
 
@@ -103,6 +245,7 @@ def _evidence(a: TechnicalAnalysis, fallback_note: str | None, others: list[str]
         f"{usd(a.last_close)}."
     ]
     lines += [f"{note}; used {a.provider} instead." for note in a.fallback_notes]
+    lines += [f"{note}." for note in a.notes]
     if fallback_note:
         lines.append(fallback_note)
 

@@ -13,6 +13,7 @@ from upscale.agents.dex_market import DexMarketAgent
 from upscale.agents.education import EducationAgent
 from upscale.agents.market import MarketAgent
 from upscale.agents.news_sentiment import NewsSentimentAgent
+from upscale.agents.onchain_safety import OnchainSafetyAgent
 from upscale.agents.opportunity import OpportunityAgent
 from upscale.agents.risk import RiskAgent
 from upscale.agents.technical import TechnicalAnalysisAgent
@@ -25,6 +26,7 @@ def default_agents() -> list[Agent]:
         TechnicalAnalysisAgent(),
         MarketAgent(),
         DexMarketAgent(),
+        OnchainSafetyAgent(),
         NewsSentimentAgent(),
         RiskAgent(),
         OpportunityAgent(),
@@ -39,6 +41,7 @@ __all__ = [
     "EducationAgent",
     "MarketAgent",
     "NewsSentimentAgent",
+    "OnchainSafetyAgent",
     "OpportunityAgent",
     "RiskAgent",
     "TechnicalAnalysisAgent",

@@ -26,7 +26,6 @@ Primary pool selection (thresholds in `PoolSelectionConfig`), deterministic:
 """
 
 import asyncio
-import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -35,6 +34,16 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
 
+from upscale.services.chains import (
+    DEX_CHAINS,
+    SOLANA,
+    QuoteKind,
+    chain_label,
+    is_valid_address,
+    normalize_address,
+    quote_kind,
+    same_address,
+)
 from upscale.services.market_data import (
     AssetNotFoundError,
     InvalidRequestError,
@@ -42,23 +51,9 @@ from upscale.services.market_data import (
     RateLimiter,
 )
 
-CHAIN = "solana"
+CHAIN = SOLANA  # default chain (the module predates multi-chain support)
 Window = Literal["m5", "h1", "h6", "h24"]
 WINDOWS: tuple[Window, ...] = ("m5", "h1", "h6", "h24")
-QuoteKind = Literal["SOL", "USDC", "USDT", "other"]
-
-# Mints of the quote assets UpScale recognizes (wrapped SOL, Circle USDC, Tether USDT).
-KNOWN_QUOTES: dict[str, QuoteKind] = {
-    "So11111111111111111111111111111111111111112": "SOL",
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
-    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "USDT",
-}
-# Solana addresses are base58-encoded 32-byte keys: 32 to 44 characters, no 0/O/I/l.
-_MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
-
-
-def is_solana_address(value: str) -> bool:
-    return bool(_MINT_RE.fullmatch(value))
 
 
 # --- Models ---------------------------------------------------------------------------------
@@ -111,7 +106,7 @@ class DexPool(BaseModel):
 
     @property
     def quote_kind(self) -> QuoteKind:
-        return KNOWN_QUOTES.get(self.quote.address, "other")
+        return quote_kind(self.chain, self.quote.address)
 
 
 class PoolCandidate(BaseModel):
@@ -132,8 +127,8 @@ class PoolCandidate(BaseModel):
 class SolanaDexSnapshot(BaseModel):
     """The token's primary Solana DEX market, plus every pool that was considered."""
 
-    canonical_id: str  # "solana:<mint>"
-    mint: str
+    canonical_id: str  # "<chain>:<token address>", e.g. "solana:<mint>"
+    mint: str  # the token's address on `chain` (a mint on Solana, a contract on EVM)
     symbol: str | None
     name: str | None
     provider: str
@@ -158,9 +153,15 @@ class SolanaDexSnapshot(BaseModel):
     candidates: list[PoolCandidate]
     primary_clear: bool
     ambiguity: list[str] = Field(default_factory=list)
+    chain: str = SOLANA
+    # A DEX or pool the user asked for; the market was restricted to it (never switched).
+    requested_venue: str | None = None
 
     def window(self, name: Window) -> WindowStats | None:
         return next((w for w in self.windows if w.window == name), None)
+
+
+DexSnapshot = SolanaDexSnapshot  # the chain-neutral name
 
 
 # --- Pool selection -------------------------------------------------------------------------
@@ -184,12 +185,12 @@ class PoolSelection:
     ambiguity: list[str]
 
 
-def _rejections(pool: DexPool, mint: str, cfg: PoolSelectionConfig) -> list[str]:
+def _rejections(pool: DexPool, mint: str, cfg: PoolSelectionConfig, chain: str) -> list[str]:
     reasons: list[str] = []
-    if pool.chain != CHAIN:
-        reasons.append(f"on {pool.chain}, not Solana")
-    if pool.base.address != mint:
-        reasons.append("the mint is not this pool's base token")
+    if pool.chain != chain:
+        reasons.append(f"on {pool.chain}, not {chain_label(chain)}")
+    if not same_address(chain, pool.base.address, mint):
+        reasons.append("the token is not this pool's base token")
     if pool.price_usd is None:
         reasons.append("no USD price reported")
     if pool.liquidity_usd is None:
@@ -214,12 +215,25 @@ def _rank_key(pool: DexPool) -> tuple[float, float, str]:
 
 
 def select_primary_pool(
-    pools: Sequence[DexPool], mint: str, config: PoolSelectionConfig | None = None
+    pools: Sequence[DexPool],
+    mint: str,
+    config: PoolSelectionConfig | None = None,
+    chain: str = SOLANA,
+    dex: str | None = None,
+    pool: str | None = None,
 ) -> PoolSelection:
-    """Pick the token's primary market (see the module docstring for the rules)."""
+    """Pick the token's primary market (see the module docstring for the rules). A DEX or
+    pool the user asked for restricts the choice to it: the market is never switched."""
     cfg = config or PoolSelectionConfig()
-    relevant = [p for p in pools if p.chain == CHAIN and p.base.address == mint]
-    rejections = {p.pair_address: _rejections(p, mint, cfg) for p in relevant}
+    relevant = [
+        p
+        for p in pools
+        if p.chain == chain
+        and same_address(chain, p.base.address, mint)
+        and (dex is None or p.dex.lower() == dex.lower())
+        and (pool is None or same_address(chain, p.pair_address, pool))
+    ]
+    rejections = {p.pair_address: _rejections(p, mint, cfg, chain) for p in relevant}
     eligible = [p for p in relevant if not rejections[p.pair_address]]
     preferred = [p for p in eligible if p.quote_kind != "other"] or eligible
     ranked = sorted(preferred, key=_rank_key)
@@ -279,14 +293,25 @@ def build_snapshot(
     provider: str,
     fetched_at: datetime,
     config: PoolSelectionConfig | None = None,
+    chain: str = SOLANA,
+    dex: str | None = None,
+    pool: str | None = None,
 ) -> SolanaDexSnapshot:
     """Normalize the provider's pools into one snapshot, or raise if none is usable."""
-    selection = select_primary_pool(pools, mint, config)
+    mint = normalize_address(chain, mint) or mint
+    selection = select_primary_pool(pools, mint, config, chain, dex, pool)
     p = selection.primary
     if p is None:
+        if not selection.candidates and (dex or pool):
+            raise VenueNotFoundError(
+                f"no {dex or 'requested'} pool{f' {pool}' if pool else ''} was found for "
+                f"{mint} on {provider}"
+            )
         if not selection.candidates:
-            raise AssetNotFoundError(f"no Solana pool with base token {mint} on {provider}")
-        raise NoUsablePoolError(mint, selection.candidates)
+            raise AssetNotFoundError(
+                f"no {chain_label(chain)} pool with base token {mint} on {provider}"
+            )
+        raise NoUsablePoolError(mint, selection.candidates, chain)
     assert p.price_usd is not None and p.liquidity_usd is not None  # eligibility guarantees it
     created = [c.pair_created_at for c in selection.candidates if c.pair_created_at]
     age = (
@@ -295,7 +320,8 @@ def build_snapshot(
         else None
     )
     return SolanaDexSnapshot(
-        canonical_id=f"{CHAIN}:{mint}",
+        canonical_id=f"{chain}:{mint}",
+        chain=chain,
         mint=mint,
         symbol=p.base.symbol,
         name=p.base.name,
@@ -319,17 +345,22 @@ def build_snapshot(
         candidates=selection.candidates,
         primary_clear=selection.clear,
         ambiguity=selection.ambiguity,
+        requested_venue=pool or dex,
     )
+
+
+class VenueNotFoundError(AssetNotFoundError):
+    """The token has pools, but none on the DEX / pool address the user asked for."""
 
 
 class NoUsablePoolError(AssetNotFoundError):
     """Pools exist for the mint, but none is liquid, active and priced enough to use."""
 
-    def __init__(self, mint: str, candidates: list[PoolCandidate]):
+    def __init__(self, mint: str, candidates: list[PoolCandidate], chain: str = SOLANA):
         self.mint = mint
         self.candidates = candidates
         super().__init__(
-            f"{len(candidates)} Solana pool(s) found for {mint}, but none has enough "
+            f"{len(candidates)} {chain_label(chain)} pool(s) found for {mint}, but none has enough "
             "liquidity, trading activity and a USD price to be treated as its market"
         )
 
@@ -345,8 +376,12 @@ class DexPoolProvider(Protocol):
         `MarketDataError`. An unknown token returns an empty list."""
         ...
 
+    async def search_pools(self, query: str) -> list[DexPool]:
+        """Pools matching a ticker, name or address, on any chain."""
+        ...
 
-class SolanaDexService:
+
+class DexMarketService:
     """Caches snapshots, rate-limits provider calls, and de-duplicates concurrent requests.
 
     Failures (outages, rate limits, malformed data) are never cached; a mint with no pools
@@ -370,9 +405,10 @@ class SolanaDexService:
         self._clock = clock
         self.now = now  # wall clock for pool ages (replaceable in tests)
         self._limiter = RateLimiter(max_calls_per_minute, 60.0, clock)
-        self._cache: dict[str, tuple[float, SolanaDexSnapshot]] = {}
+        self._cache: dict[str, tuple[float, list[DexPool]]] = {}  # raw pools per token
         self._not_found: dict[str, tuple[float, AssetNotFoundError]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._searches: dict[str, tuple[float, list[DexPool]]] = {}
 
     @property
     def provider_name(self) -> str:
@@ -382,36 +418,74 @@ class SolanaDexService:
         self._cache.clear()
         self._not_found.clear()
         self._locks.clear()
+        self._searches.clear()
         self._limiter = RateLimiter(self._limiter.max_calls, 60.0, self._clock)
 
-    async def get_snapshot(self, mint: str) -> SolanaDexSnapshot:
+    async def search_pools(self, query: str) -> list[DexPool]:
+        """Pools matching a ticker, name or address (cached, rate-limited, deduplicated)."""
+        key = f"search:{query.strip().lower()}"
+        entry = self._searches.get(key)
+        if entry and entry[0] > self._clock():
+            return entry[1]
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            entry = self._searches.get(key)
+            if entry and entry[0] > self._clock():
+                return entry[1]
+            if not self._limiter.try_acquire():
+                raise MarketDataUnavailableError(
+                    f"UpScale's {self.provider.name} request limit was reached; try again "
+                    "in a minute"
+                )
+            pools = await self.provider.search_pools(query.strip())
+            self._searches[key] = (self._clock() + self.cache_ttl, pools)
+            return pools
+
+    async def get_snapshot(
+        self,
+        mint: str,
+        chain: str = SOLANA,
+        dex: str | None = None,
+        pool: str | None = None,
+    ) -> SolanaDexSnapshot:
+        """The token's market snapshot. `dex` / `pool` restrict the market to what the user
+        asked for. The raw pools are cached, so different venues cost no extra request."""
         mint = mint.strip()
-        if not is_solana_address(mint):
-            raise InvalidRequestError(f"{mint!r} is not a valid Solana mint address")
-        if (hit := self._cached(mint)) is not None:
+        if chain not in DEX_CHAINS or not is_valid_address(chain, mint):
+            raise InvalidRequestError(f"{mint!r} is not a valid {chain_label(chain)} token address")
+        pools = await self._pools(mint, chain)
+        return build_snapshot(
+            mint, pools, self.provider.name, self.now(), self.selection, chain, dex, pool
+        )
+
+    async def _pools(self, mint: str, chain: str) -> list[DexPool]:
+        key = f"{chain}:{normalize_address(chain, mint)}"
+        if (hit := self._cached(key)) is not None:
             return hit
-        async with self._locks.setdefault(mint, asyncio.Lock()):
-            if (hit := self._cached(mint)) is not None:
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            if (hit := self._cached(key)) is not None:
                 return hit
             if not self._limiter.try_acquire():
                 raise MarketDataUnavailableError(
                     f"UpScale's {self.provider.name} request limit was reached; try again "
                     "in a minute"
                 )
+            pools = await self.provider.fetch_token_pools(chain, mint)
             try:
-                pools = await self.provider.fetch_token_pools(CHAIN, mint)
-                snapshot = build_snapshot(
-                    mint, pools, self.provider.name, self.now(), self.selection
-                )
+                build_snapshot(mint, pools, self.provider.name, self.now(), self.selection, chain)
+            except NoUsablePoolError:
+                pass  # pools exist; callers get the error with its candidates
             except AssetNotFoundError as exc:
-                self._not_found[mint] = (self._clock() + self.not_found_ttl, exc)
+                self._not_found[key] = (self._clock() + self.not_found_ttl, exc)
                 raise
-            self._cache[mint] = (self._clock() + self.cache_ttl, snapshot)
-            return snapshot
+            self._cache[key] = (self._clock() + self.cache_ttl, pools)
+            return pools
 
-    def _cached(self, mint: str) -> SolanaDexSnapshot | None:
+    def _cached(self, mint: str) -> list[DexPool] | None:
         missing = self._not_found.get(mint)
         if missing and missing[0] > self._clock():
             raise missing[1]
         entry = self._cache.get(mint)
         return entry[1] if entry and entry[0] > self._clock() else None
+
+
+SolanaDexService = DexMarketService  # the original, Solana-only name

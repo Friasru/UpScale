@@ -21,6 +21,7 @@ export type AgentName =
   | 'technical_analysis'
   | 'market'
   | 'dex_market'
+  | 'onchain_safety'
   | 'news_sentiment'
   | 'opportunity'
   | 'risk'
@@ -48,6 +49,8 @@ export interface Analysis {
   agent_results: AgentResult[]
   uncertainty: { level: Level; notes: string[] }
   disclaimer: string
+  /** Internal latency record in milliseconds (asset resolution, each agent, total). */
+  timings?: Record<string, number>
 }
 
 export interface ChatResponse {

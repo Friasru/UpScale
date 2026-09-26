@@ -30,6 +30,7 @@ thresholds are calibrated for it. Those tables, not scattered if-statements, dri
 adaptive behavior in Risk and Opportunity.
 """
 
+import dataclasses
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -43,9 +44,17 @@ from upscale.services.asset_registry import (
     DEFAULT_REGISTRY,
     AssetMetadata,
     AssetRegistry,
+)
+from upscale.services.chains import (
+    DEX_CHAINS,
+    EVM_CHAINS,
+    GECKOTERMINAL_NETWORKS,
+    chain_label,
     normalize_address,
+    same_address,
 )
 from upscale.services.market_data import MarketSnapshot
+from upscale.services.solana_chain import OnchainSafetySnapshot
 from upscale.services.solana_dex import SolanaDexSnapshot
 from upscale.services.technical_analysis import TechnicalAnalysis, TechnicalAnalysisConfig
 
@@ -63,7 +72,7 @@ VolatilityClass = Literal["low", "moderate", "high", "extreme"]
 MarketType = Literal["cex_spot", "dex_spot", "cex_and_dex", "unknown"]
 IdentityBasis = Literal["registry_symbol", "cex_pair", "contract", "symbol_only"]
 DataCapability = Literal[
-    "kraken_ohlcv", "coingecko_snapshot", "news", "dex", "onchain", "social", "derivatives"
+    "candles", "market_snapshot", "news", "dex", "onchain", "social", "derivatives"
 ]
 CapabilityState = Literal["available", "unavailable", "unknown"]
 EvidenceType = Literal[
@@ -93,8 +102,8 @@ StepStatus = Literal["run", "conditional", "unavailable", "skip"]
 T = TypeVar("T")
 
 CAPABILITIES: tuple[DataCapability, ...] = (
-    "kraken_ohlcv",
-    "coingecko_snapshot",
+    "candles",
+    "market_snapshot",
     "news",
     "dex",
     "onchain",
@@ -103,11 +112,27 @@ CAPABILITIES: tuple[DataCapability, ...] = (
 )
 # Providers UpScale has today. Anything else is reported as unavailable.
 INTEGRATED_CAPABILITIES: frozenset[DataCapability] = frozenset(
-    {"kraken_ohlcv", "coingecko_snapshot", "news", "dex"}
+    {"candles", "market_snapshot", "news", "dex"}
 )
+# Capabilities that exist only when configured (e.g. on-chain data needs a Solana RPC).
+_ENABLED_OPTIONAL: set[DataCapability] = set()
+
+
+def set_capability_enabled(capability: DataCapability, enabled: bool) -> None:
+    """Called at startup by `upscale.services` once it knows which providers exist."""
+    if enabled:
+        _ENABLED_OPTIONAL.add(capability)
+    else:
+        _ENABLED_OPTIONAL.discard(capability)
+
+
+def integrated_capabilities() -> frozenset[DataCapability]:
+    return INTEGRATED_CAPABILITIES | frozenset(_ENABLED_OPTIONAL)
+
+
 CAPABILITY_LABELS: dict[DataCapability, str] = {
-    "kraken_ohlcv": "Kraken OHLCV candles",
-    "coingecko_snapshot": "CoinGecko market snapshots",
+    "candles": "OHLCV candles",
+    "market_snapshot": "market snapshots",
     "news": "news from publisher RSS feeds",
     "dex": "DEX pool data",
     "onchain": "on-chain data",
@@ -140,8 +165,8 @@ CATEGORY_LABELS: dict[Category, str] = {
 }
 # Where each evidence type comes from, and which agent analyzes it (None: no rule yet).
 EVIDENCE_SOURCE: dict[EvidenceType, DataCapability | None] = {
-    "technical_structure": "kraken_ohlcv",
-    "market_snapshot": "coingecko_snapshot",
+    "technical_structure": "candles",
+    "market_snapshot": "market_snapshot",
     "news": "news",
     "dex_liquidity": "dex",
     "buy_sell_flow": "dex",
@@ -151,7 +176,7 @@ EVIDENCE_SOURCE: dict[EvidenceType, DataCapability | None] = {
     "onchain_activity": "onchain",
     "ecosystem": "onchain",
     "social": "social",
-    "peg_stability": "coingecko_snapshot",
+    "peg_stability": "market_snapshot",
     "issuer_risk": None,
     "derivatives": "derivatives",
 }
@@ -162,6 +187,8 @@ EVIDENCE_AGENT: dict[EvidenceType, AgentName] = {
     "dex_liquidity": "dex_market",
     "buy_sell_flow": "dex_market",
     "pool_age": "dex_market",
+    "token_authorities": "onchain_safety",
+    "holder_concentration": "onchain_safety",
 }
 
 
@@ -452,6 +479,9 @@ class CapabilityStatus(BaseModel):
     reason: str
 
 
+Sufficiency = Literal["required", "important", "optional"]
+
+
 class EvidenceStatus(BaseModel):
     evidence: EvidenceType
     requirement: Requirement
@@ -459,6 +489,15 @@ class EvidenceStatus(BaseModel):
     decision_critical: bool
     status: EvidenceState
     reason: str
+    # How much its absence matters: required (safety-critical, can block BUY/SELL),
+    # important (lowers confidence / adds a caution), optional (lowers confidence at most).
+    sufficiency: Sufficiency = "optional"
+
+
+def sufficiency(rule: "EvidenceRule") -> Sufficiency:
+    if rule.decision_critical:
+        return "required"
+    return "important" if rule.requirement == "required" else "optional"
 
 
 class PlannedStep(BaseModel):
@@ -513,6 +552,8 @@ class CryptoAssetProfile(BaseModel):
     risk_overrides: dict[str, float] = Field(default_factory=dict)
     missing_metadata: list[str]
     metadata_source: str
+    # Evidence the market being traded demands, independent of the asset's category.
+    market_policy: "MarketPolicy | None" = None
 
     def capability(self, name: DataCapability) -> CapabilityStatus:
         return next(c for c in self.capabilities if c.capability == name)
@@ -521,8 +562,9 @@ class CryptoAssetProfile(BaseModel):
         return next((e for e in self.evidence if e.evidence == name), None)
 
     def unavailable_critical(self) -> list[EvidenceStatus]:
-        """Decision-critical evidence UpScale can't use for this asset right now."""
-        return [e for e in self.evidence if e.decision_critical and not usable(e)]
+        """Decision-critical evidence that wasn't actually reported. At decision time,
+        "expected" (a provider exists but nothing arrived) is as missing as "unavailable"."""
+        return [e for e in self.evidence if e.decision_critical and e.status != "available"]
 
     @property
     def technical_usable(self) -> bool:
@@ -553,6 +595,7 @@ class Observations:
     snapshot: MarketSnapshot | None = None
     technical: TechnicalAnalysis | None = None
     dex: SolanaDexSnapshot | None = None  # keyed by mint, so never ticker-ambiguous
+    onchain: OnchainSafetySnapshot | None = None  # keyed by mint too
     # Input agent -> (status, detail), with the statuses of `risk.InputState`.
     states: Mapping[AgentName, tuple[str, str | None]] = field(default_factory=dict)
 
@@ -588,10 +631,15 @@ def build_profile(
     registry: AssetRegistry = DEFAULT_REGISTRY,
     config: ProfileConfig | None = None,
     categories: Mapping[Category, CategoryProfile] = CATEGORY_PROFILES,
-    integrated: frozenset[DataCapability] = INTEGRATED_CAPABILITIES,
+    integrated: frozenset[DataCapability] | None = None,
     now: datetime | None = None,
+    venue: str | None = None,
 ) -> CryptoAssetProfile | None:
-    """The asset's profile, or None when there is no usable identity."""
+    """The asset's profile, or None when there is no usable identity. `integrated`
+    defaults to the capabilities configured at startup. `venue` ("cex" / "dex") is the
+    market being traded when known; it sets the market policy (see `market_policy_for`)."""
+    if integrated is None:
+        integrated = integrated_capabilities()
     if identity is None:
         return None
     resolved = resolve_identity(AssetIdentity.of(identity), registry)
@@ -607,7 +655,8 @@ def build_profile(
         meta = meta.model_copy(update={"symbol": obs.dex.symbol, "name": meta.name or obs.dex.name})
     facts = _facts(meta, resolved, obs, cfg, now)
     category, reasons = classify(meta, facts, resolved, cfg)
-    spec = categories[category]
+    policy = market_policy_for(meta, resolved, obs, venue)
+    spec = apply_market_policy(categories[category], policy)
     caps = _capabilities(resolved, obs, integrated)
     evidence = _evidence(spec, caps, obs, meta)
     liquidity, liquidity_basis = _liquidity(obs.snapshot, facts, cfg)
@@ -653,29 +702,133 @@ def build_profile(
         risk_overrides=dict(spec.risk_overrides),
         missing_metadata=_missing_metadata(meta, facts),
         metadata_source=meta.source,
+        market_policy=policy,
+    )
+
+
+MarketPolicyKind = Literal["dex_contract", "exchange", "unspecified"]
+
+
+class MarketPolicy(BaseModel):
+    """What the market being traded requires, separately from what kind of asset it is.
+
+    A **DEX contract trade** (a token identified by its Solana mint / EVM contract, traded
+    in a DEX pool) must show, before any BUY: usable DEX liquidity, enough candles from the
+    token's own pool, and chain-specific token safety (authorities, holder concentration).
+    That holds for any such token: meme-tagged or not, new or years old. On a centralized
+    exchange the same asset follows its category's evidence rules instead.
+    """
+
+    kind: MarketPolicyKind
+    reason: str
+    required: list[EvidenceType] = Field(default_factory=list)
+
+
+# Decision-critical evidence for every DEX contract trade, whatever the category.
+DEX_CONTRACT_REQUIREMENTS: tuple[EvidenceRule, ...] = (
+    EvidenceRule("dex_liquidity", "required", "primary", True),
+    EvidenceRule("technical_structure", "required", "primary", True),
+    EvidenceRule("token_authorities", "required", "primary", True),
+    EvidenceRule("holder_concentration", "required", "primary", True),
+)
+
+
+def market_policy_for(
+    meta: AssetMetadata, resolved: ResolvedIdentity, obs: Observations, venue: str | None
+) -> MarketPolicy:
+    """DEX contract trade when the token has a chain + address and the analyzed market is a
+    DEX: stated by the trader, implied by identifying the token by its address, or shown
+    by the candles actually coming from the token's own pool."""
+    on_chain = meta.chain in DEX_CHAINS and bool(meta.address)
+    if on_chain and venue != "cex":
+        pool_candles = technical_matches(obs.technical, resolved.canonical_id)
+        if venue == "dex" or resolved.basis == "contract" or pool_candles:
+            why = (
+                "the trader asked about a DEX market"
+                if venue == "dex"
+                else "the token was identified by its contract/mint address"
+                if resolved.basis == "contract"
+                else "the analyzed candles come from the token's DEX pool"
+            )
+            return MarketPolicy(
+                kind="dex_contract",
+                reason=(
+                    f"DEX contract trade ({why}): liquidity, the token's own pool candles, "
+                    "token authorities and holder concentration are required before any BUY."
+                ),
+                required=[r.evidence for r in DEX_CONTRACT_REQUIREMENTS],
+            )
+    if venue == "cex" or meta.cex_listed or meta.kraken_pair:
+        return MarketPolicy(
+            kind="exchange",
+            reason="Centralized-exchange trade: the asset's category sets the evidence rules.",
+        )
+    return MarketPolicy(kind="unspecified", reason="No specific market; category rules apply.")
+
+
+def apply_market_policy(spec: CategoryProfile, policy: MarketPolicy) -> CategoryProfile:
+    """The category's evidence rules, with the market policy's requirements made
+    decision-critical (added when missing, upgraded when present)."""
+    if policy.kind != "dex_contract":
+        return spec
+    by_evidence = {r.evidence: r for r in spec.evidence}
+    for rule in DEX_CONTRACT_REQUIREMENTS:
+        by_evidence[rule.evidence] = rule
+    ordered = [by_evidence[r.evidence] for r in spec.evidence] + [
+        r
+        for r in DEX_CONTRACT_REQUIREMENTS
+        if r.evidence not in {x.evidence for x in spec.evidence}
+    ]
+    return dataclasses.replace(
+        spec,
+        evidence=tuple(ordered),
+        technical_min_candles=spec.technical_min_candles or MIN_TECHNICAL_CANDLES,
     )
 
 
 def dex_matches(dex: SolanaDexSnapshot | None, meta: AssetMetadata) -> bool:
-    """DEX data belongs to this asset only when it was fetched for this exact mint."""
-    return dex is not None and meta.chain == "solana" and dex.mint == meta.address
+    """DEX data belongs to this asset only when it was fetched for this exact token."""
+    return (
+        dex is not None
+        and meta.chain is not None
+        and dex.chain == meta.chain
+        and same_address(meta.chain, dex.mint, meta.address)
+    )
+
+
+def technical_matches(technical: TechnicalAnalysis | None, canonical_id: str) -> bool:
+    """Candles keyed by this exact asset (e.g. its DEX pool), not by a shared ticker."""
+    return technical is not None and technical.canonical_id == canonical_id
+
+
+def onchain_matches(onchain: OnchainSafetySnapshot | None, meta: AssetMetadata) -> bool:
+    return onchain is not None and meta.chain == "solana" and onchain.mint == meta.address
 
 
 def _attributable_observations(obs: Observations, resolved: ResolvedIdentity) -> Observations:
-    dex_ok = dex_matches(obs.dex, resolved.metadata)
-    if resolved.ticker_data_attributable:
-        if dex_ok or obs.dex is None:
-            return obs
-        return Observations(
-            snapshot=obs.snapshot,
-            technical=obs.technical,
-            states={k: v for k, v in obs.states.items() if k != "dex_market"},
-        )
-    # Ticker-keyed data would describe whichever token owns the ticker, not this one;
-    # mint-keyed DEX data is kept when it is for this exact mint.
+    """Keep only evidence that belongs to this exact asset: mint-keyed data (DEX, on-chain)
+    for its mint, and ticker-keyed data only when the ticker is proven to be its own."""
+    meta = resolved.metadata
+    mint_keyed: dict[AgentName, bool] = {
+        "dex_market": obs.dex is None or dex_matches(obs.dex, meta),
+        "onchain_safety": obs.onchain is None or onchain_matches(obs.onchain, meta),
+    }
+    # Candles keyed by this exact asset (its DEX pool) belong to it whatever the ticker.
+    mint_keyed["technical_analysis"] = technical_matches(obs.technical, resolved.canonical_id)
+    ticker_ok = resolved.ticker_data_attributable
+
+    def keep(agent: AgentName) -> bool:
+        if agent == "technical_analysis":
+            return ticker_ok or mint_keyed[agent]
+        return mint_keyed[agent] if agent in mint_keyed else ticker_ok
+
+    states = {k: v for k, v in obs.states.items() if keep(k)}
     return Observations(
-        dex=obs.dex if dex_ok else None,
-        states={k: v for k, v in obs.states.items() if k == "dex_market"},
+        snapshot=obs.snapshot if ticker_ok else None,
+        technical=obs.technical if ticker_ok or mint_keyed["technical_analysis"] else None,
+        dex=obs.dex if mint_keyed["dex_market"] else None,
+        onchain=obs.onchain if mint_keyed["onchain_safety"] else None,
+        states=states,
     )
 
 
@@ -904,15 +1057,24 @@ def _capabilities(
     out: list[CapabilityStatus] = []
     for cap in CAPABILITIES:
         label = CAPABILITY_LABELS[cap]
+        if cap == "onchain" and meta.chain in EVM_CHAINS and meta.address:
+            out.append(_onchain_status(meta, obs, _result_for(cap)))
+            continue
         if cap not in integrated:
+            reason = (
+                "No provider for on-chain data is configured (set UPSCALE_HELIUS_API_KEY or "
+                "UPSCALE_SOLANA_RPC_URL)."
+                if cap == "onchain"
+                else f"No provider for {label} is integrated in UpScale yet."
+            )
             out.append(
                 CapabilityStatus(
-                    capability=cap,
-                    status="unavailable",
-                    verified=False,
-                    reason=f"No provider for {label} is integrated in UpScale yet.",
+                    capability=cap, status="unavailable", verified=False, reason=reason
                 )
             )
+            continue
+        if cap == "candles" and not resolved.ticker_data_attributable and _has_pools(meta):
+            out.append(_pool_candle_status(resolved, obs))
             continue
         if not resolved.ticker_data_attributable and cap in _TICKER_KEYED:
             out.append(
@@ -932,10 +1094,10 @@ def _capabilities(
     return out
 
 
-_TICKER_KEYED: frozenset[DataCapability] = frozenset({"kraken_ohlcv", "coingecko_snapshot", "news"})
+_TICKER_KEYED: frozenset[DataCapability] = frozenset({"candles", "market_snapshot", "news"})
 _CAPABILITY_AGENT: dict[DataCapability, AgentName] = {
-    "kraken_ohlcv": "technical_analysis",
-    "coingecko_snapshot": "market",
+    "candles": "technical_analysis",
+    "market_snapshot": "market",
     "news": "news_sentiment",
 }
 
@@ -950,7 +1112,7 @@ def _integrated_status(
     def result(state: CapabilityState, verified: bool, reason: str) -> CapabilityStatus:
         return CapabilityStatus(capability=cap, status=state, verified=verified, reason=reason)
 
-    if cap == "kraken_ohlcv":
+    if cap == "candles":
         if obs.technical is not None:
             if obs.technical.provider == "Kraken":
                 return result("available", True, f"Kraken served {obs.technical.pair} candles.")
@@ -966,7 +1128,7 @@ def _integrated_status(
             f"Kraken pairs are found by ticker; whether {meta.symbol}/USD exists is only "
             "known after a request.",
         )
-    if cap == "coingecko_snapshot":
+    if cap == "market_snapshot":
         if obs.snapshot is not None:
             return result("available", True, f"{obs.snapshot.provider} reported a snapshot.")
         if status in ("failed", "no_data"):
@@ -981,6 +1143,8 @@ def _integrated_status(
         )
     if cap == "dex":
         return _dex_status(meta, obs, status, detail, result)
+    if cap == "onchain":
+        return _onchain_status(meta, obs, result)
     if cap != "news":
         return _future_provider_status(cap, meta, result)
     if status == "ok":
@@ -994,6 +1158,40 @@ def _integrated_status(
     )
 
 
+def _has_pools(meta: AssetMetadata) -> bool:
+    return meta.chain in GECKOTERMINAL_NETWORKS and bool(meta.address)
+
+
+def _result_for(cap: DataCapability) -> Callable[[CapabilityState, bool, str], CapabilityStatus]:
+    def result(state: CapabilityState, verified: bool, reason: str) -> CapabilityStatus:
+        return CapabilityStatus(capability=cap, status=state, verified=verified, reason=reason)
+
+    return result
+
+
+def _pool_candle_status(resolved: ResolvedIdentity, obs: Observations) -> CapabilityStatus:
+    """Candles for a contract token come from its own DEX pool, never from a ticker."""
+    status, detail = obs.states.get("technical_analysis", ("not_run", None))
+    if technical_matches(obs.technical, resolved.canonical_id) and obs.technical is not None:
+        reason = f"{obs.technical.provider} served candles for this token's pool."
+        return CapabilityStatus(
+            capability="candles", status="available", verified=True, reason=reason
+        )
+    if status in ("failed", "no_data"):
+        return CapabilityStatus(
+            capability="candles",
+            status="unavailable",
+            verified=True,
+            reason=f"No pool candles this turn: {detail}.",
+        )
+    return CapabilityStatus(
+        capability="candles",
+        status="available",
+        verified=False,
+        reason="Candles are read from this token's selected DEX pool.",
+    )
+
+
 def _dex_status(
     meta: AssetMetadata,
     obs: Observations,
@@ -1001,12 +1199,12 @@ def _dex_status(
     detail: str | None,
     result: Callable[[CapabilityState, bool, str], CapabilityStatus],
 ) -> CapabilityStatus:
-    if meta.chain != "solana" or not meta.address:
+    if meta.chain not in DEX_CHAINS or not meta.address:
         return result(
             "unavailable",
             False,
-            f"UpScale's DEX data covers Solana tokens identified by mint; {meta.symbol} has "
-            "no Solana mint.",
+            f"UpScale's DEX data covers tokens identified by chain + contract/mint address "
+            f"(Solana and EVM chains); {meta.symbol} has none.",
         )
     if obs.dex is not None:
         return result(
@@ -1017,6 +1215,33 @@ def _dex_status(
     if status in ("failed", "no_data"):
         return result("unavailable", True, f"No usable DEX pool this turn: {detail}.")
     return result("available", False, f"DEX pools are looked up by mint {meta.address}.")
+
+
+def _onchain_status(
+    meta: AssetMetadata,
+    obs: Observations,
+    result: Callable[[CapabilityState, bool, str], CapabilityStatus],
+) -> CapabilityStatus:
+    if meta.chain in EVM_CHAINS and meta.address:
+        return result(
+            "unavailable",
+            False,
+            f"No on-chain safety provider is integrated for {chain_label(meta.chain)} yet "
+            "(Solana only for now).",
+        )
+    if meta.chain != "solana" or not meta.address:
+        return result(
+            "unavailable",
+            False,
+            f"UpScale's on-chain data covers Solana tokens identified by mint; {meta.symbol} "
+            "has no Solana mint.",
+        )
+    status, detail = obs.states.get("onchain_safety", ("not_run", None))
+    if obs.onchain is not None:
+        return result("available", True, f"{obs.onchain.provider} read the mint account.")
+    if status in ("failed", "no_data"):
+        return result("unavailable", True, f"No on-chain data this turn: {detail}.")
+    return result("available", False, f"Mint {meta.address} is read from the chain.")
 
 
 def _future_provider_status(
@@ -1052,6 +1277,7 @@ def _evidence(
                 decision_critical=rule.decision_critical,
                 status=state,
                 reason=reason,
+                sufficiency=sufficiency(rule),
             )
         )
     return out
@@ -1088,6 +1314,8 @@ def _evidence_state(
     status, detail = obs.states.get(agent, ("not_run", None))
     if status == "ok" and agent == "dex_market" and obs.dex is not None:
         return _dex_evidence(e, obs.dex)
+    if status == "ok" and agent == "onchain_safety" and obs.onchain is not None:
+        return _onchain_evidence(e, obs.onchain)
     if status == "ok" and (e != "technical_structure" or obs.technical is not None):
         return "available", "Reported this turn."
     if status in ("failed", "no_data", "unreadable"):
@@ -1123,6 +1351,36 @@ def _dex_evidence(e: EvidenceType, dex: SolanaDexSnapshot) -> tuple[EvidenceStat
             return "unavailable", f"{dex.provider} didn't report buy/sell counts."
         return "available", f"Buy/sell counts reported ({where})."
     return "available", f"${dex.liquidity_usd:,.0f} liquidity ({where})."
+
+
+def _onchain_evidence(e: EvidenceType, s: OnchainSafetySnapshot) -> tuple[EvidenceState, str]:
+    """Authorities come straight from the mint account. Holder concentration only counts
+    when the largest accounts' owners could be resolved; otherwise it is insufficient
+    (never assumed safe)."""
+    if e == "token_authorities":
+        if not s.authorities_available:
+            return "unavailable", f"The mint account couldn't be read: {s.authorities_error}."
+        mint = "active" if s.mint_authority_active else "revoked"
+        freeze = "active" if s.freeze_authority_active else "revoked"
+        return "available", f"Mint authority {mint}, freeze authority {freeze} ({s.provider})."
+    if not s.holders_available:
+        return "unavailable", f"Holder data couldn't be read: {s.holders_error}."
+    if not s.concentration_authoritative:
+        # Lower bounds (largest accounts only, or a scan cut short) can flag concentration,
+        # but can't show it is low enough to rely on.
+        return "insufficient", "Holder data is incomplete: " + "; ".join(s.incomplete_reasons) + "."
+    top10 = f"{s.top10_pct:.1f}%" if s.top10_pct is not None else "unknown"
+    return "available", (
+        f"Top 10 non-pool holders hold {top10} of supply (full scan by owner, {s.provider})."
+    )
+
+
+def wants_onchain_data(profile: CryptoAssetProfile) -> bool:
+    """True when this kind of asset needs token-safety evidence and UpScale can read it."""
+    safety = {"token_authorities", "holder_concentration"}
+    return profile.capability("onchain").status != "unavailable" and any(
+        e.evidence in safety for e in profile.evidence
+    )
 
 
 def wants_dex_data(profile: CryptoAssetProfile) -> bool:

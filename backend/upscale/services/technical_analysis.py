@@ -199,6 +199,9 @@ class TechnicalAnalysis(BaseModel):
     recent_range: RecentRange
     trend: Trend
     levels: SupportResistance
+    canonical_id: str | None = None  # exact asset, for contract/pool-keyed candles
+    as_of: datetime | None = None  # see `CandleSeries.as_of`
+    notes: list[str] = Field(default_factory=list)
 
     def indicator(self, name: str) -> Indicator | None:
         return next((i for i in self.indicators if i.name == name), None)
@@ -275,6 +278,9 @@ def analyze_series(
         recent_range=recent_range(series, config.high_low_lookback),
         trend=classify_trend(closes, config.trend_fast_sma, config.trend_slow_sma),
         levels=support_resistance(series, config),
+        canonical_id=series.canonical_id,
+        as_of=series.as_of,
+        notes=series.notes,
     )
 
 
@@ -362,7 +368,7 @@ def recent_range(series: CandleSeries, lookback: int) -> RecentRange:
 def volume_analysis(series: CandleSeries, lookback: int) -> VolumeAnalysis:
     """Last candle's volume relative to the preceding `lookback` candles, and the up/down
     split of volume over the window. Only computed from provider-supplied volume."""
-    unit = series.symbol
+    unit = series.volume_unit or series.symbol
     if not series.volume_available:
         return VolumeAnalysis(
             lookback=lookback,

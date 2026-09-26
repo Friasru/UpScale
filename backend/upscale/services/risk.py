@@ -35,7 +35,9 @@ news:
 import dataclasses
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import timedelta
+from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
@@ -43,6 +45,7 @@ from pydantic import BaseModel, Field, ValidationError
 from upscale.formatting import usd, usd_zone
 from upscale.schemas import AgentName, AgentResult, Level
 from upscale.services.asset_profile import (
+    CATEGORY_LABELS,
     EVIDENCE_LABELS,
     AssetIdentity,
     CryptoAssetProfile,
@@ -52,14 +55,17 @@ from upscale.services.asset_profile import (
     usable,
 )
 from upscale.services.asset_registry import DEFAULT_REGISTRY
-from upscale.services.market_data import MarketSnapshot
+from upscale.services.market_data import TIMEFRAME_SECONDS, MarketSnapshot
 from upscale.services.news import Story
+from upscale.services.solana_chain import OnchainSafetySnapshot
 from upscale.services.solana_dex import PoolCandidate, SolanaDexSnapshot, Window
 from upscale.services.technical_analysis import Level as PriceLevel
 from upscale.services.technical_analysis import TechnicalAnalysis
 from upscale.services.vision import ChartVision
 
-RiskCategory = Literal["market", "technical", "news", "screenshot", "data_quality", "dex"]
+RiskCategory = Literal[
+    "market", "technical", "news", "screenshot", "data_quality", "dex", "onchain"
+]
 Affects = Literal["risk", "uncertainty"]
 OverallRisk = Literal["low", "medium", "high", "unknown"]
 InputStatus = Literal["ok", "no_data", "failed", "not_run", "unreadable"]
@@ -70,6 +76,7 @@ AGENT_LABELS: dict[AgentName, str] = {
     "technical_analysis": "Technical analysis",
     "market": "Live market data",
     "dex_market": "Solana DEX market data",
+    "onchain_safety": "Solana on-chain safety data",
     "news_sentiment": "News & sentiment",
     "opportunity": "Opportunity decision",
     "risk": "Risk review",
@@ -82,6 +89,7 @@ _CATEGORY_LABELS: dict[RiskCategory, str] = {
     "screenshot": "screenshot",
     "data_quality": "data quality",
     "dex": "DEX market",
+    "onchain": "on-chain",
 }
 # Macro and regulatory topics, matched on headlines of fresh medium/high-impact stories.
 _EVENT_WORDS = re.compile(
@@ -109,6 +117,9 @@ class RiskConfig:
     screenshot_diff_high_pct: float = 10.0
     live_sources_diff_pct: float = 5.0  # last candle close vs market snapshot price
     market_stale_minutes: float = 30.0  # provider's last update older than this at fetch time
+    # Candles from a source that can go quiet (a DEX pool): the last candle closing more
+    # than this many intervals before the data was read means the pool may have stopped.
+    candle_stale_intervals: float = 3.0
 
 
 class RiskFactor(BaseModel):
@@ -191,6 +202,13 @@ WEAKENS: dict[str, str] = {
     "dex_flow_imbalance": "One-sided flow can flip abruptly when early buyers or sellers exit.",
     "dex_liquidity_missing": "Without reported liquidity, exit cost can't be judged.",
     "dex_competing_pools": "Prices may differ between pools; the chosen primary may not be the real market.",
+    "onchain_mint_authority": "New supply can be minted at any time, diluting holders.",
+    "onchain_freeze_authority": "Holders' accounts can be frozen, blocking sales.",
+    "onchain_token_extension": "The extension's controller can change how the token behaves.",
+    "onchain_top_holder": "A sale by this wallet could move the price sharply.",
+    "onchain_top10": "Coordinated or large sales by a few wallets could dominate the price.",
+    "onchain_few_holders": "A thin holder base makes the price easy to move.",
+    "onchain_holders_incomplete": "Unseen holders could change the concentration picture.",
 }
 
 RULES = (
@@ -233,6 +251,7 @@ class Inputs:
     other_failures: list[AgentResult] | None = None
     dex: SolanaDexSnapshot | None = None
     dex_candidates: list[PoolCandidate] | None = None  # pools found when none was usable
+    onchain: OnchainSafetySnapshot | None = None
 
 
 def collect_inputs(prior: Mapping[AgentName, AgentResult], asset: str | None) -> Inputs:
@@ -264,7 +283,38 @@ def collect_inputs(prior: Mapping[AgentName, AgentResult], asset: str | None) ->
         )
     if "dex_market" in prior:
         _collect_dex(inputs, prior["dex_market"])
+    if "onchain_safety" in prior:
+        _collect_onchain(inputs, prior["onchain_safety"])
     return inputs
+
+
+def _collect_onchain(inputs: Inputs, result: AgentResult) -> None:
+    """On-chain data is only reviewed when that agent ran, and only for the asset's mint."""
+    name: AgentName = "onchain_safety"
+    if result.mock or result.status == "error":
+        status: InputStatus = "not_run" if result.mock else "failed"
+        inputs.states[name] = InputState(agent=name, status=status, detail=result.error)
+        return
+    try:
+        raw = result.findings.get("snapshot")
+        snapshot = OnchainSafetySnapshot.model_validate(raw) if raw is not None else None
+    except (ValidationError, TypeError, ValueError) as exc:
+        inputs.states[name] = InputState(agent=name, status="unreadable", detail=type(exc).__name__)
+        return
+    mint = result.findings.get("mint")
+    mint = mint if isinstance(mint, str) else None
+    dex_symbol = inputs.dex.symbol if inputs.dex is not None and inputs.dex.mint == mint else None
+    if not _dex_belongs(inputs.asset, mint, dex_symbol):
+        inputs.states[name] = InputState(
+            agent=name, status="no_data", detail=f"on-chain data is for {mint}, not {inputs.asset}"
+        )
+        return
+    inputs.onchain = snapshot
+    inputs.states[name] = InputState(
+        agent=name,
+        status="ok" if snapshot is not None else "no_data",
+        detail=None if snapshot is not None else result.summary,
+    )
 
 
 def _collect_dex(inputs: Inputs, result: AgentResult) -> None:
@@ -384,6 +434,7 @@ def observations(inputs: Inputs) -> Observations:
         snapshot=inputs.snapshot,
         technical=inputs.technical,
         dex=inputs.dex,
+        onchain=inputs.onchain,
         states={name: (s.status, s.detail) for name, s in inputs.states.items()},
     )
 
@@ -392,16 +443,17 @@ def profile_from_results(
     prior: Mapping[AgentName, AgentResult],
     asset: str | None,
     identity: AssetIdentity | None = None,
+    venue: str | None = None,
 ) -> CryptoAssetProfile | None:
     """The asset's profile, using what this turn's agents reported about it.
 
     An explicit `identity` (e.g. chain + mint) wins over the bare ticker when it names the
-    same asset.
+    same asset. `venue` ("cex" / "dex") is the market being traded, when known.
     """
     target: AssetIdentity | str | None = asset
     if identity is not None and (asset is None or identity.symbol in (None, asset)):
         target = identity
-    return build_profile(target, observations(collect_inputs(prior, asset)))
+    return build_profile(target, observations(collect_inputs(prior, asset)), venue=venue)
 
 
 def apply_profile(inputs: Inputs, profile: CryptoAssetProfile | None) -> Inputs:
@@ -423,15 +475,40 @@ def apply_profile(inputs: Inputs, profile: CryptoAssetProfile | None) -> Inputs:
             detail=f"DEX data is for {inputs.dex.canonical_id}, not {profile.canonical_id}",
         )
         inputs.dex = None
+    if inputs.onchain is not None and not (
+        profile.chain == "solana" and profile.address == inputs.onchain.mint
+    ):
+        inputs.states["onchain_safety"] = InputState(
+            agent="onchain_safety",
+            status="no_data",
+            detail=f"on-chain data is for {inputs.onchain.canonical_id}, not {profile.canonical_id}",
+        )
+        inputs.onchain = None
     if not profile.ticker_data_attributable:
         detail = (
             f"ticker-matched data can't be tied to {profile.canonical_id}; another token may "
             f"share the ticker {profile.symbol}"
         )
+        # Candles read from this exact token's pool belong to it whatever its ticker.
+        own_candles = (
+            inputs.technical is not None and inputs.technical.canonical_id == profile.canonical_id
+        )
         for name in _TICKER_KEYED_AGENTS:
+            if name == "technical_analysis" and own_candles:
+                continue
             if inputs.states[name].status == "ok":
                 inputs.states[name] = InputState(agent=name, status="no_data", detail=detail)
-        inputs.technical = inputs.technical_extra = inputs.snapshot = inputs.news = None
+        if not own_candles:
+            inputs.technical = inputs.technical_extra = None
+        inputs.snapshot = inputs.news = None
+        if inputs.technical is not None and not profile.technical_usable:
+            status = profile.evidence_status("technical_structure")
+            inputs.states["technical_analysis"] = InputState(
+                agent="technical_analysis",
+                status="no_data",
+                detail=status.reason if status else "not enough candle history",
+            )
+            inputs.technical = inputs.technical_extra = None
     elif not profile.technical_usable and inputs.technical is not None:
         status = profile.evidence_status("technical_structure")
         inputs.states["technical_analysis"] = InputState(
@@ -1182,6 +1259,57 @@ def input_factors(inputs: Inputs) -> list[RiskFactor]:
     return factors
 
 
+def pool_price_factors(pools: Any) -> list[RiskFactor]:
+    """Other pools of the token priced it differently, so their candles weren't used."""
+    if not isinstance(pools, dict) or not pools.get("price_rejected"):
+        return []
+    notes = [str(n) for n in pools["price_rejected"]]
+    return [
+        RiskFactor(
+            id="pool_price_divergence",
+            category="data_quality",
+            affects="uncertainty",
+            severity="medium",
+            headline="the token's DEX pools disagree on its price",
+            explanation=(
+                "Other pools of this token price it differently from the market pool, so "
+                "their candles weren't used: " + "; ".join(notes) + "."
+            ),
+            source="technical_analysis",
+            weakens_if="Arbitrage between the pools can move the market pool's price abruptly.",
+        )
+    ]
+
+
+def candle_freshness_factors(t: TechnicalAnalysis, cfg: RiskConfig) -> list[RiskFactor]:
+    """Stale candles from a source that can go quiet (only sources that set `as_of`)."""
+    if t.as_of is None:
+        return []
+    interval = timedelta(seconds=TIMEFRAME_SECONDS[t.timeframe])
+    closed_at = t.last_candle_at + interval
+    lag = t.as_of - closed_at
+    if lag <= interval * cfg.candle_stale_intervals:
+        return []
+    minutes = lag.total_seconds() / 60
+    age = f"{minutes / 60:.0f} hours" if minutes >= 120 else f"{minutes:.0f} minutes"
+    return [
+        RiskFactor(
+            id="stale_candles",
+            category="data_quality",
+            affects="uncertainty",
+            severity="medium",
+            headline=f"the last {t.timeframe} candle closed {age} ago",
+            explanation=(
+                f"The last {t.timeframe} candle from {t.provider} closed {age} before the data "
+                "was read: the market may have stopped trading, so indicators describe the "
+                "past, not now."
+            ),
+            source="technical_analysis",
+            weakens_if="A new trade would move price without the candles reflecting it.",
+        )
+    ]
+
+
 # --- Solana DEX market ----------------------------------------------------------------------
 
 
@@ -1230,9 +1358,12 @@ def _below(value: float, high: float, medium: float) -> Level | None:
     return "high" if value < high else "medium" if value < medium else None
 
 
-def dex_factors(d: SolanaDexSnapshot, cfg: DexRiskConfig) -> list[RiskFactor]:
+def dex_factors(
+    d: SolanaDexSnapshot, cfg: DexRiskConfig, safety_checked: bool = False
+) -> list[RiskFactor]:
     """Risk from the token's primary DEX pool, relative to DEX-token thresholds."""
     factors: list[RiskFactor] = []
+    caveat = "" if safety_checked else NO_SAFETY_CHECK
     label = d.symbol or d.canonical_id
     pool = f"{d.dex} pool {d.pair_address}"
     sev = _below(d.liquidity_usd, cfg.liquidity_high_usd, cfg.liquidity_medium_usd)
@@ -1247,8 +1378,7 @@ def dex_factors(d: SolanaDexSnapshot, cfg: DexRiskConfig) -> list[RiskFactor]:
                 explanation=(
                     f"The primary {pool} holds {usd(d.liquidity_usd)} of liquidity (below "
                     f"{usd(cfg.liquidity_high_usd if sev == 'high' else cfg.liquidity_medium_usd)}"
-                    "): a modest sell can move the price sharply and exits may be costly. "
-                    + NO_SAFETY_CHECK
+                    "): a modest sell can move the price sharply and exits may be costly. " + caveat
                 ),
                 source="dex_market",
                 evidence=[f"liquidity {usd(d.liquidity_usd)} ({d.provider})"],
@@ -1350,7 +1480,7 @@ def dex_factors(d: SolanaDexSnapshot, cfg: DexRiskConfig) -> list[RiskFactor]:
 
 
 def dex_candidate_factors(
-    candidates: Sequence[PoolCandidate], cfg: DexRiskConfig
+    candidates: Sequence[PoolCandidate], cfg: DexRiskConfig, safety_checked: bool = False
 ) -> list[RiskFactor]:
     """Pools exist but none could be used as the market: say why, as evidence."""
     if not candidates:
@@ -1383,11 +1513,215 @@ def dex_candidate_factors(
             explanation=(
                 f"{len(candidates)} pool(s) exist for this mint, but none is liquid, active "
                 f"and priced enough to count as its market (deepest: {usd(deepest)}). "
-                + NO_SAFETY_CHECK
+                + ("" if safety_checked else NO_SAFETY_CHECK)
             ),
             source="dex_market",
         )
     ]
+
+
+# --- Solana on-chain safety -----------------------------------------------------------------
+
+
+def _severities(values: Mapping[str, Level]) -> Mapping[str, Level]:
+    return MappingProxyType(dict(values))
+
+
+@dataclass(frozen=True)
+class OnchainRiskConfig:
+    """Thresholds for token-safety facts. No single fact is treated as a verdict: each
+    becomes its own factor, and only the usual aggregation sets the overall risk."""
+
+    # Severity of an active mint or freeze authority, by asset category. A new DEX token
+    # whose creator can still mint or freeze is a serious risk; stablecoin issuers keep a
+    # freeze authority by design (compliance), so it is only noted.
+    authority_severity: Mapping[str, Level] = field(
+        default_factory=lambda: _severities({"new_dex_token": "high", "stablecoin": "low"})
+    )
+    authority_default_severity: Level = "medium"
+    top1_medium_pct: float = 10.0  # one non-pool wallet's share of supply
+    top1_high_pct: float = 20.0
+    top10_medium_pct: float = 35.0  # ten largest non-pool wallets combined
+    top10_high_pct: float = 60.0
+    # Meaningful holders below these (only when the count is complete): thin holder base.
+    few_holders_medium: int = 100
+    few_holders_high: int = 30
+    # Token-2022 extensions that let someone change how the token behaves.
+    extension_severity: Mapping[str, Level] = field(
+        default_factory=lambda: _severities(
+            {
+                "permanentDelegate": "high",  # can move or burn anyone's tokens
+                "nonTransferable": "high",  # holders can't sell
+                "pausableConfig": "high",  # transfers can be paused
+                "transferHook": "medium",  # custom program runs on every transfer
+                "transferFeeConfig": "medium",  # a fee is taken on transfers
+            }
+        )
+    )
+
+    def __post_init__(self) -> None:
+        if not 0 < self.top1_medium_pct <= self.top1_high_pct <= 100:
+            raise ValueError("top-1 thresholds must satisfy 0 < medium <= high <= 100")
+        if not 0 < self.top10_medium_pct <= self.top10_high_pct <= 100:
+            raise ValueError("top-10 thresholds must satisfy 0 < medium <= high <= 100")
+        if not 0 < self.few_holders_high <= self.few_holders_medium:
+            raise ValueError("holder thresholds must satisfy 0 < high <= medium")
+
+
+def onchain_factors(
+    s: OnchainSafetySnapshot, cfg: OnchainRiskConfig, category: str | None
+) -> list[RiskFactor]:
+    """Concrete token-safety findings, each its own factor. Never a scam/rug verdict."""
+    factors: list[RiskFactor] = []
+    authority = cfg.authority_severity.get(category or "", cfg.authority_default_severity)
+    kind = (
+        f" for a {CATEGORY_LABELS[category]}"
+        if category in cfg.authority_severity and category in CATEGORY_LABELS
+        else ""
+    )
+    if s.mint_authority is not None:
+        factors.append(
+            RiskFactor(
+                id="onchain_mint_authority",
+                category="onchain",
+                affects="risk",
+                severity=authority,
+                headline="the mint authority is still enabled",
+                explanation=(
+                    f"Mint authority still enabled ({s.mint_authority}): that account can "
+                    f"create more supply at any time{kind}."
+                ),
+                source="onchain_safety",
+            )
+        )
+    if s.freeze_authority is not None:
+        factors.append(
+            RiskFactor(
+                id="onchain_freeze_authority",
+                category="onchain",
+                affects="risk",
+                severity=authority,
+                headline="the freeze authority is enabled",
+                explanation=(
+                    f"Freeze authority enabled ({s.freeze_authority}): that account can freeze "
+                    f"holders' token accounts, blocking transfers{kind}."
+                ),
+                source="onchain_safety",
+            )
+        )
+    for ext in s.extensions:
+        ext_severity = cfg.extension_severity.get(ext)
+        if ext == "defaultAccountState":
+            state = s.extension_state.get(ext)
+            if isinstance(state, dict) and state.get("accountState") == "frozen":
+                ext_severity = "high"  # new accounts start frozen until the authority thaws them
+        if ext_severity is not None:
+            factors.append(
+                RiskFactor(
+                    id="onchain_token_extension",
+                    category="onchain",
+                    affects="risk",
+                    severity=ext_severity,
+                    headline=f"the Token-2022 extension {ext} is enabled",
+                    explanation=f"Token-2022 extension {ext} is enabled on this mint.",
+                    source="onchain_safety",
+                )
+            )
+    if s.concentration_reliable and s.holders:
+        # Lower bounds still flag concentration (the true share is at least this high).
+        at_least = " at least" if s.concentration_lower_bound else ""
+        top = s.holders[0]
+        sev = _threshold(s.top1_pct or 0.0, cfg.top1_medium_pct, cfg.top1_high_pct)
+        if sev is not None:
+            note = (
+                " It is a program-owned account that couldn't be identified."
+                if top.program_owned
+                else ""
+            )
+            factors.append(
+                RiskFactor(
+                    id="onchain_top_holder",
+                    category="onchain",
+                    affects="risk",
+                    severity=sev,
+                    headline=f"one non-pool wallet controls{at_least} {s.top1_pct:.1f}% of supply",
+                    explanation=(
+                        f"One non-pool wallet ({top.owner}) controls{at_least} {s.top1_pct:.1f}% of "
+                        f"supply.{note}"
+                    ),
+                    source="onchain_safety",
+                )
+            )
+        sev = _threshold(s.top10_pct or 0.0, cfg.top10_medium_pct, cfg.top10_high_pct)
+        if sev is not None:
+            bound = " at least" if s.concentration_lower_bound else ""
+            factors.append(
+                RiskFactor(
+                    id="onchain_top10",
+                    category="onchain",
+                    affects="risk",
+                    severity=sev,
+                    headline=f"the top 10 non-pool holders control{bound} {s.top10_pct:.1f}%",
+                    explanation=(
+                        f"The top 10 non-pool holders control{bound} {s.top10_pct:.1f}% of "
+                        f"supply (pools and burned tokens excluded: {s.excluded_pct:.1f}%)."
+                    ),
+                    source="onchain_safety",
+                )
+            )
+    if s.holder_count_complete and s.meaningful_holder_count is not None:
+        n = s.meaningful_holder_count
+        sev = (
+            "high" if n < cfg.few_holders_high else "medium" if n < cfg.few_holders_medium else None
+        )
+        if sev is not None:
+            factors.append(
+                RiskFactor(
+                    id="onchain_few_holders",
+                    category="onchain",
+                    affects="risk",
+                    severity=sev,
+                    headline=f"only {n} meaningful holders",
+                    explanation=f"Only {n} wallets hold a meaningful balance ({s.holder_count} in total).",
+                    source="onchain_safety",
+                )
+            )
+    if not s.authorities_available:
+        factors.append(
+            RiskFactor(
+                id="onchain_authorities_unavailable",
+                category="data_quality",
+                affects="uncertainty",
+                severity="high",
+                headline="token authorities couldn't be read",
+                explanation=(
+                    f"The mint account couldn't be read ({s.authorities_error}), so whether "
+                    "supply can be minted or accounts frozen is unknown."
+                ),
+                source="onchain_safety",
+                weakens_if="An active mint or freeze authority would change the risk entirely.",
+            )
+        )
+    if s.incomplete_reasons:
+        severity: Level = (
+            "high"
+            if not s.concentration_reliable
+            else "medium"
+            if s.concentration_source != "full_scan" or not s.pool_addresses_used
+            else "low"
+        )
+        factors.append(
+            RiskFactor(
+                id="onchain_holders_incomplete",
+                category="data_quality",
+                affects="uncertainty",
+                severity=severity,
+                headline="holder data is incomplete",
+                explanation="Holder data is incomplete: " + "; ".join(s.incomplete_reasons) + ".",
+                source="onchain_safety",
+            )
+        )
+    return factors
 
 
 # --- Invalidation conditions ---------------------------------------------------------------
@@ -1592,24 +1926,36 @@ def assess(
     config: RiskConfig | None = None,
     profile: CryptoAssetProfile | None = None,
     dex_config: DexRiskConfig | None = None,
+    onchain_config: OnchainRiskConfig | None = None,
 ) -> RiskAssessment:
     cfg = risk_config_for(profile, config)
     dex_cfg = dex_config or DexRiskConfig()
-    inputs = apply_profile(collect_inputs(prior, asset), profile)
-    factors = input_factors(inputs)
+    inputs = collect_inputs(prior, asset)
+    pools_info = (inputs.technical_extra or {}).get("pools")  # read before any is dropped
+    inputs = apply_profile(inputs, profile)
+    factors = input_factors(inputs) + pool_price_factors(pools_info)
     if inputs.snapshot is not None:
         factors += market_factors(inputs.snapshot, cfg)
     factors += market_quality_factors(inputs.snapshot, inputs.market_unavailable or [], cfg)
     factors += live_consistency_factors(inputs.snapshot, inputs.technical, cfg)
     if inputs.technical is not None:
         factors += technical_factors(inputs.technical, inputs.technical_extra or {}, cfg)
+        factors += candle_freshness_factors(inputs.technical, cfg)
     if inputs.news is not None:
         factors += news_factors(inputs.news, inputs.technical)
     factors += screenshot_factors(inputs, cfg)
     if inputs.dex is not None:
-        factors += dex_factors(inputs.dex, dex_cfg)
+        factors += dex_factors(inputs.dex, dex_cfg, safety_checked=inputs.onchain is not None)
     elif inputs.dex_candidates:
-        factors += dex_candidate_factors(inputs.dex_candidates, dex_cfg)
+        factors += dex_candidate_factors(
+            inputs.dex_candidates, dex_cfg, safety_checked=inputs.onchain is not None
+        )
+    if inputs.onchain is not None:
+        factors += onchain_factors(
+            inputs.onchain,
+            onchain_config or OnchainRiskConfig(),
+            profile.category if profile else None,
+        )
     extra_factors, extra_missing = profile_factors(profile) if profile else ([], [])
     factors += extra_factors
     for f in factors:
@@ -1621,6 +1967,7 @@ def assess(
         or inputs.technical is not None
         or inputs.dex is not None
         or bool(inputs.dex_candidates)
+        or inputs.onchain is not None
         or (inputs.news is not None and any(s.sentiment for s in inputs.news.focus))
     )
     if not has_evidence:

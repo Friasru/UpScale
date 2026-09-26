@@ -80,6 +80,14 @@ class CandleSeries(BaseModel):
     fetched_at: datetime
     # Why preferred providers were skipped before this one served the candles, if any.
     fallback_notes: list[str] = Field(default_factory=list)
+    # Exact asset the candles belong to, when keyed by contract/pool rather than ticker
+    # (e.g. "solana:<mint>"). None for ticker-keyed exchange candles.
+    canonical_id: str | None = None
+    volume_unit: str | None = None  # None: the base asset (see `Candle.volume`)
+    # When the source can go quiet (a DEX pool stops trading), the time the candles were
+    # checked against the clock, so staleness can be judged. None: always current.
+    as_of: datetime | None = None
+    notes: list[str] = Field(default_factory=list)  # e.g. history trimmed at a gap
 
     @property
     def interval(self) -> timedelta:

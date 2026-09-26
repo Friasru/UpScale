@@ -419,7 +419,7 @@ def test_agent_reports_the_primary_pool(fake_dexscreener) -> None:
     assert "NEWT on raydium (SOL pool): $0.0123" in r.summary
     assert "2,000 buys / 1,500 sells" in text
     assert "not used as identity or size proof" in text
-    assert "not rug-pull detection" in text
+    assert "market data only" in text
 
 
 def test_agent_without_a_mint_requests_nothing(fake_dexscreener) -> None:
@@ -476,7 +476,7 @@ def test_evm_addresses_and_normal_text_are_not_mints() -> None:
         ("Should I buy BTC?", False),
         ("Should I buy SOL?", False),
         ("Should I buy DOGE?", False),  # memecoin, but no Solana mint
-        ("Should I buy PEPE?", False),  # memecoin on Ethereum
+        ("Should I buy PEPE?", True),  # established memecoin with an Ethereum contract
         ("Should I buy BONK?", True),  # established Solana memecoin with a mint
     ],
 )
@@ -494,7 +494,7 @@ def test_mint_query_end_to_end_stays_wait(fake_dexscreener) -> None:
     fake_dexscreener.pairs[MINT] = [pair()]
     response = ask(f"Should I buy {MINT}?")
     by_agent = {r.agent: r for r in response.analysis.agent_results}
-    assert list(by_agent) == ["dex_market", "risk", "opportunity"]
+    assert list(by_agent) == ["dex_market", "technical_analysis", "risk", "opportunity"]
     assert response.analysis.assets == ["NEWT"]
     decision = by_agent["opportunity"].findings
     assert decision["action"] == "wait"

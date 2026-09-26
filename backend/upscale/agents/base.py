@@ -5,6 +5,7 @@ from typing import ClassVar, Literal
 
 from upscale.schemas import AgentName, AgentResult, ChatMessage, ImageAttachment
 from upscale.services.asset_profile import AssetIdentity
+from upscale.services.trade_context import CryptoTradeContext
 
 
 @dataclass(frozen=True)
@@ -26,12 +27,22 @@ class AgentContext:
     # Exact identity of the primary asset (e.g. chain + mint address) when known; without
     # it the ticker in `assets` is resolved through UpScale's asset registry.
     asset_identity: AssetIdentity | None = None
+    # The normalized trading context (identity, market, trader position, profile, data).
+    trade: CryptoTradeContext | None = None
     # Results from agents that ran earlier in this turn, keyed by agent name.
     prior_results: dict[AgentName, AgentResult] = field(default_factory=dict)
 
     @property
     def primary_asset(self) -> str | None:
         return self.assets[0] if self.assets else None
+
+
+def trade_venue(context: AgentContext) -> str | None:
+    """The market being traded ("cex" / "dex"), when the trade context knows it."""
+    if context.trade is None:
+        return None
+    kind = context.trade.market.venue_kind
+    return kind if kind in ("cex", "dex") else None
 
 
 def image_size_bytes(image: ImageAttachment) -> int:

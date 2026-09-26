@@ -15,13 +15,23 @@ import pytest
 from fastapi.testclient import TestClient
 
 import upscale.agents.education
+import upscale.services
 from upscale.main import app
-from upscale.services import market_data_service, news_service, solana_dex_service, vision_service
+from upscale.services import (
+    dex_candle_service,
+    market_data_service,
+    news_service,
+    solana_dex_service,
+    vision_service,
+)
+from upscale.services.asset_profile import set_capability_enabled
 from upscale.services.coingecko import CoinGeckoProvider
 from upscale.services.dexscreener import DexScreenerProvider
+from upscale.services.geckoterminal import GeckoTerminalProvider
 from upscale.services.kraken import KrakenProvider
 from upscale.services.news_sentiment_model import ArticleAssessment, ArticleInput
 from upscale.services.rss_news import DEFAULT_FEEDS, RssNewsProvider
+from upscale.services.solana_chain import HeliusProvider, SolanaSafetyService
 from upscale.services.vision import ChartReading, CheckedImage
 
 
@@ -148,9 +158,13 @@ class FakeDexScreener:
     def __init__(self) -> None:
         self.requests: list[httpx2.Request] = []
         self.pairs: dict[str, list[Any]] = {}
+        self.search: dict[str, list[Any]] = {}  # /latest/dex/search results by query
         self.handler: Callable[[httpx2.Request], httpx2.Response] = self.token_pairs
 
     def token_pairs(self, request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/latest/dex/search":
+            q = request.url.params["q"]
+            return httpx2.Response(200, content=json.dumps({"pairs": self.search.get(q, [])}))
         mint = request.url.path.rsplit("/", 1)[-1]
         return httpx2.Response(200, content=json.dumps(self.pairs.get(mint, [])))
 
@@ -177,6 +191,149 @@ def fake_dexscreener() -> Iterator[FakeDexScreener]:
     yield fake
     solana_dex_service.provider, solana_dex_service.now = original
     solana_dex_service.reset()
+
+
+class FakeGeckoTerminal:
+    """Stands in for api.geckoterminal.com. `candles` maps a pool address to its
+    `[timestamp_s, o, h, l, c, volume]` rows (any order); unknown pools get a 404."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx2.Request] = []
+        self.candles: dict[str, list[list[float]]] = {}
+        self.handler: Callable[[httpx2.Request], httpx2.Response] = self.ohlcv
+
+    def ohlcv(self, request: httpx2.Request) -> httpx2.Response:
+        pool = request.url.path.split("/pools/")[1].split("/")[0]
+        if pool not in self.candles:
+            return httpx2.Response(404, json={"errors": [{"status": "404"}]})
+        rows = sorted(self.candles[pool], key=lambda r: -r[0])  # newest first, like the API
+        body = {
+            "data": {
+                "id": "x",
+                "type": "ohlcv_request_response",
+                "attributes": {"ohlcv_list": rows},
+            }
+        }
+        return httpx2.Response(200, json=body)
+
+    def transport(self) -> httpx2.MockTransport:
+        def handle(request: httpx2.Request) -> httpx2.Response:
+            self.requests.append(request)
+            return self.handler(request)
+
+        return httpx2.MockTransport(handle)
+
+
+@pytest.fixture(autouse=True)
+def fake_geckoterminal() -> Iterator[FakeGeckoTerminal]:
+    """Point the app's DEX pool candle service at a fake GeckoTerminal."""
+    fake = FakeGeckoTerminal()
+    original = (dex_candle_service.provider, dex_candle_service.now)
+    dex_candle_service.provider = GeckoTerminalProvider(transport=fake.transport())
+    dex_candle_service.now = lambda: DEX_NOW
+    dex_candle_service.reset()
+    yield fake
+    dex_candle_service.provider, dex_candle_service.now = original
+    dex_candle_service.reset()
+
+
+class FakeSolanaRpc:
+    """Stands in for a Solana JSON-RPC endpoint (Helius or any other).
+
+    `mints` holds mint accounts (`getAccountInfo` values), `accounts` any other account by
+    address (token accounts and owners, for `getMultipleAccounts`), and `holders` the DAS
+    `getTokenAccounts` rows per mint (Helius only). `getTokenLargestAccounts` returns the 20
+    biggest of those rows, like the real RPC, unless `largest` sets its rows explicitly.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.mints: dict[str, dict[str, Any]] = {}
+        self.largest: dict[str, list[dict[str, Any]]] = {}
+        self.accounts: dict[str, dict[str, Any]] = {}
+        self.holders: dict[str, list[dict[str, Any]]] = {}
+        # Per-method failures: an HTTP status (e.g. 429) or a JSON-RPC error message.
+        self.fail: dict[str, int | str] = {}
+        self.handler: Callable[[httpx2.Request], httpx2.Response] = self.rpc
+
+    def rpc(self, request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        method, params = body["method"], body["params"]
+        if method in self.fail:
+            failure = self.fail[method]
+            if isinstance(failure, int):
+                return httpx2.Response(failure)
+            return _rpc_error(body, -32005, failure)
+        if method == "getTokenSupply":
+            info = self.mints[params[0]]["data"]["parsed"]["info"]
+            result: Any = {"value": {"amount": info["supply"], "decimals": info["decimals"]}}
+        elif method == "getAccountInfo":
+            value = self.mints.get(params[0]) or self.accounts.get(params[0])
+            result = {"context": {"slot": 1}, "value": value}
+        elif method == "getTokenLargestAccounts":
+            if params[0] not in self.mints:
+                return _rpc_error(body, -32602, "Invalid param: not a Token mint")
+            result = {"context": {"slot": 1}, "value": self._largest(params[0])}
+        elif method == "getMultipleAccounts":
+            result = {"context": {"slot": 1}, "value": [self.accounts.get(a) for a in params[0]]}
+        elif method == "getTokenAccounts":
+            rows = self.holders.get(params["mint"], [])
+            start = (params["page"] - 1) * params["limit"]
+            page = rows[start : start + params["limit"]]
+            result = {
+                "total": len(page),
+                "limit": params["limit"],
+                "page": params["page"],
+                "token_accounts": page,
+            }
+        else:
+            return _rpc_error(body, -32601, "Method not found")
+        return httpx2.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    def _largest(self, mint: str) -> list[dict[str, Any]]:
+        if mint in self.largest:
+            return self.largest[mint]
+        rows = [
+            r
+            for r in self.holders.get(mint, [])
+            if r.get("mint") == mint and "address" in r and "amount" in r
+        ]
+        rows.sort(key=lambda r: -int(r["amount"]))
+        return [
+            {"address": r["address"], "amount": str(r["amount"]), "decimals": 6} for r in rows[:20]
+        ]
+
+    def transport(self) -> httpx2.MockTransport:
+        def handle(request: httpx2.Request) -> httpx2.Response:
+            self.requests.append(json.loads(request.content))
+            return self.handler(request)
+
+        return httpx2.MockTransport(handle)
+
+
+def _rpc_error(body: dict[str, Any], code: int, message: str) -> httpx2.Response:
+    return httpx2.Response(
+        200, json={"jsonrpc": "2.0", "id": body["id"], "error": {"code": code, "message": message}}
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_solana_rpc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never use a real Solana RPC, even when a key is configured in .env."""
+    monkeypatch.setattr(upscale.services, "solana_safety_service", None)
+    set_capability_enabled("onchain", False)
+
+
+@pytest.fixture
+def fake_solana_rpc(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeSolanaRpc]:
+    """Configure the app's on-chain safety service with a fake Helius endpoint."""
+    fake = FakeSolanaRpc()
+    provider = HeliusProvider("test-key", transport=fake.transport())
+    service = SolanaSafetyService(provider, now=lambda: DEX_NOW)
+    monkeypatch.setattr(upscale.services, "solana_safety_service", service)
+    set_capability_enabled("onchain", True)
+    yield fake
+    set_capability_enabled("onchain", False)
 
 
 # Open time (s) of the in-progress candle in every fake Kraken response: 2026-09-24T00:00Z,

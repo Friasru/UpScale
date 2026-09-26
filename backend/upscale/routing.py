@@ -2,8 +2,12 @@
 
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from upscale.schemas import AgentName
+
+if TYPE_CHECKING:  # the resolver imports this module
+    from upscale.services.asset_resolver import Resolution, ResolvedAsset
 
 # fmt: off
 # Tickers that are unambiguous even in lowercase.
@@ -72,8 +76,8 @@ GENERAL_CRYPTO_AGENTS: tuple[AgentName, ...] = (
 )
 # Risk reviews the evidence agents; opportunity decides last, after the risk review.
 AGENT_ORDER: tuple[AgentName, ...] = (
-    "vision", "technical_analysis", "market", "dex_market", "news_sentiment", "risk",
-    "opportunity", "education",
+    "vision", "dex_market", "onchain_safety", "technical_analysis", "market",
+    "news_sentiment", "risk", "opportunity", "education",
 )
 # Agents that look an asset up by ticker. They are skipped when the user gives an exact
 # Solana mint: a ticker can't be tied to one mint, so their data could be another token's.
@@ -135,8 +139,9 @@ _TIMEFRAME_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 @dataclass
 class RoutingDecision:
     assets: list[str] = field(default_factory=list)
-    # Exact Solana mint address from the request, if any (the token's identity).
+    # Exact token address from the request (Solana mint or EVM contract), and its chain.
     token_address: str | None = None
+    chain: str | None = None
     # Chart timeframe the user asked for ("1m", "5m", "15m", "30m", "1h", "4h", "1d"), if any.
     timeframe: str | None = None
     # Selected agents (in AGENT_ORDER) mapped to the reason each was selected.
@@ -176,6 +181,7 @@ def add_agent(decision: RoutingDecision, agent: AgentName, reason: str) -> Routi
     return RoutingDecision(
         assets=decision.assets,
         token_address=decision.token_address,
+        chain=decision.chain,
         timeframe=decision.timeframe,
         reasons=ordered,
     )
@@ -195,8 +201,58 @@ def _route_mint(mint: str, query: str, has_images: bool) -> RoutingDecision:
     reasons["opportunity"] = "A token analysis ends with a BUY / SELL / WAIT read."
     ordered = {agent: reasons[agent] for agent in AGENT_ORDER if agent in reasons}
     return RoutingDecision(
-        assets=[mint], token_address=mint, timeframe=detect_timeframe(query), reasons=ordered
+        assets=[mint],
+        token_address=mint,
+        chain="solana",
+        timeframe=detect_timeframe(query),
+        reasons=ordered,
     )
+
+
+def _route_token(
+    asset: "ResolvedAsset", has_images: bool, timeframe: str | None
+) -> RoutingDecision:
+    """A token identified by chain + address: its DEX market, its own pool's candles, then
+    risk and a decision. Ticker-keyed agents (exchange market data, news) are skipped: a
+    ticker can't be tied to one contract, so their data could describe another token."""
+    identity = asset.identity
+    where = f"{identity.chain}:{identity.address}"
+    reasons: dict[AgentName, str] = {}
+    if has_images:
+        reasons["vision"] = "Message includes a screenshot."
+    reasons["dex_market"] = f"Exact token {where}: its DEX pools, looked up by address."
+    reasons["technical_analysis"] = "Candles from the token's own primary DEX pool."
+    reasons["risk"] = "Risk review runs whenever other agents do."
+    reasons["opportunity"] = "A token analysis ends with a BUY / SELL / WAIT read."
+    ordered = {agent: reasons[agent] for agent in AGENT_ORDER if agent in reasons}
+    return RoutingDecision(
+        assets=[asset.label],
+        token_address=identity.address,
+        chain=identity.chain,
+        timeframe=timeframe,
+        reasons=ordered,
+    )
+
+
+def is_concept_question(query: str, has_images: bool) -> bool:
+    """A general "what is X?" question, answered without live data."""
+    lowered = query.lower()
+    words = {token.lstrip("$") for token in _WORD_RE.findall(lowered)}
+    return bool(_concept_question(lowered, words, detect_assets(query), has_images))
+
+
+_FOLLOW_UP_WORDS = {"hold", "keep", "exit", "it", "this", "that", "now", "still", "again"}
+
+
+def is_trading_follow_up(query: str) -> bool:
+    """Whether a message with no asset of its own is a trading question that continues the
+    conversation ("Should I sell?", "and on 1h?"), so the earlier asset can be reused."""
+    lowered = query.lower()
+    words = {token.lstrip("$") for token in _WORD_RE.findall(lowered)}
+    keywords = DECISION_KEYWORDS | _FOLLOW_UP_WORDS
+    for intent in INTENT_KEYWORDS.values():
+        keywords |= intent
+    return bool(_matched_keywords(lowered, words, keywords)) or detect_timeframe(query) is not None
 
 
 def detect_timeframe(text: str) -> str | None:
@@ -227,12 +283,22 @@ def _concept_question(
     return _matched_keywords(lowered, words, _ALL_CONCEPTS)
 
 
-def route(query: str, has_images: bool) -> RoutingDecision:
-    if mint := detect_solana_mint(query):
-        return _route_mint(mint, query, has_images)
+def route(query: str, has_images: bool, resolution: "Resolution | None" = None) -> RoutingDecision:
+    """Pick the agents for a request. With a `resolution` (from the asset resolver), its
+    exact assets are used; without one, assets come from known tickers in the text."""
+    timeframe = detect_timeframe(query)
+    if resolution is not None:
+        timeframe = resolution.timeframe or timeframe
+        primary = resolution.primary
+        if primary is not None and primary.is_contract:
+            return _route_token(primary, has_images, timeframe)
+        assets = [a.label for a in resolution.assets]
+    else:
+        if mint := detect_solana_mint(query):
+            return _route_mint(mint, query, has_images)
+        assets = detect_assets(query)
     lowered = query.lower()
     words = {token.lstrip("$") for token in _WORD_RE.findall(lowered)}
-    assets = detect_assets(query)
 
     if concepts := _concept_question(lowered, words, assets, has_images):
         why = f"General concept question ({', '.join(concepts)}): explained without live data."
@@ -274,4 +340,4 @@ def route(query: str, has_images: bool) -> RoutingDecision:
         reasons["risk"] = "Risk review runs whenever other agents do."
 
     ordered = {agent: reasons[agent] for agent in AGENT_ORDER if agent in reasons}
-    return RoutingDecision(assets=assets, timeframe=detect_timeframe(query), reasons=ordered)
+    return RoutingDecision(assets=assets, timeframe=timeframe, reasons=ordered)

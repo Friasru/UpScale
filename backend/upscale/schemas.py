@@ -56,6 +56,7 @@ AgentName = Literal[
     "technical_analysis",
     "market",
     "dex_market",
+    "onchain_safety",
     "news_sentiment",
     "opportunity",
     "risk",
@@ -119,6 +120,8 @@ class Analysis(BaseModel):
     uncertainty: Uncertainty
     agent_results: list[AgentResult] = Field(default_factory=list)
     disclaimer: str
+    # Internal latency record in milliseconds (asset resolution, each agent, total).
+    timings: dict[str, float] = Field(default_factory=dict)
 
 
 class ChatResponse(BaseModel):

@@ -1,15 +1,17 @@
-from upscale.agents.base import Agent, AgentContext
+from upscale.agents.base import Agent, AgentContext, trade_venue
 from upscale.schemas import AgentResult, Risk
 from upscale.services.asset_profile import upper_first
 from upscale.services.risk import (
     AGENT_LABELS,
     DexRiskConfig,
+    OnchainRiskConfig,
     RiskAssessment,
     RiskConfig,
     assess,
     category_label,
     profile_from_results,
 )
+from upscale.services.strategy import strategy_for
 
 MAX_SUMMARY_REASONS = 3
 
@@ -28,18 +30,40 @@ class RiskAgent(Agent):
         "Concrete risks, overall risk level, uncertainty and invalidation conditions derived "
         "from the other agents' evidence."
     )
-    depends_on = ("vision", "technical_analysis", "market", "dex_market", "news_sentiment")
+    depends_on = (
+        "vision",
+        "technical_analysis",
+        "market",
+        "dex_market",
+        "onchain_safety",
+        "news_sentiment",
+    )
 
-    def __init__(self, config: RiskConfig | None = None, dex_config: DexRiskConfig | None = None):
+    def __init__(
+        self,
+        config: RiskConfig | None = None,
+        dex_config: DexRiskConfig | None = None,
+        onchain_config: OnchainRiskConfig | None = None,
+    ):
         self.config = config
         self.dex_config = dex_config
+        self.onchain_config = onchain_config
 
     async def run(self, context: AgentContext) -> AgentResult:
         profile = profile_from_results(
-            context.prior_results, context.primary_asset, context.asset_identity
+            context.prior_results,
+            context.primary_asset,
+            context.asset_identity,
+            trade_venue(context),
         )
+        strategy = strategy_for(profile)
         a = assess(
-            context.prior_results, context.primary_asset, self.config, profile, self.dex_config
+            context.prior_results,
+            context.primary_asset,
+            self.config or strategy.risk,
+            profile,
+            self.dex_config or strategy.dex_risk,
+            self.onchain_config or strategy.onchain_risk,
         )
         return AgentResult(
             agent=self.name,

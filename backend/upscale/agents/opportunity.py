@@ -1,4 +1,4 @@
-from upscale.agents.base import Agent, AgentContext
+from upscale.agents.base import Agent, AgentContext, trade_venue
 from upscale.formatting import usd, usd_zone
 from upscale.schemas import AgentResult, Risk
 from upscale.services.opportunity import (
@@ -8,6 +8,7 @@ from upscale.services.opportunity import (
     assess,
 )
 from upscale.services.risk import profile_from_results
+from upscale.services.strategy import strategy_for
 
 ACTION_LABELS = {"buy": "BUY", "sell": "SELL", "wait": "WAIT"}
 
@@ -27,16 +28,29 @@ class OpportunityAgent(Agent):
         "BUY / SELL / WAIT decision support from the other agents' evidence, with trigger, "
         "invalidation, risk and confidence."
     )
-    depends_on = ("vision", "technical_analysis", "market", "dex_market", "news_sentiment", "risk")
+    depends_on = (
+        "vision",
+        "technical_analysis",
+        "market",
+        "dex_market",
+        "onchain_safety",
+        "news_sentiment",
+        "risk",
+    )
 
     def __init__(self, config: OpportunityConfig | None = None):
         self.config = config
 
     async def run(self, context: AgentContext) -> AgentResult:
         profile = profile_from_results(
-            context.prior_results, context.primary_asset, context.asset_identity
+            context.prior_results,
+            context.primary_asset,
+            context.asset_identity,
+            trade_venue(context),
         )
-        a = assess(context.prior_results, context.primary_asset, self.config, profile)
+        position = context.trade.trader.position if context.trade else "unknown"
+        config = self.config or strategy_for(profile).opportunity
+        a = assess(context.prior_results, context.primary_asset, config, profile, position)
         return AgentResult(
             agent=self.name,
             mock=False,
@@ -94,6 +108,13 @@ def _evidence(a: OpportunityAssessment) -> list[str]:
         f"{f' {a.timeframe}' if a.timeframe else ''} (bullish {a.bullish_score} vs bearish "
         f"{a.bearish_score} points; confidence {a.confidence}). Rule-based, not a forecast."
     ]
+    if a.action_meaning:
+        lines.append(f"Meaning: {a.action_meaning}")
+    if a.setup_action is not None and a.setup_action != a.action:
+        lines.append(
+            f"The setup alone reads {ACTION_LABELS[a.setup_action]}; your position "
+            f"({a.position}) makes it {ACTION_LABELS[a.action]}."
+        )
     lines += [f"Bullish: {_cap(s.clause)}." for s in a.bullish_evidence]
     lines += [f"Bearish: {_cap(s.clause)}." for s in a.bearish_evidence]
     lines += [f"Blocking: {_cap(f.reason)}." for f in a.blocking_factors]

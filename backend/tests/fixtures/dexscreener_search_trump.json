@@ -1,0 +1,1677 @@
+{
+ "schemaVersion": "1.0.0",
+ "pairs": [
+  {
+   "chainId": "solana",
+   "dexId": "orca",
+   "url": "https://dexscreener.com/solana/ckp1kwzqosalu1h3zwtuambubywm7lx3cxyezrvin7p2",
+   "pairAddress": "Ckp1kwZqosaLU1h3zWtuaMBubyWM7LX3cxYezRVin7p2",
+   "labels": [
+    "wp"
+   ],
+   "baseToken": {
+    "address": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+    "name": "OFFICIAL TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "So11111111111111111111111111111111111111112",
+    "name": "Wrapped SOL",
+    "symbol": "SOL"
+   },
+   "priceNative": "0.01789",
+   "priceUsd": "2.10",
+   "txns": {
+    "m5": {
+     "buys": 12,
+     "sells": 30
+    },
+    "h1": {
+     "buys": 227,
+     "sells": 300
+    },
+    "h6": {
+     "buys": 1404,
+     "sells": 1553
+    },
+    "h24": {
+     "buys": 5446,
+     "sells": 6712
+    }
+   },
+   "volume": {
+    "h24": 513665.9,
+    "h6": 112636.23,
+    "h1": 21611.16,
+    "m5": 1802.59
+   },
+   "priceChange": {
+    "m5": -0.43,
+    "h1": 0.5,
+    "h6": 0.93,
+    "h24": 7.7
+   },
+   "liquidity": {
+    "usd": 264182.02,
+    "base": 95559,
+    "quote": 536.1832
+   },
+   "fdv": 2104549420,
+   "marketCap": 593205256,
+   "pairCreatedAt": 1737215500000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "meteora",
+   "url": "https://dexscreener.com/solana/3c5ye97hadpdxzehyq9cis8axr9anyrusczkze1ndbw9",
+   "pairAddress": "3C5YE97HADPDxZehYq9Cis8AXr9aNyrUsczKzE1nDbW9",
+   "labels": [
+    "DLMM"
+   ],
+   "baseToken": {
+    "address": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+    "name": "OFFICIAL TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "priceNative": "2.09928",
+   "priceUsd": "2.099",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 15
+    },
+    "h1": {
+     "buys": 83,
+     "sells": 116
+    },
+    "h6": {
+     "buys": 551,
+     "sells": 553
+    },
+    "h24": {
+     "buys": 4064,
+     "sells": 3523
+    }
+   },
+   "volume": {
+    "h24": 12524791.11,
+    "h6": 1207573.87,
+    "h1": 250232.53,
+    "m5": 21164.7
+   },
+   "priceChange": {
+    "m5": -0.7,
+    "h1": 0.2,
+    "h6": 0.5,
+    "h24": 7.35
+   },
+   "liquidity": {
+    "usd": 8604470.98,
+    "base": 2303508,
+    "quote": 3768759
+   },
+   "fdv": 2099280077,
+   "marketCap": 591719996,
+   "pairCreatedAt": 1737191463000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "meteora",
+   "url": "https://dexscreener.com/solana/9d9mb8kooffad3sctgztkxqypkshx6ezhbkio89ixyy2",
+   "pairAddress": "9d9mb8kooFfaD3SctgZtkxQypkshx6ezhbKio89ixyy2",
+   "labels": [
+    "DLMM"
+   ],
+   "baseToken": {
+    "address": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+    "name": "OFFICIAL TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "priceNative": "2.1003",
+   "priceUsd": "2.10",
+   "txns": {
+    "m5": {
+     "buys": 1,
+     "sells": 7
+    },
+    "h1": {
+     "buys": 31,
+     "sells": 28
+    },
+    "h6": {
+     "buys": 120,
+     "sells": 145
+    },
+    "h24": {
+     "buys": 585,
+     "sells": 602
+    }
+   },
+   "volume": {
+    "h24": 1400953.07,
+    "h6": 313770.51,
+    "h1": 92016.95,
+    "m5": 11111.18
+   },
+   "priceChange": {
+    "m5": -0.5,
+    "h6": 0.8,
+    "h24": 7.02
+   },
+   "liquidity": {
+    "usd": 11570681.44,
+    "base": 5084413,
+    "quote": 891481
+   },
+   "fdv": 2100378838,
+   "marketCap": 592029702,
+   "pairCreatedAt": 1737196771000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "raydium",
+   "url": "https://dexscreener.com/solana/crotddum3njgbuvb7vr9rhmrxnsswmjntlc1anjhwsdq",
+   "pairAddress": "CRoTdDUM3NJGbuvB7Vr9rhmRxnSswMjnTLC1ANjhwsdq",
+   "labels": [
+    "CLMM"
+   ],
+   "baseToken": {
+    "address": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+    "name": "OFFICIAL TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "priceNative": "2.1011",
+   "priceUsd": "2.10",
+   "txns": {
+    "m5": {
+     "buys": 1,
+     "sells": 13
+    },
+    "h1": {
+     "buys": 105,
+     "sells": 108
+    },
+    "h6": {
+     "buys": 517,
+     "sells": 536
+    },
+    "h24": {
+     "buys": 2791,
+     "sells": 2819
+    }
+   },
+   "volume": {
+    "h24": 404565.17,
+    "h6": 71566.46,
+    "h1": 19016.7,
+    "m5": 2185.22
+   },
+   "priceChange": {
+    "m5": -0.56,
+    "h1": 0.21,
+    "h6": 0.7,
+    "h24": 7.56
+   },
+   "liquidity": {
+    "usd": 2956245.19,
+    "base": 225869,
+    "quote": 2481659
+   },
+   "fdv": 2101148178,
+   "marketCap": 592246555,
+   "pairCreatedAt": 1737417722000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "orca",
+   "url": "https://dexscreener.com/solana/5wrgxzwiz93g4l5xbmr3ggmybw5gfl7drnakoqmgpdhc",
+   "pairAddress": "5WrgXzWiz93g4L5XBmr3ggMybW5gfL7drNAKoQMgpDHc",
+   "labels": [
+    "wp"
+   ],
+   "baseToken": {
+    "address": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+    "name": "OFFICIAL TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "priceNative": "2.09945",
+   "priceUsd": "2.099",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 18
+    },
+    "h1": {
+     "buys": 67,
+     "sells": 58
+    },
+    "h6": {
+     "buys": 285,
+     "sells": 269
+    },
+    "h24": {
+     "buys": 1801,
+     "sells": 1538
+    }
+   },
+   "volume": {
+    "h24": 187788.42,
+    "h6": 30084.99,
+    "h1": 7189.6,
+    "m5": 1260.26
+   },
+   "priceChange": {
+    "m5": -0.52,
+    "h1": 0.27,
+    "h6": 0.69,
+    "h24": 7.22
+   },
+   "liquidity": {
+    "usd": 978427.35,
+    "base": 232948,
+    "quote": 489362
+   },
+   "fdv": 2099454379,
+   "marketCap": 591769127,
+   "pairCreatedAt": 1754499167000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "raydium",
+   "url": "https://dexscreener.com/solana/gqspr4rjk9azkkfwhud7v4mtotcxhayzzhdspcg9vnvw",
+   "pairAddress": "GQsPr4RJk9AZkkfWHud7v4MtotcxhaYzZHdsPCg9vNvW",
+   "labels": [
+    "CLMM"
+   ],
+   "baseToken": {
+    "address": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+    "name": "OFFICIAL TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "So11111111111111111111111111111111111111112",
+    "name": "Wrapped SOL",
+    "symbol": "SOL"
+   },
+   "priceNative": "0.01793",
+   "priceUsd": "2.11",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 6,
+     "sells": 3
+    },
+    "h6": {
+     "buys": 26,
+     "sells": 26
+    },
+    "h24": {
+     "buys": 135,
+     "sells": 92
+    }
+   },
+   "volume": {
+    "h24": 270.83,
+    "h6": 63.83,
+    "h1": 4.59,
+    "m5": 0
+   },
+   "priceChange": {
+    "h1": 0.76,
+    "h6": 1.46,
+    "h24": 7.79
+   },
+   "liquidity": {
+    "usd": 74388.64,
+    "base": 31382,
+    "quote": 69.4061
+   },
+   "fdv": 2110219244,
+   "marketCap": 594803398,
+   "pairCreatedAt": 1737166660000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "meteora",
+   "url": "https://dexscreener.com/solana/a8nphpcjqtqhdquk35uj9hy2ysgxfkczgunwvkd3k7vc",
+   "pairAddress": "A8nPhpCJqtqHdqUk35Uj9Hy2YsGXFkCZGuNwvkD3k7VC",
+   "labels": [
+    "DLMM"
+   ],
+   "baseToken": {
+    "address": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+    "name": "OFFICIAL TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "priceNative": "2.1093",
+   "priceUsd": "2.10",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 2,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 23,
+     "sells": 8
+    }
+   },
+   "volume": {
+    "h24": 45.99,
+    "h6": 2.52,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {
+    "h6": 2.03,
+    "h24": 8.31
+   },
+   "liquidity": {
+    "usd": 47396.65,
+    "base": 20625,
+    "quote": 3889.7989
+   },
+   "fdv": 2109341318,
+   "marketCap": 594555939,
+   "pairCreatedAt": 1737165693000
+  },
+  {
+   "chainId": "pulsechain",
+   "dexId": "pulsex",
+   "url": "https://dexscreener.com/pulsechain/0x2e2a603a35bff3c3e6a21a289dfd5144d921d3a0",
+   "pairAddress": "0x2e2A603a35bff3c3e6a21A289Dfd5144d921d3a0",
+   "labels": [
+    "v2"
+   ],
+   "baseToken": {
+    "address": "0x8cC6d99114Edd628249fAbc8a4d64F9A759a77Bf",
+    "name": "Trump",
+    "symbol": "Trump"
+   },
+   "quoteToken": {
+    "address": "0xA1077a294dDE1B09bB078844df40758a5D0f9a27",
+    "name": "Wrapped Pulse",
+    "symbol": "WPLS"
+   },
+   "priceNative": "19.1977",
+   "priceUsd": "0.0002086",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 19
+    },
+    "h24": {
+     "buys": 23,
+     "sells": 44
+    }
+   },
+   "volume": {
+    "h24": 730.03,
+    "h6": 6.31,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {
+    "h6": 1.46,
+    "h24": 2.33
+   },
+   "liquidity": {
+    "usd": 25274.87,
+    "base": 60575938,
+    "quote": 1162921145
+   },
+   "fdv": 208621,
+   "marketCap": 208621,
+   "pairCreatedAt": 1738457995000
+  },
+  {
+   "chainId": "base",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/base/0xb0aef136b2906bd42542f4276206eb79bac2545deec0c22ec735b05e0626407b",
+   "pairAddress": "0xb0aef136b2906bd42542f4276206eb79bac2545deec0c22ec735b05e0626407b",
+   "labels": [
+    "v4"
+   ],
+   "baseToken": {
+    "address": "0x1062f5Cb624427Fc843E385Cb8744Fc8201838F0",
+    "name": "Captain America",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "name": "Ether",
+    "symbol": "ETH"
+   },
+   "priceNative": "0.0000001337",
+   "priceUsd": "0.0003596",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 1,
+     "sells": 4
+    },
+    "h24": {
+     "buys": 2,
+     "sells": 9
+    }
+   },
+   "volume": {
+    "h24": 0.03,
+    "h6": 0.01,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {
+    "h6": -0.19,
+    "h24": 0.42
+   },
+   "liquidity": {
+    "usd": 287691.77,
+    "base": 799993989,
+    "quote": 0.0008039
+   },
+   "fdv": 359615,
+   "marketCap": 359615,
+   "pairCreatedAt": 1778442135000
+  },
+  {
+   "chainId": "base",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/base/0x570cd5eade82c30401a2bd3bf7d292fae13fc624d8dd155942f4865478a83710",
+   "pairAddress": "0x570cd5eade82c30401a2bd3bf7d292fae13fc624d8dd155942f4865478a83710",
+   "labels": [
+    "v4"
+   ],
+   "baseToken": {
+    "address": "0x36d6828942F6DebCa99F693B9858436353c76946",
+    "name": "Trump Wars",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "name": "Ether",
+    "symbol": "ETH"
+   },
+   "priceNative": "0.00000005309",
+   "priceUsd": "0.0001428",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 1,
+     "sells": 1
+    },
+    "h24": {
+     "buys": 2,
+     "sells": 6
+    }
+   },
+   "volume": {
+    "h24": 0.02,
+    "h6": 0.01,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {
+    "h6": -0.13,
+    "h24": -0.1
+   },
+   "liquidity": {
+    "usd": 114265.47,
+    "base": 799981362,
+    "quote": 0.0009895
+   },
+   "fdv": 142832,
+   "marketCap": 142832,
+   "pairCreatedAt": 1775515087000
+  },
+  {
+   "chainId": "base",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/base/0x142fc0d2cfbe8f1ee630d24923d9076076f4d2a4b23bce43d5b0638a73fad7a1",
+   "pairAddress": "0x142fc0d2cfbe8f1ee630d24923d9076076f4d2a4b23bce43d5b0638a73fad7a1",
+   "labels": [
+    "v4"
+   ],
+   "baseToken": {
+    "address": "0x883Af288C2eC1dBE28B18368F6191A9d697Aa1c6",
+    "name": "Trump is Banana",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "priceNative": "0.0002000",
+   "priceUsd": "0.0002000",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 1
+    },
+    "h24": {
+     "buys": 0,
+     "sells": 3
+    }
+   },
+   "volume": {
+    "h24": 0.01,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "liquidity": {
+    "usd": 160003.55,
+    "base": 799999736,
+    "quote": 0.05263
+   },
+   "fdv": 200004,
+   "marketCap": 200004,
+   "pairCreatedAt": 1775464679000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "raydium",
+   "url": "https://dexscreener.com/solana/fvzlfvxydzfpjqybhmo3mqgk5pjkwbtqvr6wt7qadcuz",
+   "pairAddress": "FvZLFVXYDzfPjqyBHmo3mqgK5pJKwbtqVR6WT7qADcUz",
+   "labels": [
+    "CLMM"
+   ],
+   "baseToken": {
+    "address": "TMPKzJfNTHAUYz7QsaB51pb6Dap5diwTxbUDksj7n8G",
+    "name": "TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "priceNative": "3.4602",
+   "priceUsd": "3.46",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 2,
+     "sells": 2
+    }
+   },
+   "volume": {
+    "h24": 42.3,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "liquidity": {
+    "usd": 1764740.5,
+    "base": 510002,
+    "quote": 9.5264
+   },
+   "fdv": 3460240,
+   "marketCap": 3460240,
+   "pairCreatedAt": 1772359889000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "raydium",
+   "url": "https://dexscreener.com/solana/hskxcank9632vp339uv3edug9vnvvy5wdgmwadauwdbx",
+   "pairAddress": "HSKxCANK9632vp339UV3EDUg9VNvVY5wDGmwAdAUWdbX",
+   "labels": [
+    "CLMM"
+   ],
+   "baseToken": {
+    "address": "5m8k6jHhYFZkiL8FVLFtiu1EEki6HiTbQvLADoUbTJAA",
+    "name": "OFFER TRUTH",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "priceNative": "9.1768",
+   "priceUsd": "9.17",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 1,
+     "sells": 1
+    },
+    "h24": {
+     "buys": 1,
+     "sells": 1
+    }
+   },
+   "volume": {
+    "h24": 0.31,
+    "h6": 0.31,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "liquidity": {
+    "usd": 8276316.15,
+    "base": 901863,
+    "quote": 7.3947
+   },
+   "fdv": 1835379474,
+   "marketCap": 1835379474,
+   "pairCreatedAt": 1754903112000
+  },
+  {
+   "chainId": "base",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/base/0xc426fec552ce0481e4f763e3aa5e9085642ab523124256aac4d448b686a0773e",
+   "pairAddress": "0xc426fec552ce0481e4f763e3aa5e9085642ab523124256aac4d448b686a0773e",
+   "labels": [
+    "v4"
+   ],
+   "baseToken": {
+    "address": "0x8e13Da49a0d949a1C9Cb57A10999D3d422B33372",
+    "name": "Official Trump (TRUMP)",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0x4200000000000000000000000000000000000006",
+    "name": "Wrapped Ether",
+    "symbol": "WETH"
+   },
+   "priceNative": "0.0000001680",
+   "priceUsd": "0.0004492",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 1,
+     "sells": 0
+    }
+   },
+   "volume": {
+    "h24": 0.02,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "liquidity": {
+    "usd": 444744.07,
+    "base": 989998114,
+    "quote": 0.0003772
+   },
+   "fdv": 449236,
+   "marketCap": 449236,
+   "pairCreatedAt": 1787210385000
+  },
+  {
+   "chainId": "pulsechain",
+   "dexId": "pulsex",
+   "url": "https://dexscreener.com/pulsechain/0x0891da635569beb32528b7cae63a8a293189bd2a",
+   "pairAddress": "0x0891da635569BeB32528b7Cae63A8a293189BD2A",
+   "labels": [
+    "v2"
+   ],
+   "baseToken": {
+    "address": "0xf2DD4FE4bE7B8C0655d0962A4285150Ff09769EA",
+    "name": "TrumpOfficial",
+    "symbol": "Trump"
+   },
+   "quoteToken": {
+    "address": "0xA1077a294dDE1B09bB078844df40758a5D0f9a27",
+    "name": "Wrapped Pulse",
+    "symbol": "WPLS"
+   },
+   "priceNative": "6.01094",
+   "priceUsd": "0.00006607",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 0,
+     "sells": 1
+    }
+   },
+   "volume": {
+    "h24": 6.16,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "liquidity": {
+    "usd": 11211.4,
+    "base": 84842067,
+    "quote": 509981312
+   },
+   "fdv": 66072,
+   "marketCap": 66072,
+   "pairCreatedAt": 1740037865000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "orca",
+   "url": "https://dexscreener.com/solana/6nd6d8gg17wakw6wu5urktbzqp3uxp5orgpa576qxigj",
+   "pairAddress": "6nD6d8gG17wakW6Wu5URktBZQp3uxp5orgPa576QXigJ",
+   "labels": [
+    "wp"
+   ],
+   "baseToken": {
+    "address": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+    "name": "OFFICIAL TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "priceNative": "2.1039",
+   "priceUsd": "2.10",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 3
+    },
+    "h1": {
+     "buys": 11,
+     "sells": 9
+    },
+    "h6": {
+     "buys": 50,
+     "sells": 52
+    },
+    "h24": {
+     "buys": 389,
+     "sells": 360
+    }
+   },
+   "volume": {
+    "h24": 450.46,
+    "h6": 60.36,
+    "h1": 15.69,
+    "m5": 2.33
+   },
+   "priceChange": {
+    "m5": -0.25,
+    "h1": 0.45,
+    "h6": 0.58,
+    "h24": 7.33
+   },
+   "liquidity": {
+    "usd": 17573.34,
+    "base": 7158.7856,
+    "quote": 2511.2858
+   },
+   "fdv": 2103995418,
+   "marketCap": 593049100,
+   "pairCreatedAt": 1737172947000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "raydium",
+   "url": "https://dexscreener.com/solana/csve97sdiaxkvfvjiwyyp4zkzxd7tckarclvgqbfuuay",
+   "pairAddress": "CsVe97sDiaXkVfVjiwyYp4zKZXD7TckaRcLVgqbFuUay",
+   "labels": [
+    "CLMM"
+   ],
+   "baseToken": {
+    "address": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+    "name": "OFFICIAL TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "So11111111111111111111111111111111111111112",
+    "name": "Wrapped SOL",
+    "symbol": "SOL"
+   },
+   "priceNative": "0.01787",
+   "priceUsd": "2.095",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 2,
+     "sells": 2
+    },
+    "h24": {
+     "buys": 57,
+     "sells": 5
+    }
+   },
+   "volume": {
+    "h24": 556.79,
+    "h6": 209.36,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {
+    "h6": -0.13,
+    "h24": 6.02
+   },
+   "liquidity": {
+    "usd": 14150.9,
+    "base": 3886.6762,
+    "quote": 51.2591
+   },
+   "fdv": 2095323351,
+   "marketCap": 590604722,
+   "pairCreatedAt": 1737166058000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "orca",
+   "url": "https://dexscreener.com/solana/32hepwhq4twlnas34jgdjg6ep5rizsaasffihr62rjck",
+   "pairAddress": "32HepWHQ4twLnaS34jgdJg6ep5riZsaaSFfiHR62RjcK",
+   "labels": [
+    "wp"
+   ],
+   "baseToken": {
+    "address": "HaP8r3ksG76PhQLTqR8FYBeNiQpejcFbQmiHbg787Ut1",
+    "name": "MAGA (Wormhole)",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "So11111111111111111111111111111111111111112",
+    "name": "Wrapped SOL",
+    "symbol": "SOL"
+   },
+   "priceNative": "0.0002784",
+   "priceUsd": "0.03256",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 1,
+     "sells": 3
+    }
+   },
+   "volume": {
+    "h24": 100.05,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {
+    "h24": 6.51
+   },
+   "liquidity": {
+    "usd": 10623.51,
+    "base": 84851,
+    "quote": 67.2097
+   },
+   "fdv": 80092,
+   "marketCap": 1466112,
+   "pairCreatedAt": 1705765109000
+  },
+  {
+   "chainId": "base",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/base/0x6884f867fdf1f126645418166850f47173b1b229244806e1df7129221d893291",
+   "pairAddress": "0x6884f867fdf1f126645418166850f47173b1b229244806e1df7129221d893291",
+   "labels": [
+    "v4"
+   ],
+   "baseToken": {
+    "address": "0x57F5fbD3DE65DFC0bd3630F732969e5fb97E6d37",
+    "name": "MAGA",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "name": "USD Coin",
+    "symbol": "USDC"
+   },
+   "priceNative": "0.02875",
+   "priceUsd": "0.02875",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 1
+    },
+    "h24": {
+     "buys": 0,
+     "sells": 1
+    }
+   },
+   "volume": {
+    "h24": 2.22,
+    "h6": 2.22,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "liquidity": {
+    "usd": 10341.98,
+    "base": 271528,
+    "quote": 2533.6535
+   },
+   "fdv": 103821,
+   "marketCap": 103821
+  },
+  {
+   "chainId": "ethereum",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/ethereum/0xe4b8583ccb95b25737c016ac88e539d0605949e8",
+   "pairAddress": "0xE4b8583cCB95b25737C016ac88E539D0605949e8",
+   "labels": [
+    "v2"
+   ],
+   "baseToken": {
+    "address": "0x576e2BeD8F7b46D34016198911Cdf9886f78bea7",
+    "name": "MAGA",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "name": "Wrapped Ether",
+    "symbol": "WETH"
+   },
+   "priceNative": "0.00001168",
+   "priceUsd": "0.03144",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 1
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 2
+    },
+    "h24": {
+     "buys": 2,
+     "sells": 3
+    }
+   },
+   "volume": {
+    "h24": 454.99,
+    "h6": 292.76,
+    "h1": 165.13,
+    "m5": 0
+   },
+   "priceChange": {
+    "h1": -0.09,
+    "h6": 1.56,
+    "h24": 0.24
+   },
+   "liquidity": {
+    "usd": 662946.18,
+    "base": 10542740,
+    "quote": 123.2252
+   },
+   "fdv": 1415420,
+   "marketCap": 1405567,
+   "pairCreatedAt": 1691792927000
+  },
+  {
+   "chainId": "ethereum",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/ethereum/0x56bc8f3293f53825c9fbd6ddfe0cafefa82820d0",
+   "pairAddress": "0x56Bc8F3293f53825c9FBD6DdFE0caFefA82820D0",
+   "labels": [
+    "v2"
+   ],
+   "baseToken": {
+    "address": "0x6aA56e1D98b3805921C170EB4B3fe7D4Fda6D89b",
+    "name": "MAGA",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "name": "Wrapped Ether",
+    "symbol": "WETH"
+   },
+   "priceNative": "0.00001139",
+   "priceUsd": "0.03065",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 1,
+     "sells": 2
+    },
+    "h24": {
+     "buys": 5,
+     "sells": 4
+    }
+   },
+   "volume": {
+    "h24": 2358.71,
+    "h6": 1167.5,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {
+    "h6": -3.44,
+    "h24": 0.34
+   },
+   "liquidity": {
+    "usd": 92625.15,
+    "base": 1510579,
+    "quote": 17.2187
+   },
+   "fdv": 385584,
+   "marketCap": 385584,
+   "pairCreatedAt": 1722369539000
+  },
+  {
+   "chainId": "solana",
+   "dexId": "pumpfun",
+   "url": "https://dexscreener.com/solana/cfuewqpgp3qb9fbxxdgk6nknppak3koxtnozsdnrxhjn",
+   "pairAddress": "CfuEwqPgp3QB9FBxXdgK6NKnPpaK3KoXTnoZsdNRxhJn",
+   "baseToken": {
+    "address": "9q8uTkFv5vhuv9wm3bZ1fszF28mL49PAWKPZeCeWU1Yh",
+    "name": "TRUMP COIN",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "So11111111111111111111111111111111111111112",
+    "name": "Wrapped SOL",
+    "symbol": "SOL"
+   },
+   "priceNative": "0.00000007947",
+   "priceUsd": "0.000009290",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 1,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 1,
+     "sells": 0
+    }
+   },
+   "volume": {
+    "h24": 23.09,
+    "h6": 23.09,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "fdv": 9290.63,
+   "marketCap": 9290.63
+  },
+  {
+   "chainId": "cronos",
+   "dexId": "vvsfinance",
+   "url": "https://dexscreener.com/cronos/0x4d1b19d9e07f088d53842027917302dcef40cc49",
+   "pairAddress": "0x4d1b19D9E07F088D53842027917302DCEF40cc49",
+   "baseToken": {
+    "address": "0x865BF2F72dBAD23707DbcACb2034EeBBc9eA4532",
+    "name": "$TRUMP",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0x5C7F8A570d578ED84E63fdFA7b1eE72dEae1AE23",
+    "name": "Wrapped CRO",
+    "symbol": "WCRO"
+   },
+   "priceNative": "0.0003083",
+   "priceUsd": "0.00001936",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 0,
+     "sells": 3
+    }
+   },
+   "volume": {
+    "h24": 11.8,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {
+    "h24": 1.62
+   },
+   "liquidity": {
+    "usd": 11059.49,
+    "base": 285606708,
+    "quote": 88079
+   },
+   "fdv": 19361,
+   "marketCap": 19361,
+   "pairCreatedAt": 1766869812000
+  },
+  {
+   "chainId": "robinhood",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/robinhood/0xcfbffcd5796c5dd544db8ea466eb47122bf72e87",
+   "pairAddress": "0xCfBfFcd5796c5dd544dB8Ea466eb47122bF72E87",
+   "labels": [
+    "v3"
+   ],
+   "baseToken": {
+    "address": "0x84c49f7e78D0E971F04343977683d11207543A6f",
+    "name": "MAGA",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+    "name": "WETH",
+    "symbol": "WETH"
+   },
+   "priceNative": "0.00001910",
+   "priceUsd": "0.05107",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 1,
+     "sells": 1
+    }
+   },
+   "volume": {
+    "h24": 0.13,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "liquidity": {
+    "usd": 1200371.85,
+    "base": 23500001,
+    "quote": 3.997e-07
+   },
+   "fdv": 2400744,
+   "marketCap": 2400744,
+   "pairCreatedAt": 1783986475000
+  },
+  {
+   "chainId": "ethereum",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/ethereum/0xa1ccd2a8fd5f1ccd5fc5ede255f4d53ec8004489",
+   "pairAddress": "0xa1CCD2a8FD5f1cCd5FC5eDe255f4D53eC8004489",
+   "labels": [
+    "v2"
+   ],
+   "baseToken": {
+    "address": "0x86B69F38BEA3e02f68fF88534bc61EC60E772b19",
+    "name": "NEVER SURRENDER",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "name": "Wrapped Ether",
+    "symbol": "WETH"
+   },
+   "priceNative": "0.00000000003656",
+   "priceUsd": "0.00000009737",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 0,
+     "sells": 1
+    }
+   },
+   "volume": {
+    "h24": 19.33,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "liquidity": {
+    "usd": 35844.9,
+    "base": 184062404308,
+    "quote": 6.7296
+   },
+   "fdv": 40963,
+   "marketCap": 40963,
+   "pairCreatedAt": 1717115447000
+  },
+  {
+   "chainId": "ethereum",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/ethereum/0xfaa0b839849657cc23b3ef65286d9716dfc63292",
+   "pairAddress": "0xfAA0b839849657cc23b3eF65286D9716DfC63292",
+   "labels": [
+    "v2"
+   ],
+   "baseToken": {
+    "address": "0x7113A7166Ab233eb0601B5FF982af8753B99A732",
+    "name": "RealTrumpCoins",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "name": "Wrapped Ether",
+    "symbol": "WETH"
+   },
+   "priceNative": "0.00000000002109",
+   "priceUsd": "0.00000005678",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 0,
+     "sells": 1
+    }
+   },
+   "volume": {
+    "h24": 2.03,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "liquidity": {
+    "usd": 37922.79,
+    "base": 333896366686,
+    "quote": 7.04434
+   },
+   "fdv": 23890,
+   "marketCap": 23890,
+   "pairCreatedAt": 1726925831000
+  },
+  {
+   "chainId": "bsc",
+   "dexId": "pancakeswap",
+   "url": "https://dexscreener.com/bsc/0x032ab93b734bef57d98552eb56839f0995d4fb28",
+   "pairAddress": "0x032AB93B734BEf57D98552EB56839F0995D4FB28",
+   "labels": [
+    "v3"
+   ],
+   "baseToken": {
+    "address": "0x4eA98c1999575aaadfb38237Dd015c5E773F75a2",
+    "name": "MAGA",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+    "name": "Wrapped BNB",
+    "symbol": "WBNB"
+   },
+   "priceNative": "0.00003578",
+   "priceUsd": "0.02778",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 1,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 1,
+     "sells": 1
+    }
+   },
+   "volume": {
+    "h24": 0.31,
+    "h6": 0.03,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {
+    "h6": 0.23,
+    "h24": 0.23
+   },
+   "liquidity": {
+    "usd": 2582.5,
+    "base": 15922,
+    "quote": 2.7566
+   },
+   "fdv": 34527,
+   "marketCap": 34527,
+   "pairCreatedAt": 1708978398000
+  },
+  {
+   "chainId": "bsc",
+   "dexId": "uniswap",
+   "url": "https://dexscreener.com/bsc/0x0d3a9eed32e90fa2c976ac355e30dc51bcc9abaf",
+   "pairAddress": "0x0D3a9eeD32e90Fa2c976aC355e30Dc51BCc9aBaf",
+   "baseToken": {
+    "address": "0x4eA98c1999575aaadfb38237Dd015c5E773F75a2",
+    "name": "MAGA",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+    "name": "Wrapped BNB",
+    "symbol": "WBNB"
+   },
+   "priceNative": "0.00003779",
+   "priceUsd": "0.02919",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 0,
+     "sells": 2
+    }
+   },
+   "volume": {
+    "h24": 0.02,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {
+    "h24": -0.06
+   },
+   "liquidity": {
+    "usd": 87.55,
+    "base": 2864.08182,
+    "quote": 0.005099
+   },
+   "fdv": 36287,
+   "marketCap": 36287,
+   "pairCreatedAt": 1709978840000
+  },
+  {
+   "chainId": "pulsechain",
+   "dexId": "pulsex",
+   "url": "https://dexscreener.com/pulsechain/0x4742318b1c8cdb90b2ed4385a3af14410f72a13f",
+   "pairAddress": "0x4742318b1C8cdb90b2ed4385A3AF14410f72a13F",
+   "labels": [
+    "v2"
+   ],
+   "baseToken": {
+    "address": "0x8cC6d99114Edd628249fAbc8a4d64F9A759a77Bf",
+    "name": "Trump",
+    "symbol": "Trump"
+   },
+   "quoteToken": {
+    "address": "0x94534EeEe131840b1c0F61847c572228bdfDDE93",
+    "name": "The Grays Currency",
+    "symbol": "pTGC"
+   },
+   "priceNative": "5.4784",
+   "priceUsd": "0.0002173",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 0,
+     "sells": 1
+    }
+   },
+   "volume": {
+    "h24": 4.05,
+    "h6": 0,
+    "h1": 0,
+    "m5": 0
+   },
+   "priceChange": {},
+   "liquidity": {
+    "usd": 6483.11,
+    "base": 14916343,
+    "quote": 81718180
+   },
+   "fdv": 217316,
+   "marketCap": 217316,
+   "pairCreatedAt": 1745463895000
+  },
+  {
+   "chainId": "pulsechain",
+   "dexId": "pulsex",
+   "url": "https://dexscreener.com/pulsechain/0x72250d0e1b4668353613b6c30f43bfbad0c3a4fe",
+   "pairAddress": "0x72250D0E1b4668353613B6c30f43bfBAD0c3a4fe",
+   "labels": [
+    "v2"
+   ],
+   "baseToken": {
+    "address": "0x8cC6d99114Edd628249fAbc8a4d64F9A759a77Bf",
+    "name": "Trump",
+    "symbol": "Trump"
+   },
+   "quoteToken": {
+    "address": "0xe33a5AE21F93aceC5CfC0b7b0FDBB65A0f0Be5cC",
+    "name": "MostWanted",
+    "symbol": "MOST"
+   },
+   "priceNative": "0.04746",
+   "priceUsd": "0.0002081",
+   "txns": {
+    "m5": {
+     "buys": 0,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 1,
+     "sells": 0
+    },
+    "h6": {
+     "buys": 2,
+     "sells": 0
+    },
+    "h24": {
+     "buys": 7,
+     "sells": 16
+    }
+   },
+   "volume": {
+    "h24": 69.97,
+    "h6": 3.92,
+    "h1": 2.06,
+    "m5": 0
+   },
+   "priceChange": {
+    "h1": 0.17,
+    "h6": -1.08,
+    "h24": 0.94
+   },
+   "liquidity": {
+    "usd": 4776.08,
+    "base": 11472191,
+    "quote": 544532
+   },
+   "fdv": 208159,
+   "marketCap": 208159,
+   "pairCreatedAt": 1738851295000
+  }
+ ]
+}

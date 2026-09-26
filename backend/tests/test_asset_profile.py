@@ -164,7 +164,12 @@ def test_established_memecoin_from_characteristics_not_ticker() -> None:
     p = profile(identity)
     assert p.category == "established_memecoin"
     assert p.market_cap_class == "mid"
-    assert {"dex_liquidity", "holder_concentration", "social"} <= set(p.optional_evidence)
+    assert "social" in p.optional_evidence
+    # Identified by its contract, so it's a DEX contract trade: safety is required.
+    assert p.market_policy.kind == "dex_contract"
+    assert {"dex_liquidity", "holder_concentration", "token_authorities"} <= set(
+        p.decision_critical_evidence
+    )
     assert not p.risk_thresholds_calibrated
     assert any("BTC" in c for c in p.risk_characteristics)
 
@@ -191,20 +196,24 @@ def test_new_solana_dex_token() -> None:
     assert p.pool_age_days == 4
     assert p.liquidity_class == "low"
     assert "300,000" in (p.liquidity_basis or "")
+    # The category's own evidence, plus the DEX contract policy: the token's own pool
+    # candles become required too.
     assert p.required_evidence == [
         "dex_liquidity",
         "token_authorities",
         "holder_concentration",
         "buy_sell_flow",
         "pool_age",
+        "technical_structure",
     ]
     assert set(p.decision_critical_evidence) == {
         "dex_liquidity",
         "token_authorities",
         "holder_concentration",
+        "technical_structure",
     }
+    assert p.market_policy.kind == "dex_contract"
     assert p.evidence_weights["dex_liquidity"] == "primary"
-    assert p.evidence_weights["technical_structure"] == "context"
 
 
 def test_new_dex_token_of_unknown_age_is_still_treated_as_new() -> None:
@@ -237,8 +246,8 @@ def test_unknown_ticker_is_ambiguous_unknown_crypto() -> None:
     assert p.canonical_id == "symbol:XYZT"
     assert p.identity_basis == "symbol_only"
     assert p.identity_ambiguous
-    assert p.capability("kraken_ohlcv").status == "unknown"
-    assert p.capability("coingecko_snapshot").status == "unknown"
+    assert p.capability("candles").status == "unknown"
+    assert p.capability("market_snapshot").status == "unknown"
 
 
 def test_unknown_ticker_stays_unknown_even_with_a_large_live_market_cap() -> None:
@@ -276,9 +285,11 @@ def test_duplicate_tickers_never_share_an_identity() -> None:
     # Ticker-keyed data (Kraken, CoinGecko, news) can't be attributed to the Solana tokens.
     for p in (solana_a, solana_b):
         assert not p.ticker_data_attributable
-        for cap in ("kraken_ohlcv", "coingecko_snapshot", "news"):
+        for cap in ("market_snapshot", "news"):
             assert p.capability(cap).status == "unavailable"  # type: ignore[arg-type]
             assert "ticker" in p.capability(cap).reason  # type: ignore[arg-type]
+        # Candles come from the token's own DEX pool, never from the shared ticker.
+        assert "pool" in p.capability("candles").reason
 
 
 def test_same_ticker_contract_token_does_not_receive_the_registry_assets_evidence() -> None:
@@ -367,31 +378,31 @@ def test_capabilities_are_explicit_for_every_asset() -> None:
     p = profile("BTC")
     caps = {c.capability: c for c in p.capabilities}
     assert set(caps) == {
-        "kraken_ohlcv",
-        "coingecko_snapshot",
+        "candles",
+        "market_snapshot",
         "news",
         "dex",
         "onchain",
         "social",
         "derivatives",
     }
-    assert caps["kraken_ohlcv"].status == "available" and not caps["kraken_ohlcv"].verified
-    assert caps["coingecko_snapshot"].status == "available"
+    assert caps["candles"].status == "available" and not caps["candles"].verified
+    assert caps["market_snapshot"].status == "available"
     assert caps["news"].status == "available"
     for missing in ("onchain", "social", "derivatives"):
         assert caps[missing].status == "unavailable"  # type: ignore[index]
         assert "No provider" in caps[missing].reason  # type: ignore[index]
     # DEX data is integrated, but only for Solana tokens identified by mint.
     assert caps["dex"].status == "unavailable"
-    assert "Solana mint" in caps["dex"].reason
+    assert "chain + contract/mint address" in caps["dex"].reason
 
 
 def test_capabilities_are_verified_by_this_turns_results() -> None:
     results = prior(ta(), market(), news([story("bullish", "low")]))
     p = profile_from_results(results, "BTC")
     assert p is not None
-    assert p.capability("kraken_ohlcv").verified
-    assert p.capability("coingecko_snapshot").verified
+    assert p.capability("candles").verified
+    assert p.capability("market_snapshot").verified
     assert p.capability("news").verified
     assert status(p, "technical_structure") == "available"
 
@@ -402,30 +413,31 @@ def test_failed_agent_makes_its_capability_unavailable() -> None:
     )
     p = profile_from_results(prior(failed), "BTC")
     assert p is not None
-    assert p.capability("kraken_ohlcv").status == "unavailable"
-    assert "Kraken down" in p.capability("kraken_ohlcv").reason
+    assert p.capability("candles").status == "unavailable"
+    assert "Kraken down" in p.capability("candles").reason
 
 
 def test_unconfirmed_kraken_listing_is_unknown_not_assumed() -> None:
-    assert profile("BNB").capability("kraken_ohlcv").status == "unknown"
+    assert profile("BNB").capability("candles").status == "unknown"
 
 
 def test_integrating_a_provider_changes_capabilities_and_plan() -> None:
     without = profile(
-        new_solana_token(), integrated=frozenset({"kraken_ohlcv", "coingecko_snapshot", "news"})
+        new_solana_token(), integrated=frozenset({"candles", "market_snapshot", "news"})
     )
     default = profile(new_solana_token())
     with_onchain = profile(
         new_solana_token(),
-        integrated=frozenset({"kraken_ohlcv", "coingecko_snapshot", "news", "dex", "onchain"}),
+        integrated=frozenset({"candles", "market_snapshot", "news", "dex", "onchain"}),
     )
     assert without.capability("dex").status == "unavailable"
     assert status(without, "dex_liquidity") == "unavailable"
     assert default.capability("dex").status == "available"  # looked up by mint
     assert status(default, "dex_liquidity") == "expected"
     assert with_onchain.capability("onchain").status == "available"
+    assert status(with_onchain, "token_authorities") == "expected"
     # Data exists, but no agent analyzes it yet: reported, not faked.
-    assert status(with_onchain, "token_authorities") == "not_analyzed"
+    assert status(with_onchain, "onchain_activity") == "not_analyzed"
 
 
 # --- Required evidence and plan --------------------------------------------------------------
@@ -463,7 +475,7 @@ def test_major_and_large_cap_plans_match_the_current_pipeline(symbol: str) -> No
 
 def test_new_dex_token_plan_prioritizes_dex_and_safety_evidence() -> None:
     p = profile(new_solana_token())
-    assert [s.evidence for s in p.analysis_plan[:5]] == p.required_evidence
+    assert [s.evidence for s in p.analysis_plan[:6]] == p.required_evidence
     assert step(p, "dex_liquidity").agent == "dex_market"
     assert {step(p, e).status for e in ("dex_liquidity", "buy_sell_flow", "pool_age")} == {"run"}
     assert step(p, "token_authorities").status == "unavailable"

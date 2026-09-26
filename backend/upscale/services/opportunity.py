@@ -40,7 +40,12 @@ from pydantic import BaseModel, Field, ValidationError
 
 from upscale.formatting import usd, usd_zone
 from upscale.schemas import AgentName, AgentResult, Level
-from upscale.services.asset_profile import EVIDENCE_LABELS, CryptoAssetProfile, upper_first
+from upscale.services.asset_profile import (
+    EVIDENCE_LABELS,
+    CryptoAssetProfile,
+    upper_first,
+    usable,
+)
 from upscale.services.news import Story
 from upscale.services.risk import InputState, RiskAssessment, apply_profile, collect_inputs
 from upscale.services.solana_dex import SolanaDexSnapshot
@@ -48,6 +53,12 @@ from upscale.services.technical_analysis import Level as PriceLevel
 from upscale.services.technical_analysis import TechnicalAnalysis
 
 Action = Literal["buy", "sell", "wait"]
+# What the action means for this trader. Shorts are never opened: short intents only ever
+# describe managing an existing short.
+Intent = Literal[
+    "enter_long", "hold_long", "exit_long", "reduce_long", "wait", "hold_short", "cover_short"
+]
+Position = Literal["none", "long", "short", "unknown"]
 Side = Literal["bullish", "bearish"]
 AppliesTo = Literal["buy", "sell", "both"]
 Setup = Literal["breakout", "breakdown", "trend_continuation"]
@@ -199,6 +210,13 @@ class OpportunityAssessment(BaseModel):
     rules: str = RULES
     # What kind of asset this is and which evidence matters for it (None: no profile).
     asset_profile: CryptoAssetProfile | None = None
+    # The trader's position and what the action means for it.
+    position: Position = "unknown"
+    intent: Intent = "wait"
+    action_meaning: str = ""
+    # The setup read before the position was taken into account (same as `action` unless
+    # the position changed it, e.g. a bullish setup is "hold" for someone already long).
+    setup_action: Action | None = None
 
 
 # --- Evidence ----------------------------------------------------------------------------
@@ -592,6 +610,15 @@ def _profile_missing(profile: CryptoAssetProfile | None) -> list[str]:
     ]
 
 
+def _requirer(profile: CryptoAssetProfile) -> str:
+    """Who requires the evidence: the market policy for DEX contract trades, else the
+    asset's category."""
+    if profile.market_policy is not None and profile.market_policy.kind == "dex_contract":
+        return "a DEX contract trade"
+    label = profile.category_label
+    return f"{'an' if label[:1] in 'aeiou' else 'a'} {label}"
+
+
 def _profile_factors(profile: CryptoAssetProfile | None) -> list[Factor]:
     """Blockers and cautions the asset's profile adds.
 
@@ -609,14 +636,31 @@ def _profile_factors(profile: CryptoAssetProfile | None) -> list[Factor]:
             kind="blocker",
             applies_to="both",
             reason=(
-                f"a {profile.category_label} needs {EVIDENCE_LABELS[e.evidence]}, which "
-                "isn't available yet"
+                f"{_requirer(profile)} needs {EVIDENCE_LABELS[e.evidence]}, which isn't "
+                "available yet"
             ),
             source="opportunity",
         )
         for e in profile.unavailable_critical()
         if e.evidence != "technical_structure"
     ]
+    # Important (not safety-critical) evidence for this kind of asset that is missing only
+    # lowers confidence. Technical, market and news are already weighed by the rules above.
+    for e in profile.evidence:
+        if (
+            e.sufficiency == "important"
+            and e.evidence not in ("technical_structure", "market_snapshot", "news")
+            and not usable(e)
+        ):
+            factors.append(
+                Factor(
+                    id="important_evidence_missing",
+                    kind="caution",
+                    applies_to="both",
+                    reason=f"{EVIDENCE_LABELS[e.evidence]} isn't available ({e.reason.rstrip('.')})",
+                    source="opportunity",
+                )
+            )
     if profile.category == "unknown_crypto":
         why = (
             f"{profile.symbol} was matched by ticker only, so the data may belong to another "
@@ -636,22 +680,32 @@ def _profile_factors(profile: CryptoAssetProfile | None) -> list[Factor]:
     return factors
 
 
-def _dex_factors(risk: RiskAssessment | None) -> list[Factor]:
-    """The Risk review's DEX findings: high severity blocks acting, anything else is a
-    caution. They can only ever add reasons to WAIT, never a reason to act."""
+_TOKEN_FACTOR_SOURCES: dict[str, tuple[str, AgentName]] = {
+    "dex": ("DEX market", "dex_market"),
+    "onchain": ("On-chain", "onchain_safety"),
+}
+
+
+def _token_factors(risk: RiskAssessment | None) -> list[Factor]:
+    """The Risk review's DEX and on-chain findings: high severity blocks acting, anything
+    else is a caution. They can only ever add reasons to WAIT, never a reason to act."""
     if risk is None:
         return []
-    return [
-        Factor(
-            id=f.id,
-            kind="blocker" if f.severity == "high" else "caution",
-            applies_to="both",
-            reason=f"DEX market: {f.headline}",
-            source="dex_market",
+    out: list[Factor] = []
+    for f in risk.factors:
+        if f.category not in _TOKEN_FACTOR_SOURCES or f.severity == "low":
+            continue
+        label, source = _TOKEN_FACTOR_SOURCES[f.category]
+        out.append(
+            Factor(
+                id=f.id,
+                kind="blocker" if f.severity == "high" else "caution",
+                applies_to="both",
+                reason=f"{label}: {f.headline}",
+                source=source,
+            )
         )
-        for f in risk.factors
-        if f.category == "dex"
-    ]
+    return out
 
 
 def _technical_is_critical(profile: CryptoAssetProfile | None) -> bool:
@@ -667,6 +721,12 @@ _BLOCKER_ORDER = (
     "dex_new_pool",
     "dex_extreme_move",
     "dex_flow_imbalance",
+    "onchain_mint_authority",
+    "onchain_freeze_authority",
+    "onchain_token_extension",
+    "onchain_top_holder",
+    "onchain_top10",
+    "onchain_few_holders",
     "risk_high",
     "uncertainty_high",
     "live_beyond_invalidation",
@@ -903,8 +963,106 @@ def assess(
     asset: str | None,
     config: OpportunityConfig | None = None,
     profile: CryptoAssetProfile | None = None,
+    position: Position = "unknown",
 ) -> OpportunityAssessment:
+    """The decision for `asset`, adapted to the trader's position (see `apply_position`)."""
     cfg = config or OpportunityConfig()
+    return apply_position(_assess(prior, asset, cfg, profile), position, cfg)
+
+
+_MEANINGS: dict[tuple[Position, Intent], str] = {
+    (
+        "unknown",
+        "enter_long",
+    ): "BUY: the setup supports opening or adding to a long (spot) position.",
+    ("none", "enter_long"): "BUY: the setup supports opening a long (spot) position.",
+    ("unknown", "exit_long"): "SELL: reduce or exit a long position if you hold one.",
+    ("long", "exit_long"): "SELL: exit your long position; the bearish setup is confirmed.",
+    ("long", "reduce_long"): (
+        "SELL: reduce your long. The setup is weakening, though a full breakdown isn't confirmed."
+    ),
+    ("long", "hold_long"): (
+        "WAIT here means hold: you're long and the evidence doesn't call for selling yet."
+    ),
+    ("none", "wait"): "WAIT: this is not an entry; with no position there's nothing to sell.",
+    ("unknown", "wait"): "WAIT: the evidence doesn't support acting yet; see the triggers.",
+    ("short", "cover_short"): (
+        "BUY here means cover (close) your short; the bullish setup is confirmed."
+    ),
+    ("short", "hold_short"): "WAIT: keep your short for now; UpScale never opens new shorts.",
+}
+
+
+_SETUP_INTENT: dict[Action, Intent] = {"buy": "enter_long", "sell": "exit_long", "wait": "wait"}
+
+
+def _weakening(a: OpportunityAssessment, cfg: OpportunityConfig) -> bool:
+    """A long holder should reduce: technical evidence exists and bearish evidence clearly
+    outweighs bullish evidence, even though no sell setup is confirmed."""
+    return a.timeframe is not None and a.bearish_score - a.bullish_score >= cfg.min_margin
+
+
+def apply_position(
+    a: OpportunityAssessment, position: Position, cfg: OpportunityConfig
+) -> OpportunityAssessment:
+    """Translate the setup read into what it means for this trader.
+
+    * No position: bullish -> enter_long (BUY); bearish -> wait (not an entry); else wait.
+    * Long: bullish -> hold_long (WAIT); bearish confirmed -> exit_long (SELL); weakening
+      -> reduce_long (SELL); else hold_long (WAIT).
+    * Short: bullish -> cover_short (BUY); else hold_short (WAIT).
+    * Unknown: the setup read as is (SELL means reduce/exit a long, never open a short).
+    """
+    setup = a.action
+    action: Action = setup
+    if position == "none":
+        intent: Intent = "enter_long" if setup == "buy" else "wait"
+        action = "buy" if setup == "buy" else "wait"
+    elif position == "long":
+        if setup == "sell":
+            intent = "exit_long"
+        elif setup == "wait" and _weakening(a, cfg):
+            intent, action = "reduce_long", "sell"
+        else:
+            intent, action = "hold_long", "wait"
+    elif position == "short":
+        intent = "cover_short" if setup == "buy" else "hold_short"
+        action = "buy" if setup == "buy" else "wait"
+    else:
+        intent = _SETUP_INTENT[setup]
+    meaning = (
+        _MEANINGS.get((position, intent))
+        or _MEANINGS.get(("unknown", intent))
+        or _MEANINGS[("unknown", "wait")]
+    )
+    summary = a.summary
+    if action != setup:
+        subject = f"{a.asset} {a.timeframe}" if a.timeframe else (a.asset or "")
+        why = {
+            "hold_long": "the setup doesn't call for selling; hold",
+            "reduce_long": f"bearish evidence outweighs bullish ({a.bearish_score} vs {a.bullish_score} points); consider reducing",
+            "wait": "the setup is bearish, so this is not an entry",
+            "hold_short": "no bullish setup to cover on; hold the short",
+        }.get(intent, a.summary)
+        summary = f"{subject}: {why}." if subject else f"{why.capitalize()}."
+    return a.model_copy(
+        update={
+            "action": action,
+            "intent": intent,
+            "position": position,
+            "action_meaning": meaning,
+            "setup_action": setup,
+            "summary": summary,
+        }
+    )
+
+
+def _assess(
+    prior: Mapping[AgentName, AgentResult],
+    asset: str | None,
+    cfg: OpportunityConfig,
+    profile: CryptoAssetProfile | None,
+) -> OpportunityAssessment:
     if asset is None:
         return OpportunityAssessment(
             asset=None,
@@ -939,7 +1097,7 @@ def assess(
     t, risk = ev.technical, ev.risk
     risk_level: RiskLevel = risk.overall_risk if risk else "unavailable"
     uncertainty: UncertaintyLevel = risk.uncertainty_level if risk else "unavailable"
-    profile_factors = _profile_factors(profile) + _dex_factors(risk)
+    profile_factors = _profile_factors(profile) + _token_factors(risk)
 
     if t is None:
         blockers = [f for f in profile_factors if f.kind == "blocker"]
@@ -950,7 +1108,12 @@ def assess(
                     id="no_technical",
                     kind="blocker",
                     applies_to="both",
-                    reason=f"there is no live technical analysis for {asset}",
+                    reason=(
+                        f"there are no price candles for this exact mint yet ({asset}); "
+                        "ticker-matched candles can't be tied to it"
+                        if profile is not None and profile.identity_basis == "contract"
+                        else f"there is no live technical analysis for {asset}"
+                    ),
                     source="opportunity",
                 ),
             )

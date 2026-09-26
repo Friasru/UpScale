@@ -2,9 +2,13 @@
 
 Uses the official public API (https://docs.dexscreener.com/api/reference), no key needed:
 
-`GET https://api.dexscreener.com/token-pairs/v1/{chainId}/{tokenAddress}` returns a JSON
-list of pair objects (the token may be either side), rate-limited by DEX Screener to 300
-requests per minute. Prices arrive as strings, everything else as numbers; any field may
+* `GET https://api.dexscreener.com/token-pairs/v1/{chainId}/{tokenAddress}` returns a JSON
+  list of pair objects (the token may be either side).
+* `GET https://api.dexscreener.com/latest/dex/search?q={query}` returns
+  `{"pairs": [...]}` matching a ticker, name or address on any chain (used to discover
+  which token a ticker means, never to pick one silently).
+
+Both are rate-limited by DEX Screener to 300 requests per minute. Prices arrive as strings, everything else as numbers; any field may
 be missing, and a missing field is left as None here, never filled in.
 """
 
@@ -40,7 +44,22 @@ class DexScreenerProvider:
             raise MarketDataUnavailableError(f"{self.name} returned malformed pair data")
         return pools
 
+    async def search_pools(self, query: str) -> list[DexPool]:
+        body = await self._request("/latest/dex/search", {"q": query})
+        rows = body.get("pairs") if isinstance(body, dict) else None
+        if rows is None:
+            return []
+        if not isinstance(rows, list):
+            raise MarketDataUnavailableError(f"{self.name} returned an unexpected response")
+        return [pool for row in rows if (pool := parse_pair(row)) is not None]
+
     async def _get(self, path: str) -> list[Any]:
+        data = await self._request(path)
+        if not isinstance(data, list):
+            raise MarketDataUnavailableError(f"{self.name} returned an unexpected response")
+        return data
+
+    async def _request(self, path: str, params: dict[str, str] | None = None) -> Any:
         try:
             async with httpx2.AsyncClient(
                 base_url=self.base_url,
@@ -48,7 +67,7 @@ class DexScreenerProvider:
                 timeout=self.timeout,
                 transport=self._transport,
             ) as client:
-                response = await client.get(path)
+                response = await client.get(path, params=params)
         except httpx2.TimeoutException as exc:
             raise MarketDataUnavailableError(f"{self.name} request timed out") from exc
         except httpx2.HTTPError as exc:
@@ -61,12 +80,9 @@ class DexScreenerProvider:
         if response.status_code != 200:
             raise MarketDataUnavailableError(f"{self.name} returned HTTP {response.status_code}")
         try:
-            data = response.json()
+            return response.json()
         except ValueError as exc:
             raise MarketDataUnavailableError(f"{self.name} returned invalid JSON") from exc
-        if not isinstance(data, list):
-            raise MarketDataUnavailableError(f"{self.name} returned an unexpected response")
-        return data
 
 
 def parse_pair(row: Any) -> DexPool | None:

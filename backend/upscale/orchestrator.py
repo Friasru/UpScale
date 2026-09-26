@@ -1,10 +1,19 @@
 import asyncio
 import dataclasses
+import logging
+import time
 from collections.abc import Iterable, Mapping
 from typing import cast
 
+import upscale.services as services
 from upscale.agents import Agent, AgentContext, default_agents
-from upscale.routing import RoutingDecision, add_agent, route
+from upscale.routing import (
+    RoutingDecision,
+    add_agent,
+    is_concept_question,
+    is_trading_follow_up,
+    route,
+)
 from upscale.schemas import (
     AgentName,
     AgentResult,
@@ -18,7 +27,23 @@ from upscale.schemas import (
     Scenario,
     Uncertainty,
 )
-from upscale.services.asset_profile import AssetIdentity, build_profile, wants_dex_data
+from upscale.services.asset_profile import (
+    AssetIdentity,
+    build_profile,
+    integrated_capabilities,
+    wants_dex_data,
+    wants_onchain_data,
+)
+from upscale.services.asset_registry import DEFAULT_REGISTRY
+from upscale.services.asset_resolver import AssetResolver, Resolution, ResolvedAsset
+from upscale.services.chains import DEX_CHAINS
+from upscale.services.trade_context import (
+    IdentityConfidence,
+    VenueRequest,
+    build_trade_context,
+    requested_venue,
+    trader_context,
+)
 
 AGENT_TIMEOUT_SECONDS = 30.0
 _LEVEL_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
@@ -28,6 +53,7 @@ DISCLAIMER = (
     "a short."
 )
 EDUCATION_DISCLAIMER = "General educational explanation, not financial advice."
+logger = logging.getLogger("upscale.performance")
 
 
 class Orchestrator:
@@ -38,42 +64,110 @@ class Orchestrator:
     """
 
     def __init__(
-        self, agents: Iterable[Agent] | None = None, timeout: float = AGENT_TIMEOUT_SECONDS
+        self,
+        agents: Iterable[Agent] | None = None,
+        timeout: float = AGENT_TIMEOUT_SECONDS,
+        resolver: AssetResolver | None = None,
     ):
         self.agents: dict[AgentName, Agent] = {
             agent.name: agent for agent in (agents or default_agents())
         }
         self.timeout = timeout
+        self._resolver = resolver
+
+    @property
+    def resolver(self) -> AssetResolver:
+        return self._resolver or services.asset_resolver
 
     async def respond(self, request: ChatRequest) -> ChatResponse:
+        """Resolve the exact asset, build the trading context, run the relevant agents
+        (independent ones concurrently), and return BUY / SELL / WAIT with its evidence."""
+        started = time.perf_counter()
+        timings: dict[str, float] = {}
         latest = request.messages[-1]
         query = latest.content.strip()
-        decision = route(query, has_images=bool(latest.attachments))
-        identity = (
-            AssetIdentity(chain="solana", address=decision.token_address)
-            if decision.token_address
-            else None
+        has_images = bool(latest.attachments)
+        history = [m.content for m in request.messages[:-1] if m.role == "user"]
+
+        resolution: Resolution | None = None
+        if is_concept_question(query, has_images):
+            decision = route(query, has_images)
+        else:
+            t0 = time.perf_counter()
+            # A screenshot names its own asset (Vision reads it), so the conversation's
+            # earlier asset is only reused for text follow-ups.
+            follow_up = history if is_trading_follow_up(query) and not has_images else []
+            resolution = await self.resolver.resolve(query, follow_up)
+            timings["asset_resolution"] = _ms(t0)
+            if resolution.clarification:
+                return _reply(resolution.clarification, timings, started)
+            if not resolution.assets and resolution.notes and not has_images:
+                return _reply(" ".join(resolution.notes), timings, started)
+            decision = route(query, has_images, resolution)
+
+        primary = resolution.primary if resolution else None
+        venue = requested_venue(query, primary.identity.address if primary else None)
+        identity = _trade_identity(primary, venue)
+        venue_kind = (
+            "dex"
+            if identity is not None and venue.kind != "cex"
+            else (venue.kind if venue.explicit else None)
         )
-        decision = with_profile_agents(decision, identity)
+        decision = with_profile_agents(decision, identity, venue.kind)
+        profile = build_profile(
+            identity or (decision.assets[0] if decision.assets else None), venue=venue_kind
+        )
+        trade = build_trade_context(
+            profile,
+            _confidence(primary),
+            trader_context(query, history, decision.timeframe),
+            decision.timeframe,
+            venue=venue,
+        )
         base_context = AgentContext(
             query=query,
             attachments=latest.attachments,
             history=request.messages[:-1],
             assets=decision.assets,
-            assets_source="mint" if identity else "user" if decision.assets else None,
+            assets_source="mint"
+            if primary is not None and primary.is_contract
+            else "user"
+            if decision.assets
+            else None,
             asset_identity=identity,
+            trade=trade,
             timeframe=decision.timeframe,
             timeframe_source="user" if decision.timeframe else None,
         )
-        results = await self.run_agents(decision.agents, base_context)
+        # Token data that doesn't depend on other agents starts downloading right away.
+        prefetch = (
+            asyncio.create_task(
+                services.provider_registry.prefetch(identity.chain, identity.address)
+            )
+            if identity is not None
+            else None
+        )
+        results = await self.run_agents(decision.agents, base_context, timings)
+        if prefetch is not None:
+            await prefetch
         final_context = apply_vision(base_context, {r.agent: r for r in results})
         analysis = self.synthesize(decision, results, assets=final_context.assets)
+        if primary is not None and primary.note:
+            analysis.uncertainty.notes.insert(0, primary.note)
+        timings["total"] = _ms(started)
+        analysis.timings = timings
+        logger.info("decision latency (ms): %s", timings)
         return ChatResponse(
             message=ChatMessage(role="assistant", content=render_text(analysis)),
             analysis=analysis,
         )
 
-    async def run_agents(self, names: list[AgentName], context: AgentContext) -> list[AgentResult]:
+    async def run_agents(
+        self,
+        names: list[AgentName],
+        context: AgentContext,
+        timings: dict[str, float] | None = None,
+    ) -> list[AgentResult]:
         """Run the selected agents in dependency waves; agents in the same wave run concurrently."""
         pending = [name for name in names if name in self.agents]
         results: dict[AgentName, AgentResult] = {}
@@ -87,13 +181,16 @@ class Orchestrator:
                 ready = pending
             wave_context = apply_vision(context, results)
             wave = await asyncio.gather(
-                *(self._run_one(self.agents[n], wave_context) for n in ready)
+                *(self._run_one(self.agents[n], wave_context, timings) for n in ready)
             )
             results.update((result.agent, result) for result in wave)
             pending = [name for name in pending if name not in results]
         return [results[name] for name in names if name in results]
 
-    async def _run_one(self, agent: Agent, context: AgentContext) -> AgentResult:
+    async def _run_one(
+        self, agent: Agent, context: AgentContext, timings: dict[str, float] | None = None
+    ) -> AgentResult:
+        started = time.perf_counter()
         try:
             timeout = agent.timeout or self.timeout
             return await asyncio.wait_for(agent.run(context), timeout=timeout)
@@ -108,6 +205,9 @@ class Orchestrator:
                 summary=f"{agent.name} agent failed.",
                 error=reason,
             )
+        finally:
+            if timings is not None:
+                timings[f"agent.{agent.name}"] = _ms(started)
 
     def synthesize(
         self,
@@ -188,26 +288,78 @@ def _uncertainty_level(results: list[AgentResult], review: AgentResult | None) -
     return cast(Level, level)
 
 
+def _trade_identity(primary: ResolvedAsset | None, venue: VenueRequest) -> AssetIdentity | None:
+    """The chain + address identity agents should use for a DEX trade, else None.
+
+    An unregistered token is always traded by its address. A registered token (PEPE,
+    BONK...) is a DEX trade when the trader pasted its address or asked about a DEX
+    market; otherwise it keeps its exchange path (and named exchanges always do)."""
+    if primary is None:
+        return None
+    if primary.is_contract:
+        return primary.identity
+    if venue.kind == "cex" or not (venue.kind == "dex" or primary.source == "address"):
+        return None
+    entry = DEFAULT_REGISTRY.by_symbol(primary.label)
+    if entry is None or entry.chain not in DEX_CHAINS or not entry.address:
+        return None
+    return AssetIdentity(symbol=entry.symbol, chain=entry.chain, address=entry.address)
+
+
+def _ms(since: float) -> float:
+    return round((time.perf_counter() - since) * 1000, 1)
+
+
+def _confidence(asset: object) -> "IdentityConfidence":
+    source = getattr(asset, "source", None)
+    confidence = getattr(asset, "confidence", None)
+    if confidence == "exact":
+        return "exact"
+    if source == "discovered":
+        return "discovered"
+    return "registry" if asset is not None else "ticker_only"
+
+
+def _reply(text: str, timings: dict[str, float], started: float) -> ChatResponse:
+    """A short answer without analysis, e.g. asking which token the user means."""
+    timings["total"] = _ms(started)
+    analysis = Analysis(
+        mock=False,
+        summary=text,
+        uncertainty=Uncertainty(level="high", notes=[]),
+        disclaimer=DISCLAIMER,
+        timings=timings,
+    )
+    return ChatResponse(message=ChatMessage(role="assistant", content=text), analysis=analysis)
+
+
 def with_profile_agents(
-    decision: RoutingDecision, identity: AssetIdentity | None
+    decision: RoutingDecision, identity: AssetIdentity | None, venue: str | None = None
 ) -> RoutingDecision:
-    """Add agents the asset's profile calls for: DEX data for Solana tokens whose kind of
-    asset needs it (new DEX tokens, established memecoins). BTC and other assets without a
-    Solana mint never get it."""
-    if not decision.agents or _is_education(decision) or "dex_market" in decision.reasons:
-        return decision
+    """Add agents the asset's profile calls for, for Solana tokens identified by mint:
+    DEX market data (new DEX tokens, established memecoins) and on-chain safety data (when
+    token authorities / holder concentration matter and a Solana RPC is configured). BTC
+    and other assets without a Solana mint never get either."""
+    if not decision.agents or _is_education(decision) or venue == "cex":
+        return decision  # an exchange trade needs no DEX pool or token-safety data
     target: AssetIdentity | str | None = identity or (
         decision.assets[0] if decision.assets else None
     )
     profile = build_profile(target)
-    if profile is None or not wants_dex_data(profile):
+    if profile is None:
         return decision
-    return add_agent(
-        decision,
-        "dex_market",
-        f"{profile.symbol} is a {profile.category_label} with a Solana mint, so DEX pool "
-        "data is relevant.",
-    )
+    what = f"{profile.symbol} is a {profile.category_label} with a Solana mint"
+    if wants_dex_data(profile):
+        decision = add_agent(decision, "dex_market", f"{what}, so DEX pool data is relevant.")
+    # A pasted mint is a Solana token by definition, before any data says what kind.
+    exact_mint = identity is not None and identity.chain == "solana" and bool(identity.address)
+    if wants_onchain_data(profile) or (exact_mint and "onchain" in integrated_capabilities()):
+        decision = add_agent(
+            decision,
+            "onchain_safety",
+            f"{what}: token authorities and holder concentration are required evidence.",
+        )
+    return decision
 
 
 def apply_vision(context: AgentContext, results: Mapping[AgentName, AgentResult]) -> AgentContext:
@@ -232,6 +384,18 @@ def apply_vision(context: AgentContext, results: Mapping[AgentName, AgentResult]
         symbol = snapshot.get("symbol") if isinstance(snapshot, dict) else None
         if isinstance(symbol, str) and symbol:
             updates["assets"] = [symbol]
+        if context.trade is not None and isinstance(snapshot, dict):
+            # The market is now known: the selected pool, its DEX and quote asset.
+            market = context.trade.market.model_copy(
+                update={
+                    "pool": snapshot.get("pair_address"),
+                    "venue": snapshot.get("dex"),
+                    "quote_asset": snapshot.get("quote_symbol"),
+                    "venue_kind": "dex",
+                    "market_type": "dex",
+                }
+            )
+            updates["trade"] = context.trade.model_copy(update={"market": market})
     return dataclasses.replace(context, **updates)  # type: ignore[arg-type]
 
 

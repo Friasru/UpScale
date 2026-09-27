@@ -131,6 +131,7 @@ social_scout_service = SocialScoutService(
             social_config.x_allow_paid,
             social_config.x_max_reads_per_run,
             social_config.x,
+            fetch_usernames=social_config.x_fetch_usernames,
         ),
         *(
             DiscourseForumProvider(url.strip(), social_config.discourse)

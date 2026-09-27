@@ -8,12 +8,13 @@ A post may refer to several tokens; each reference is judged on its own:
 * **STRONG**: a link to one of the token's official domains; or a post by the token's
   known official account that names its ticker or name; or ticker + name + the token's
   chain, with no other known token sharing that ticker and name on that chain.
-* **PROBABLE**: the ticker or name matches exactly one tracked token and no other known
-  token could be meant: either the post names the chain, or the name matches, or the
-  directory of known tokens (`universe`) is available and has no other token with that
-  ticker.
-* **AMBIGUOUS**: several known tokens could be meant (or competition can't be ruled out).
-  The mention is kept with its candidates, and never attached to any of them.
+* **PROBABLE**: no contract, but two independent references agree and no other known token
+  fits them: ticker + name, name + chain, or ticker + chain (for tickers longer than
+  `short_symbol_max_length`; a short ticker such as $AI also needs the name).
+* **AMBIGUOUS**: several known tokens could be meant, or a single reference (a bare
+  ticker, a bare name) with nothing to corroborate it. Scout's directory of known tokens
+  is never treated as complete: "no competitor known" is not evidence. The mention is kept
+  with its candidates, and never attached to any of them.
 * **REJECTED**: the post points elsewhere: it names the ticker but gives a different
   contract, or names a different chain.
 
@@ -22,12 +23,14 @@ no rules for particular coins: only identity, chain, addresses, names, links and
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from upscale.services.chains import normalize_address
 from upscale.services.scout.social.config import AttributionConfig
 from upscale.services.scout.social.models import Attribution, SocialPost, TokenIdentity
 from upscale.services.scout.social.text import (
     address_family,
+    chain_phrases,
     contains_phrase,
     domains,
     extract_addresses,
@@ -38,6 +41,19 @@ from upscale.services.scout.social.text import (
 )
 
 COUNTED_LEVELS = frozenset({"EXACT", "STRONG", "PROBABLE"})
+
+
+@dataclass(frozen=True)
+class SearchReferences:
+    """What identifies one token in a search, provider-neutral: a provider that bills per
+    result can use these to fetch only posts attribution could count (see
+    `AttributionIndex.references`)."""
+
+    address: str
+    cashtag: str | None  # "$SYM", only when the symbol can be written as a cashtag
+    name: str | None  # only when it is independent evidence (not the ticker again)
+    chain_phrases: tuple[str, ...]  # words / phrases attribution accepts as the chain
+    short_symbol: bool  # a chain alone doesn't corroborate this ticker
 
 
 class AttributionIndex:
@@ -52,7 +68,6 @@ class AttributionIndex:
         tokens that share a ticker or address."""
         self.config = config or AttributionConfig()
         self.tracked = {t.canonical_id: t for t in tracked}
-        self.directory_complete = bool(universe)
         known = {t.canonical_id: t for t in [*universe, *tracked]}
         self.known = known
         self.by_address: dict[tuple[str, str], list[str]] = {}
@@ -72,6 +87,23 @@ class AttributionIndex:
         if identity.symbol and is_cashtag_symbol(identity.symbol):
             terms.append(f"${identity.symbol}")
         return terms
+
+    def references(self, identity: TokenIdentity) -> SearchReferences:
+        [address, *rest] = self.terms_for(identity)
+        name = identity.name
+        independent = (
+            name is not None
+            and len(name) >= self.config.min_name_length
+            and not (identity.symbol and same_words(name, identity.symbol))
+        )
+        return SearchReferences(
+            address=address,
+            cashtag=rest[0] if rest else None,
+            name=name if independent else None,
+            chain_phrases=tuple(chain_phrases(identity.chain)),
+            short_symbol=identity.symbol is not None
+            and len(identity.symbol) <= self.config.short_symbol_max_length,
+        )
 
     def attribute(self, post: SocialPost) -> list[Attribution]:
         text = " ".join([post.text, *post.urls])
@@ -175,25 +207,27 @@ class AttributionIndex:
                     )
                 )
                 continue
-            if has_ticker and has_name and token.chain in chains:
+            # Independent references: the ticker, the token's (real) name, its chain. A
+            # single one is never enough, however few tokens Scout knows: its directory
+            # only holds what Scout has seen, so "no competitor known" isn't evidence.
+            on_chain = token.chain in chains
+            short = (
+                token.symbol is not None
+                and len(token.symbol) <= self.config.short_symbol_max_length
+            )
+            if has_ticker and has_name and on_chain:
                 out[cid] = Attribution(
                     level="STRONG",
                     canonical_id=cid,
                     reason="names the token's ticker, name and chain; no other known token matches",
                     token_reference=reference,
                 )
-            elif chains or has_name or self.directory_complete:
-                context = (
-                    "the chain"
-                    if chains
-                    else "the name"
-                    if has_name
-                    else "the known-token directory"
-                )
+            elif has_name and (has_ticker or on_chain) or has_ticker and on_chain and not short:
+                context = "the name" if has_ticker and has_name else "the chain"
                 out[cid] = Attribution(
                     level="PROBABLE",
                     canonical_id=cid,
-                    reason=f"matches one tracked token by ticker / name; {context} rules out others",
+                    reason=f"matches one tracked token by ticker / name, corroborated by {context}",
                     token_reference=reference,
                 )
             else:
@@ -201,7 +235,12 @@ class AttributionIndex:
                     Attribution(
                         level="AMBIGUOUS",
                         canonical_id=None,
-                        reason="ticker only, and other tokens with this ticker can't be ruled out",
+                        reason=(
+                            "a short ticker and its chain alone could mean many tokens"
+                            if has_ticker and on_chain
+                            else "one reference only (ticker or name, no contract or "
+                            "corroborating context): other tokens can't be ruled out"
+                        ),
                         token_reference=reference,
                         candidates=[cid],
                     )

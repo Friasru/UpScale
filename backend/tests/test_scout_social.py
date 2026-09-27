@@ -7,6 +7,7 @@ All offline: providers are fixture-backed (`StaticSocialProvider`) or MockTransp
 import asyncio
 import json
 import random
+from collections import Counter
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -182,9 +183,11 @@ def test_bare_ticker_is_ambiguous_without_a_directory() -> None:
     assert a.level == "AMBIGUOUS" and a.canonical_id is None
 
 
-def test_bare_ticker_is_probable_when_the_directory_knows_no_competitor() -> None:
+def test_bare_ticker_stays_ambiguous_even_when_the_directory_knows_no_competitor() -> None:
+    # Scout's directory only holds what Scout has seen: "no competitor known" isn't evidence
     index = AttributionIndex([NEWT], universe=[NEWT, OTHER])
-    assert levels(index, post("$NEWT is exploding")) == {NEWT.canonical_id: "PROBABLE"}
+    [a] = index.attribute(post("$NEWT is exploding"))
+    assert a.level == "AMBIGUOUS" and a.canonical_id is None and a.candidates == [NEWT.canonical_id]
 
 
 def test_ticker_shared_by_many_tokens_is_ambiguous() -> None:
@@ -911,6 +914,7 @@ def test_x_adapter_requires_paid_opt_in_and_respects_the_read_budget() -> None:
         settings(max_pages=5),
         transport=httpx2.MockTransport(handle),
         now=lambda: NOW,
+        fetch_usernames=True,
     )
     result = run(provider.search(["$NEWT"], NOW - timedelta(hours=1), keyer))
     assert provider.reads_this_run == 150 and len(calls) == 2
@@ -1078,10 +1082,11 @@ def test_neynar_real_shape_attribution() -> None:
     assert levels(directory, by_id["4"]) == {DEGEN.canonical_id: "EXACT"}  # in a link only
     assert levels(directory, by_id["5"]) == {DEGEN.canonical_id: "REJECTED"}
     assert levels(directory, by_id["6"]) == {}  # "degens" is not the cashtag
-    [a] = directory.attribute(by_id["1"])
-    assert a.level == "PROBABLE" and "directory" in a.reason  # not "the name"
-    [b] = AttributionIndex([DEGEN]).attribute(by_id["1"])
-    assert b.level == "AMBIGUOUS" and b.canonical_id is None
+    for index in (directory, AttributionIndex([DEGEN])):  # ticker only: never attached
+        [a] = index.attribute(by_id["1"])
+        assert a.level == "AMBIGUOUS" and a.canonical_id is None
+    [c] = directory.attribute(by_id["3"])
+    assert c.level == "EXACT"
 
 
 def test_neynar_queries_hold_one_bare_term() -> None:
@@ -1250,3 +1255,367 @@ def test_store_migrates_schema_v1(tmp_path: Path) -> None:
         .fetchone()
     )
     assert version == ("2",)
+
+
+# --- X: live-validated behavior (sanitized real response shape) ------------------------------
+
+# A real X recent-search response (2026-09), keys unchanged (incl. a `note_tweet` long
+# post); every id, handle and text replaced by synthetic values reproducing live patterns.
+X_FIXTURE = Path(__file__).parent / "fixtures" / "x_recent_search.json"
+
+
+def x_fixture() -> dict[str, Any]:
+    body: dict[str, Any] = json.loads(X_FIXTURE.read_text())
+    return body
+
+
+def x_provider(
+    handle: Any, now: Any = lambda: FIXTURE_NOW, reads: int = 500, **kw: Any
+) -> XRecentSearchProvider:
+    fetch_usernames = kw.pop("fetch_usernames", False)
+    return XRecentSearchProvider(
+        "token",
+        True,
+        reads,
+        settings(**kw),
+        transport=httpx2.MockTransport(handle),
+        now=now,
+        fetch_usernames=fetch_usernames,
+    )
+
+
+def test_x_parses_the_real_response_shape() -> None:
+    requests: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json=x_fixture())
+
+    since = FIXTURE_NOW - timedelta(hours=2)
+    result = run(x_provider(handle).search([DEGEN_ADDRESS], since, keyer))
+    params = requests[0].url.params
+    assert params["query"] == f"({DEGEN_ADDRESS}) -is:retweet"
+    assert params["start_time"] == "2026-09-26T10:00:00Z"
+    assert "note_tweet" in params["tweet.fields"]
+    assert "expansions" not in params  # author usernames are a billed user read
+    assert len(result.posts) == 7  # the post without an author id is dropped
+    by_id = {p.post_id[-1]: p for p in result.posts}
+    p1 = by_id["1"]
+    assert (p1.likes, p1.replies, p1.reposts, p1.quotes, p1.views) == (12, 3, 4, 1, 900)
+    assert p1.engagement == 20 and p1.author_key == "k:x:501" and p1.author_handle is None
+    assert p1.source_url == f"https://x.com/i/web/status/{p1.post_id}"
+    assert by_id["2"].urls == [f"https://dexscreener.com/base/{DEGEN_ADDRESS}"]
+    assert DEGEN_ADDRESS in by_id["7"].text.lower()  # only in the long post's note
+    assert result.complete_since == min(p.created_at for p in result.posts)  # next_token
+
+
+def test_x_real_shape_attribution() -> None:
+    result = run(
+        x_provider(lambda r: httpx2.Response(200, json=x_fixture())).search(
+            [DEGEN_ADDRESS], FIXTURE_NOW - timedelta(hours=2), keyer
+        )
+    )
+    by_id = {p.post_id[-1]: p for p in result.posts}
+    index = AttributionIndex([DEGEN], universe=[DEGEN, OTHER])
+    got = {i: levels(index, by_id[i]) for i in "1234567"}
+    assert got["1"] == got["2"] == got["7"] == {DEGEN.canonical_id: "EXACT"}
+    assert got["3"] == got["4"] == {DEGEN.canonical_id: "PROBABLE"}  # ticker + "on base"
+    assert got["5"] == {None: "AMBIGUOUS"}  # ticker alone
+    assert got["6"] == {DEGEN.canonical_id: "REJECTED"}  # another contract
+
+
+def test_x_search_terms_only_buy_countable_posts() -> None:
+    x = XRecentSearchProvider("t", True, 10, settings())
+    index = AttributionIndex([])
+
+    def query(symbol: str, name: str, chain: str = "base") -> str:
+        t = TokenIdentity(
+            canonical_id=f"{chain}:a", chain=chain, address=EVM, symbol=symbol, name=name
+        )
+        return x.render_query(x.search_terms(index.references(t)))
+
+    assert query("AERO", "Aerodrome") == (
+        f'({EVM} OR ($AERO (Aerodrome OR "base chain" OR "on base"))) -is:retweet'
+    )
+    assert query("EUNICE", "Eunice") == (  # the name is the ticker again: chain only
+        f'({EVM} OR ($EUNICE ("base chain" OR "on base"))) -is:retweet'
+    )
+    assert query("X", "X100") == f"({EVM} OR ($X (X100))) -is:retweet"  # short: name only
+    assert query("GO", "go") == f"({EVM}) -is:retweet"  # nothing could corroborate it
+    assert query("NEWT", 'Newt "Pro" | x', "solana").startswith(
+        f'({EVM} OR ($NEWT ("Newt Pro x" OR '
+    )
+
+
+def test_x_fetches_usernames_only_when_asked() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json={"meta": {"result_count": 0}})
+
+    run(x_provider(handle, fetch_usernames=True).search([EVM], FIXTURE_NOW, keyer))
+    assert seen[0].url.params["expansions"] == "author_id"
+
+
+def test_x_zero_results_are_a_real_zero() -> None:
+    since = FIXTURE_NOW - timedelta(hours=1)
+    result = run(
+        x_provider(lambda r: httpx2.Response(200, json={"meta": {"result_count": 0}})).search(
+            [EVM], since, keyer
+        )
+    )
+    assert result.posts == [] and result.complete_since == since
+
+
+def test_x_budget_too_small_for_a_page_is_unavailable_not_zero() -> None:
+    provider = x_provider(lambda r: httpx2.Response(200, json=x_fixture()), reads=5)
+    with pytest.raises(MarketDataUnavailableError, match="read budget"):
+        run(provider.search([EVM], FIXTURE_NOW - timedelta(hours=1), keyer))
+
+
+def test_x_result_budget_is_reserved_before_concurrent_requests(tmp_path: Path) -> None:
+    now = Now()
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        n = int(request.url.params["max_results"])
+        rows = [
+            {"id": str(10_000 + i), "author_id": str(i), "text": "hello",
+             "created_at": (NOW - timedelta(minutes=i + 1)).isoformat()}
+            for i in range(n)
+        ]  # fmt: skip
+        return httpx2.Response(200, json={"data": rows, "meta": {"result_count": n}})
+
+    provider = x_provider(handle, now=now, reads=45, max_results_per_page=20, max_terms_per_query=1)
+    tokens = [
+        TokenIdentity(canonical_id=f"solana:{m}", chain="solana", address=m, symbol=None)
+        for m in [MINT, MINT_2, MINT_3, "5" * 40]
+    ]
+    result = run(social(tmp_path, [provider], now).observe(tokens))
+    assert provider.results_this_run <= 45  # 4 concurrent searches never overspend
+    statuses = Counter(m.sources[0].status for m in result.momentum)
+    assert statuses["PROVIDER_UNAVAILABLE"] >= 1  # over budget: never reported as zero
+    [check] = result.providers
+    assert check.results == provider.results_this_run
+    assert check.estimated_cost_usd is None  # this test config sets no price
+
+
+def test_x_daily_result_budget_holds_across_runs(tmp_path: Path) -> None:
+    now = Now()
+    body = {
+        "data": [
+            {"id": str(i), "author_id": str(i), "text": "x",
+             "created_at": (NOW - timedelta(minutes=i + 1)).isoformat()}
+            for i in range(20)
+        ],
+        "meta": {"result_count": 20},
+    }  # fmt: skip
+    calls: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request)
+        return httpx2.Response(200, json=body)
+
+    provider = x_provider(handle, now=now, max_results_per_day=20, cost_per_result_usd=0.005)
+    svc = social(tmp_path, [provider], now)
+    first = run(svc.observe([NEWT]))
+    assert (first.providers[0].results, first.providers[0].estimated_cost_usd) == (20, 0.1)
+    now.at += timedelta(minutes=10)
+    second = run(svc.observe([NEWT]))
+    assert len(calls) == 1  # daily budget spent: nothing sent
+    assert second.providers[0].status == "PROVIDER_UNAVAILABLE"
+    assert "daily result budget" in (second.providers[0].error or "")
+    assert second.momentum[0].sources[0].status == "PROVIDER_UNAVAILABLE"
+    now.at += timedelta(days=1)
+    run(svc.observe([NEWT]))
+    assert len(calls) == 2  # a new UTC day, a new budget
+
+
+def test_x_usage_counts_cache_hits() -> None:
+    provider = x_provider(lambda r: httpx2.Response(200, json=x_fixture()))
+    provider.start_run()
+    since = FIXTURE_NOW - timedelta(hours=2)
+    run(provider.search([EVM], since, keyer))
+    run(provider.search([EVM], since, keyer))
+    usage = provider.usage()
+    assert (usage["requests"], usage["results"], usage["cache_hits"]) == (1, 8, 1)
+
+
+# --- X + Farcaster together (real adapters over mock transports) ----------------------------
+
+
+def x_rows(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {"id": str(abs(hash(p["id"])) % 10**18), "author_id": p["author"], "text": p["text"],
+         "created_at": p["created_at"].isoformat(),
+         "public_metrics": {"like_count": p["likes"], "reply_count": 1, "retweet_count": 0,
+                            "quote_count": 0, "impression_count": 10}}
+        for p in posts
+    ]  # fmt: skip
+
+
+def cast_rows(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {"hash": "0x" + p["id"], "author": {"fid": abs(hash(p["author"])) % 10**6, "score": 0.7},
+         "text": p["text"], "timestamp": p["created_at"].isoformat(),
+         "reactions": {"likes_count": p["likes"], "recasts_count": 0}, "replies": {"count": 1},
+         "embeds": []}
+        for p in posts
+    ]  # fmt: skip
+
+
+def pair(
+    now: Now,
+    x_posts: list[dict[str, Any]],
+    f_posts: list[dict[str, Any]],
+    x_fail: int | None = None,
+) -> list[Any]:
+    def newer(rows: list[dict[str, Any]], key: str, since: datetime) -> list[dict[str, Any]]:
+        return [r for r in rows if datetime.fromisoformat(r[key]) > since]
+
+    def x_handle(request: httpx2.Request) -> httpx2.Response:
+        if x_fail:
+            return httpx2.Response(x_fail)
+        since = datetime.fromisoformat(request.url.params["start_time"].replace("Z", "+00:00"))
+        rows = sorted(newer(x_rows(x_posts), "created_at", since), key=lambda r: r["created_at"])
+        return httpx2.Response(200, json={"data": rows[::-1], "meta": {"result_count": len(rows)}})
+
+    def f_handle(request: httpx2.Request) -> httpx2.Response:
+        after = request.url.params["q"].split("after:")[1]
+        since = datetime.fromisoformat(after).replace(tzinfo=UTC)
+        rows = sorted(newer(cast_rows(f_posts), "timestamp", since), key=lambda r: r["timestamp"])
+        return httpx2.Response(200, json={"result": {"casts": rows[::-1], "next": {}}})
+
+    return [
+        neynar(f_handle, now=now),
+        x_provider(x_handle, now=now, max_pages=3),
+    ]
+
+
+RISING = (1, 3, 14)  # per hour: baseline, previous hour, recent hour
+FLAT = (4, 4, 4)
+
+
+@pytest.mark.parametrize(
+    ("x_counts", "f_counts", "accelerating", "active", "corroborated"),
+    [
+        (RISING, None, {"X"}, 1, False),  # X-only acceleration
+        (None, RISING, {"Farcaster (Neynar)"}, 1, False),  # Farcaster-only acceleration
+        (RISING, RISING, {"X", "Farcaster (Neynar)"}, 2, True),  # both accelerating
+        (RISING, FLAT, {"X"}, 2, False),  # one accelerating, one steady
+    ],
+)
+def test_x_and_farcaster_cross_platform(
+    tmp_path: Path,
+    x_counts: tuple[int, int, int] | None,
+    f_counts: tuple[int, int, int] | None,
+    accelerating: set[str],
+    active: int,
+    corroborated: bool,
+) -> None:
+    now = Now()
+    x_posts = growth_posts(x_counts, prefix="x") if x_counts else []
+    f_posts = growth_posts(f_counts, prefix="f") if f_counts else []
+    [m] = run(social(tmp_path, pair(now, x_posts, f_posts), now).observe([NEWT])).momentum
+    assert {s.provider for s in m.sources if s.accelerating} == accelerating
+    c = m.cross_platform
+    assert (c.platforms_with_activity, c.corroborated) == (active, corroborated)
+    assert c.only_one_active_of_several == (active == 1)
+    x_source = next(s for s in m.sources if s.provider == "X")
+    x_h1 = next(w for w in x_source.windows if w.window == "h1")
+    assert x_h1.unique_authors == (x_counts[2] if x_counts else 0)
+
+
+def test_x_failure_leaves_farcaster_and_history_untouched(tmp_path: Path) -> None:
+    import sqlite3
+
+    now = Now()
+    x_posts = growth_posts(RISING, prefix="x")
+    f_posts = growth_posts(RISING, prefix="f")
+    run(social(tmp_path, pair(now, x_posts, f_posts), now).observe([NEWT]))
+    db = tmp_path / "scout.sqlite3"
+    tables = ("scout_social_events", "scout_social_snapshots", "scout_social_momentum")
+
+    def dump() -> dict[str, list[Any]]:
+        conn = sqlite3.connect(db)
+        return {t: conn.execute(f"SELECT * FROM {t} ORDER BY id").fetchall() for t in tables}
+
+    before = dump()
+    now.at += timedelta(minutes=10)
+    result = run(social(tmp_path, pair(now, x_posts, f_posts, x_fail=429), now).observe([NEWT]))
+    statuses = {c.provider: c.status for c in result.providers}
+    assert statuses == {"X": "PROVIDER_UNAVAILABLE", "Farcaster (Neynar)": "PROVIDER_OK"}
+    assert "rate limit" in (next(c for c in result.providers if c.provider == "X").error or "")
+    [m] = result.momentum
+    assert m.cross_platform.providers_checked == 1 and m.state != "UNAVAILABLE"
+    after = dump()
+    for t in tables:  # append-only: earlier rows are byte-for-byte unchanged
+        assert after[t][: len(before[t])] == before[t]
+    assert len(after["scout_social_events"]) == len(before["scout_social_events"])
+
+
+def test_x_overlap_and_near_duplicates(tmp_path: Path) -> None:
+    now = MovingNow()
+    now.at = FIXTURE_NOW
+    body = x_fixture()
+    del body["meta"]["next_token"]  # a complete page: the whole span is covered
+    provider = x_provider(lambda r: httpx2.Response(200, json=body), now=now)
+    svc = social(tmp_path, [provider], now)
+    [m] = run(svc.observe([DEGEN], universe=[DEGEN, OTHER])).momentum
+    h1 = next(w for w in m.windows if w.window == "h1")
+    # EXACT x3 + PROBABLE x2 (half weight); the bare-ticker post never counts
+    assert (h1.mentions, h1.exact_mentions, h1.unique_authors, h1.ambiguous_posts) == (4.0, 3, 5, 1)
+    assert h1.engagement == 20 + 0 + 7 + 1 + 48  # likes + replies + reposts + quotes
+    now.at += timedelta(minutes=10)
+    run(svc.observe([DEGEN], universe=[DEGEN, OTHER]))  # overlapping search, same posts
+    events = run(svc.store.events(DEGEN.canonical_id, FIXTURE_NOW - timedelta(days=1), now.at))
+    assert len(events) == 6  # 3 EXACT + 2 PROBABLE + 1 REJECTED, each stored once
+    near = social_quality_of(events)
+    assert near.posts == 5 and near.duplicate_share == 0.4  # posts 3 and 4: one text
+
+
+def social_quality_of(events: list[Any]) -> Any:
+    from upscale.services.scout.social.analysis import social_quality
+
+    return social_quality(events, None, None, None, SocialConfig(quality={"min_posts": 2}))
+
+
+def test_no_social_output_carries_a_trade_signal(tmp_path: Path) -> None:
+    now = Now()
+    run_ = run(
+        social(tmp_path, pair(now, growth_posts(RISING), growth_posts(RISING)), now).observe([NEWT])
+    )
+    body = run_.model_dump(mode="json")
+    body.pop("disclaimer")
+    for m in body["momentum"]:
+        m.pop("disclaimer")
+    dumped = json.dumps(body).upper()
+    assert "BUY" not in dumped and "SELL" not in dumped
+
+
+# --- Attribution hardening: ticker-only stays conservative ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("symbol", "name", "text", "level"),
+    [
+        ("NEWT", "Newt Protocol", "$NEWT is exploding", "AMBIGUOUS"),  # ticker only
+        ("NEWT", "Newt Protocol", "$NEWT on solana", "PROBABLE"),  # ticker + chain
+        ("NEWT", "Newt Protocol", "$NEWT (Newt Protocol)", "PROBABLE"),  # ticker + name
+        ("NEWT", "Newt Protocol", "Newt Protocol ships v2", "AMBIGUOUS"),  # name only
+        ("NEWT", "Newt Protocol", "Newt Protocol on solana", "PROBABLE"),  # name + chain
+        ("NEWT", "Newt Protocol", "$NEWT Newt Protocol on solana", "STRONG"),
+        ("AI", "Artifact Intel", "$AI on solana", "AMBIGUOUS"),  # short: chain isn't enough
+        ("AI", "Artifact Intel", "$AI Artifact Intel", "PROBABLE"),  # short + name
+        ("AI", "Artifact Intel", f"$AI {MINT}", "EXACT"),  # a contract always decides
+    ],
+)
+def test_ticker_only_evidence_stays_conservative(
+    symbol: str, name: str, text: str, level: str
+) -> None:
+    token = NEWT.model_copy(update={"symbol": symbol, "name": name})
+    # a directory that knows no competitor must not make a lone reference count
+    index = AttributionIndex([token], universe=[token, OTHER])
+    [a] = index.attribute(post(text))
+    assert a.level == level
+    assert (a.canonical_id is None) == (level == "AMBIGUOUS")

@@ -37,6 +37,7 @@ class RequestGate:
         self._cache: dict[str, tuple[float, Any]] = {}
         self._inflight: dict[str, asyncio.Task[Any]] = {}
         self.requests_made = 0  # outgoing requests actually started (for tests / metrics)
+        self.cache_hits = 0  # calls answered from the cache (for usage reporting)
 
     def reset(self) -> None:
         self._cache.clear()
@@ -44,11 +45,13 @@ class RequestGate:
         self._limiter = RateLimiter(self.limits.calls_per_minute, 60.0, self._clock)
         self._semaphore = asyncio.Semaphore(self.limits.max_concurrency)
         self.requests_made = 0
+        self.cache_hits = 0
 
     async def run(self, key: str, fetch: Callable[[], Awaitable[T]]) -> T:
         entry = self._cache.get(key)
         if entry is not None and entry[0] > self._clock():
             cached: T = entry[1]
+            self.cache_hits += 1
             return cached
         task = self._inflight.get(key)
         if task is None:

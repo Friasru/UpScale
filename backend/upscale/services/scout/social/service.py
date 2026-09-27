@@ -133,13 +133,50 @@ class SocialScoutService:
                     )  # fmt: skip
                 return
             start_run = getattr(provider, "start_run", None)
-            if callable(start_run):
+            daily = getattr(provider, "max_results_per_day", None)
+            if isinstance(daily, int):
+                used = await self.store.results_today(provider.name, started)
+                if used >= daily:  # stop cleanly: nothing searched, nothing reported as zero
+                    error = f"{provider.name} daily result budget ({daily}) was reached"
+                    checks.append(
+                        ProviderCheck(
+                            provider=provider.name,
+                            platform=provider.platform,
+                            status="PROVIDER_UNAVAILABLE",
+                            checked_at=started,
+                            error=error,
+                            requests=0,
+                            results=0,
+                        )
+                    )
+                    for t in tracked:
+                        statuses[(t.canonical_id, provider.name)] = ("PROVIDER_UNAVAILABLE", error)
+                        await self.store.record_check(
+                            t.canonical_id, provider.name, provider.platform, started,
+                            "PROVIDER_UNAVAILABLE", None, None, error,
+                        )  # fmt: skip
+                    return
+                if callable(start_run):
+                    start_run(daily - used)
+            elif callable(start_run):
                 start_run()
             since_by_token = {
                 t.canonical_id: await self._since(t.canonical_id, provider.name, started)
                 for t in tracked
             }
-            plans = plan_queries(provider, {t.canonical_id: index.terms_for(t) for t in tracked})
+            # A provider may shape its own terms from the token's references (e.g. to
+            # avoid paying for posts attribution could never count); otherwise the
+            # address and cashtag.
+            search_terms = getattr(provider, "search_terms", None)
+            plans = plan_queries(
+                provider,
+                {
+                    t.canonical_id: search_terms(index.references(t))
+                    if callable(search_terms)
+                    else index.terms_for(t)
+                    for t in tracked
+                },
+            )
             outcomes = await asyncio.gather(
                 *(
                     provider.search(terms, min(since_by_token[c] for c in ids), keyer)
@@ -192,6 +229,10 @@ class SocialScoutService:
                     max(r.complete_since for r, _ in results), found, None,
                 )  # fmt: skip
             ok = len(errors) < len(plans) or not plans
+            usage_of = getattr(provider, "usage", None)
+            usage = usage_of() if callable(usage_of) else {}
+            if usage:
+                await self.store.record_usage(provider.name, started, usage)
             checks.append(
                 ProviderCheck(
                     provider=provider.name,
@@ -199,6 +240,7 @@ class SocialScoutService:
                     status="PROVIDER_OK" if ok else "PROVIDER_UNAVAILABLE",
                     checked_at=self.now(),
                     error="; ".join(sorted(set(errors))) or None,
+                    **usage,
                 )
             )
 

@@ -213,6 +213,12 @@ class ProviderCheck(BaseModel):
     checked_at: datetime
     error: str | None = None
     requirement: str | None = None  # what access is missing, for NOT_CONFIGURED
+    # Usage in this run (providers that report it): requests sent, results (posts)
+    # consumed, calls answered from the cache, and the estimated cost when priced.
+    requests: int | None = None
+    results: int | None = None
+    cache_hits: int | None = None
+    estimated_cost_usd: float | None = None
 
 
 class SocialSourceSnapshot(BaseModel):

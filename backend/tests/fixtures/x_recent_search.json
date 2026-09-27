@@ -1,0 +1,214 @@
+{
+ "data": [
+  {
+   "author_id": "501",
+   "created_at": "2026-09-26T11:50:00.000Z",
+   "edit_history_tweet_ids": [
+    "1900000000000000001"
+   ],
+   "entities": {
+    "cashtags": [
+     {
+      "start": 0,
+      "end": 6,
+      "tag": "DEGEN"
+     }
+    ]
+   },
+   "id": "1900000000000000001",
+   "public_metrics": {
+    "retweet_count": 4,
+    "reply_count": 3,
+    "like_count": 12,
+    "quote_count": 1,
+    "bookmark_count": 0,
+    "impression_count": 900
+   },
+   "text": "$DEGEN on base, contract 0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed"
+  },
+  {
+   "author_id": "502",
+   "created_at": "2026-09-26T11:48:00.000Z",
+   "edit_history_tweet_ids": [
+    "1900000000000000002"
+   ],
+   "entities": {
+    "urls": [
+     {
+      "start": 0,
+      "end": 23,
+      "url": "https://t.co/redacted",
+      "expanded_url": "https://dexscreener.com/base/0x4ed4e862860bed51a9570b96d89af5e1b0efefed",
+      "display_url": "redacted",
+      "unwound_url": "https://dexscreener.com/base/0x4ed4e862860bed51a9570b96d89af5e1b0efefed"
+     }
+    ]
+   },
+   "id": "1900000000000000002",
+   "public_metrics": {
+    "retweet_count": 0,
+    "reply_count": 0,
+    "like_count": 2,
+    "quote_count": 0,
+    "bookmark_count": 0,
+    "impression_count": 120
+   },
+   "text": "chart is waking up https://t.co/redacted"
+  },
+  {
+   "author_id": "503",
+   "created_at": "2026-09-26T11:45:00.000Z",
+   "edit_history_tweet_ids": [
+    "1900000000000000003"
+   ],
+   "entities": {
+    "cashtags": [
+     {
+      "start": 0,
+      "end": 6,
+      "tag": "DEGEN"
+     }
+    ]
+   },
+   "id": "1900000000000000003",
+   "public_metrics": {
+    "retweet_count": 1,
+    "reply_count": 1,
+    "like_count": 5,
+    "quote_count": 0,
+    "bookmark_count": 0,
+    "impression_count": 300
+   },
+   "text": "$DEGEN on base looking strong this week, volume up"
+  },
+  {
+   "author_id": "504",
+   "created_at": "2026-09-26T11:44:00.000Z",
+   "edit_history_tweet_ids": [
+    "1900000000000000004"
+   ],
+   "entities": {
+    "cashtags": [
+     {
+      "start": 0,
+      "end": 6,
+      "tag": "DEGEN"
+     }
+    ]
+   },
+   "id": "1900000000000000004",
+   "public_metrics": {
+    "retweet_count": 0,
+    "reply_count": 0,
+    "like_count": 1,
+    "quote_count": 0,
+    "bookmark_count": 0,
+    "impression_count": 40
+   },
+   "text": "$DEGEN on base looking strong this week, volume up!"
+  },
+  {
+   "author_id": "505",
+   "created_at": "2026-09-26T11:40:00.000Z",
+   "edit_history_tweet_ids": [
+    "1900000000000000005"
+   ],
+   "entities": {
+    "cashtags": [
+     {
+      "start": 0,
+      "end": 6,
+      "tag": "DEGEN"
+     }
+    ]
+   },
+   "id": "1900000000000000005",
+   "public_metrics": {
+    "retweet_count": 0,
+    "reply_count": 0,
+    "like_count": 0,
+    "quote_count": 0,
+    "bookmark_count": 0,
+    "impression_count": 0
+   },
+   "text": "$DEGEN is pumping"
+  },
+  {
+   "author_id": "506",
+   "created_at": "2026-09-26T11:35:00.000Z",
+   "edit_history_tweet_ids": [
+    "1900000000000000006"
+   ],
+   "entities": {
+    "cashtags": [
+     {
+      "start": 0,
+      "end": 6,
+      "tag": "DEGEN"
+     }
+    ]
+   },
+   "id": "1900000000000000006",
+   "public_metrics": {
+    "retweet_count": 0,
+    "reply_count": 0,
+    "like_count": 0,
+    "quote_count": 0,
+    "bookmark_count": 0,
+    "impression_count": 0
+   },
+   "text": "$DEGEN 0x1111111111111111111111111111111111111111 new launch"
+  },
+  {
+   "author_id": "507",
+   "created_at": "2026-09-26T11:30:00.000Z",
+   "edit_history_tweet_ids": [
+    "1900000000000000007"
+   ],
+   "id": "1900000000000000007",
+   "note_tweet": {
+    "text": "Long thread on base tokens, part one of many notes about liquidity, holders and the contract 0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed which is the one to watch."
+   },
+   "public_metrics": {
+    "retweet_count": 6,
+    "reply_count": 8,
+    "like_count": 30,
+    "quote_count": 2,
+    "bookmark_count": 0,
+    "impression_count": 5000
+   },
+   "text": "Long thread on base tokens, part one of many notes about liquidity, holders and ..."
+  },
+  {
+   "created_at": "2026-09-26T11:20:00.000Z",
+   "edit_history_tweet_ids": [
+    "1900000000000000008"
+   ],
+   "entities": {
+    "cashtags": [
+     {
+      "start": 0,
+      "end": 6,
+      "tag": "DEGEN"
+     }
+    ]
+   },
+   "id": "1900000000000000008",
+   "public_metrics": {
+    "retweet_count": 0,
+    "reply_count": 0,
+    "like_count": 0,
+    "quote_count": 0,
+    "bookmark_count": 0,
+    "impression_count": 0
+   },
+   "text": "$DEGEN on base"
+  }
+ ],
+ "meta": {
+  "newest_id": "1900000000000000001",
+  "next_token": "redacted-token",
+  "oldest_id": "1900000000000000008",
+  "result_count": 8
+ }
+}

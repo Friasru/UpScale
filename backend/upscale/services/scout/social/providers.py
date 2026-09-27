@@ -33,6 +33,7 @@ import httpx2
 
 from upscale.services.market_data import MarketDataUnavailableError
 from upscale.services.scout.gate import RateLimitReachedError, RequestGate
+from upscale.services.scout.social.attribution import SearchReferences
 from upscale.services.scout.social.config import SocialProviderConfig
 from upscale.services.scout.social.models import SocialPost, SocialSearchResult
 from upscale.services.scout.social.text import urls_in
@@ -230,21 +231,72 @@ class _HttpSocialProvider:
         self.max_terms_per_query = settings.max_terms_per_query
         self.max_query_chars = settings.max_query_chars
         self.requests_this_run = 0
+        self.results_this_run = 0
+        self._reserved_results = 0
+        self._result_budget: int | None = settings.max_results_per_run
+        self._cache_hits_at_start = self.gate.cache_hits
+        self.max_results_per_day = settings.max_results_per_day
 
-    def start_run(self) -> None:
+    def start_run(self, result_budget: int | None = None) -> None:
+        """Reset per-run usage. `result_budget` further caps this run's results (e.g. what
+        is left of the daily budget)."""
         self.requests_this_run = 0
+        self.results_this_run = 0
+        self._reserved_results = 0
+        self._cache_hits_at_start = self.gate.cache_hits
+        caps = [c for c in (self.settings.max_results_per_run, result_budget) if c is not None]
+        self._result_budget = min(caps) if caps else None
+
+    def results_left(self) -> int | None:
+        if self._result_budget is None:
+            return None
+        return max(0, self._result_budget - self.results_this_run - self._reserved_results)
+
+    def usage(self) -> dict[str, Any]:
+        cost = self.settings.cost_per_result_usd
+        return {
+            "requests": self.requests_this_run,
+            "results": self.results_this_run,
+            "cache_hits": self.gate.cache_hits - self._cache_hits_at_start,
+            "estimated_cost_usd": round(self.results_this_run * cost, 4)
+            if cost is not None
+            else None,
+        }
 
     async def _get(
-        self, url: str, params: dict[str, str], headers: dict[str, str], cache_key: str
+        self,
+        url: str,
+        params: dict[str, str],
+        headers: dict[str, str],
+        cache_key: str,
+        *,
+        reserve_results: int = 0,
+        count_results: Callable[[Any], int] | None = None,
     ) -> Any:
+        """One GET through the gate. `reserve_results`: the most results this request can
+        consume, reserved before it is sent so concurrent searches can't overspend a
+        result budget; `count_results` counts what it actually consumed."""
+
         async def fetch() -> Any:
             budget = self.settings.max_requests_per_run
             if budget is not None and self.requests_this_run >= budget:
                 raise RateLimitReachedError(
                     f"UpScale's {self.name} request budget for this run ({budget}) was reached"
                 )
+            left = self.results_left()
+            if reserve_results and left is not None and left < reserve_results:
+                raise RateLimitReachedError(
+                    f"UpScale's {self.name} result budget for this run was reached"
+                )
             self.requests_this_run += 1
-            return await self._request("GET", url, params, headers)
+            self._reserved_results += reserve_results
+            try:
+                body = await self._request("GET", url, params, headers)
+            finally:
+                self._reserved_results -= reserve_results
+            if count_results is not None:
+                self.results_this_run += count_results(body)
+            return body
 
         return await self.gate.run(cache_key, fetch)
 
@@ -521,7 +573,13 @@ class NeynarFarcasterProvider(_HttpSocialProvider):
             }
             if cursor:
                 params["cursor"] = cursor
-            body = await self._get(self.api_url, params, headers, f"{query}|{page}")
+            body = await self._get(
+                self.api_url,
+                params,
+                headers,
+                f"{query}|{page}",
+                count_results=lambda b: len(_list(_obj(_obj(b).get("result")).get("casts"))),
+            )
             result = body.get("result") if isinstance(body, dict) else None
             casts = result.get("casts") if isinstance(result, dict) else None
             if not isinstance(casts, list):
@@ -568,6 +626,14 @@ class NeynarFarcasterProvider(_HttpSocialProvider):
         )
 
 
+def _x_phrase(text: str) -> str:
+    """A word or quoted phrase with no search operators in it."""
+    words = "".join(ch if ch.isalnum() else " " for ch in text).split()
+    if not words:
+        return ""
+    return words[0] if len(words) == 1 else '"' + " ".join(words) + '"'
+
+
 def _neynar_term(term: str) -> str:
     """One search term in Neynar's literal syntax: a cashtag or address stays bare (quoting
     a cashtag would drop its `$`); anything else is a quoted phrase without operators."""
@@ -588,9 +654,21 @@ def _unit(value: Any) -> float | None:
 
 
 class XRecentSearchProvider(_HttpSocialProvider):
-    """X API v2 recent search (`GET /2/tweets/search/recent`). X bills every post read, so
-    this provider is only configured with a bearer token **and** an explicit paid opt-in,
-    and stops at `max_reads_per_run` posts per run. Only post IDs and counts are kept."""
+    """X API v2 recent search (`GET /2/tweets/search/recent`, last 7 days).
+
+    X bills every post read ($0.005 on pay-per-use, 2026-09; the same post read again in
+    one UTC day is billed once) and every user object ($0.010). So this provider is only
+    configured with a bearer token **and** an explicit paid opt-in; results are capped
+    per run (`max_reads_per_run`) and per UTC day (enforced by the service), reserved
+    before each request; author usernames (a billed user expansion) are only requested
+    with `fetch_usernames`. A search that can't afford even one page raises instead of
+    reporting zero activity.
+
+    Live-validated query behavior: `$TICKER` matches the cashtag entity; contracts /
+    mints match as keywords; `OR` batching is exact. Each query still holds one token, so
+    a busy ticker can't crowd another token off a shared page. Long posts carry their
+    full text in `note_tweet`. Only post ids, counts and an opaque author key are kept.
+    """
 
     name = "X"
     platform = "x"
@@ -599,6 +677,7 @@ class XRecentSearchProvider(_HttpSocialProvider):
         "explicit opt-in (x_allow_paid in UPSCALE_SOCIAL_CONFIG): each post read is billed"
     )
     api_url = "https://api.x.com/2/tweets/search/recent"
+    min_page = 10  # X's smallest max_results
 
     def __init__(
         self,
@@ -609,23 +688,42 @@ class XRecentSearchProvider(_HttpSocialProvider):
         gate: RequestGate | None = None,
         transport: httpx2.AsyncBaseTransport | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        fetch_usernames: bool = False,
     ):
         super().__init__(settings, gate, transport, now)
         self._token = bearer_token
         self.allow_paid = allow_paid
         self.max_reads_per_run = max_reads_per_run
-        self.reads_this_run = 0
+        self.fetch_usernames = fetch_usernames
+        self.start_run()
 
     @property
     def configured(self) -> bool:
         return bool(self._token) and self.allow_paid and self.max_reads_per_run > 0
 
-    def start_run(self) -> None:
-        super().start_run()
-        self.reads_this_run = 0
+    @property
+    def reads_this_run(self) -> int:
+        return self.results_this_run
+
+    def start_run(self, result_budget: int | None = None) -> None:
+        caps = [c for c in (self.max_reads_per_run, result_budget) if c is not None]
+        super().start_run(min(caps) if caps else None)
 
     def render_query(self, terms: Sequence[str]) -> str:
         return "(" + " OR ".join(terms) + ") -is:retweet"
+
+    def search_terms(self, refs: SearchReferences) -> list[str]:
+        """The contract, and the cashtag only together with context attribution needs to
+        count it (a bare ticker is AMBIGUOUS, so reading those posts would be paying for
+        nothing): the token's name, or its chain unless the ticker is short."""
+        terms = [refs.address]
+        context = [_x_phrase(refs.name)] if refs.name else []
+        if not refs.short_symbol:
+            context += [_x_phrase(p) for p in refs.chain_phrases]
+        context = [c for c in context if c]
+        if refs.cashtag and context:
+            terms.append(f"({refs.cashtag} ({' OR '.join(context)}))")
+        return terms
 
     async def search(
         self, terms: Sequence[str], since: datetime, keyer: AuthorKeyer
@@ -639,29 +737,42 @@ class XRecentSearchProvider(_HttpSocialProvider):
         token: str | None = None
         truncated = False
         for page in range(self.settings.max_pages):
-            budget = self.max_reads_per_run - self.reads_this_run
-            if budget < 10:
+            left = self.results_left()
+            size = (
+                self.settings.max_results_per_page
+                if left is None
+                else min(self.settings.max_results_per_page, left)
+            )
+            if size < self.min_page:
+                if page == 0:  # nothing searched: never report this as zero activity
+                    raise RateLimitReachedError(
+                        f"UpScale's {self.name} read budget for this run was reached"
+                    )
                 truncated = True
                 break
             params = {
                 "query": query,
-                "max_results": str(min(self.settings.max_results_per_page, budget)),
-                "start_time": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "tweet.fields": "created_at,public_metrics,author_id,entities",
-                "expansions": "author_id",
-                "user.fields": "username",
+                "max_results": str(max(size, self.min_page)),
+                "start_time": start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "tweet.fields": "created_at,public_metrics,author_id,entities,note_tweet",
             }
+            if self.fetch_usernames:
+                params |= {"expansions": "author_id", "user.fields": "username"}
             if token:
                 params["next_token"] = token
             body = await self._get(
-                self.api_url, params, headers, f"{query}|{_minute(since)}|{page}"
+                self.api_url,
+                params,
+                headers,
+                f"{query}|{_minute(since)}|{page}|{size}",
+                reserve_results=size,
+                count_results=lambda b: len(_list(_obj(b).get("data"))),
             )
             if not isinstance(body, dict):
                 raise SocialProviderError("X returned an unexpected response")
             rows = body.get("data", [])
             if not isinstance(rows, list):
                 raise SocialProviderError("X returned an unexpected response")
-            self.reads_this_run += len(rows)
             includes = _obj(body.get("includes"))
             users = {
                 u["id"]: u.get("username")
@@ -671,7 +782,8 @@ class XRecentSearchProvider(_HttpSocialProvider):
             posts += [p for r in rows if (p := self._post(r, users, keyer)) is not None]
             meta = _obj(body.get("meta"))
             token = meta.get("next_token") if isinstance(meta.get("next_token"), str) else None
-            if not token:
+            if not token or not rows:
+                token = None
                 break
         else:
             truncated = token is not None
@@ -685,27 +797,30 @@ class XRecentSearchProvider(_HttpSocialProvider):
         if created is None or not isinstance(author, str):
             return None
         metrics = _obj(row.get("public_metrics"))
-        entities = _obj(row.get("entities"))
-        urls = [
-            u.get("expanded_url")
-            for u in _list(entities.get("urls"))
-            if isinstance(u, dict) and isinstance(u.get("expanded_url"), str)
-        ]
+        note = _obj(row.get("note_tweet"))  # long posts: `text` is cut, the note is whole
+        text = note.get("text") if isinstance(note.get("text"), str) else row.get("text")
+        urls: list[str] = []
+        for entities in (_obj(row.get("entities")), _obj(note.get("entities"))):
+            for u in _list(entities.get("urls")):
+                link = _obj(u).get("unwound_url") or _obj(u).get("expanded_url")
+                if isinstance(link, str) and link not in urls:
+                    urls.append(link)
         handle = users.get(author)
         return SocialPost(
             provider=self.name,
             platform=self.platform,
             post_id=row["id"],
             created_at=created,
-            text=str(row.get("text") or ""),
+            text=str(text or ""),
             author_key=keyer(self.platform, author),
             author_handle=handle.lower() if isinstance(handle, str) else None,
-            urls=[u for u in urls if isinstance(u, str)],
+            urls=urls,
             likes=_int(metrics.get("like_count")),
             replies=_int(metrics.get("reply_count")),
             reposts=_int(metrics.get("retweet_count")),
             quotes=_int(metrics.get("quote_count")),
             views=_int(metrics.get("impression_count")),
+            source_url=f"https://x.com/i/web/status/{row['id']}" if row["id"].isdigit() else None,
         )
 
 

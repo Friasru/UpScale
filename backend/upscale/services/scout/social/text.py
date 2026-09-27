@@ -54,6 +54,13 @@ def is_cashtag_symbol(symbol: str) -> bool:
     return _CASHTAG.fullmatch(f"${symbol}") is not None
 
 
+def chain_phrases(chain: str) -> list[str]:
+    """Every word / phrase `mentioned_chains` recognizes as naming `chain`."""
+    phrases = {p for p, c in CHAIN_MENTIONS.items() if c == chain}
+    phrases |= {w for w, c in _CHAIN_WORDS.items() if c == chain}
+    return sorted(phrases)
+
+
 def mentioned_chains(text: str) -> set[str]:
     lowered = text.lower()
     chains = {chain for phrase, chain in CHAIN_MENTIONS.items() if phrase in lowered}

@@ -14,6 +14,8 @@ tables). Everything is append-only: history is never rewritten.
 * ``scout_social_snapshots``: per token, provider and run, the windows and trends computed
   at that moment.
 * ``scout_social_momentum``: per token and run, the momentum state and its evidence.
+* ``scout_social_usage``: per provider and run, requests sent, results consumed, cache
+  hits and estimated cost (what enforces a provider's daily result budget).
 * ``scout_meta``: the local salt for author keys (never leaves this file).
 
 Events older than the retention period are deleted by `prune` (no long-term author
@@ -98,6 +100,17 @@ CREATE TABLE IF NOT EXISTS scout_social_momentum (
 );
 CREATE INDEX IF NOT EXISTS scout_social_momentum_by_token
     ON scout_social_momentum (canonical_id, computed_at);
+CREATE TABLE IF NOT EXISTS scout_social_usage (
+    id INTEGER PRIMARY KEY,
+    provider TEXT NOT NULL,
+    run_at REAL NOT NULL,
+    day TEXT NOT NULL,
+    requests INTEGER NOT NULL,
+    results INTEGER NOT NULL,
+    cache_hits INTEGER NOT NULL,
+    estimated_cost_usd REAL
+);
+CREATE INDEX IF NOT EXISTS scout_social_usage_by_day ON scout_social_usage (provider, day);
 """
 
 
@@ -194,6 +207,13 @@ class SocialStore:
 
     async def prune(self, older_than: datetime) -> int:
         return await asyncio.to_thread(self._prune, older_than)
+
+    async def record_usage(self, provider: str, run_at: datetime, usage: dict[str, Any]) -> None:
+        await asyncio.to_thread(self._record_usage, provider, run_at, usage)
+
+    async def results_today(self, provider: str, at: datetime) -> int:
+        """Results consumed by `provider` on `at`'s UTC day."""
+        return await asyncio.to_thread(self._results_today, provider, at)
 
     # --- SQL ------------------------------------------------------------------------------
 
@@ -424,6 +444,39 @@ class SocialStore:
             )
         return [SocialMomentum.model_validate_json(r[0]) for r in rows]
 
+    def _record_usage(self, provider: str, run_at: datetime, usage: dict[str, Any]) -> None:
+        with self._lock:
+            db = self._db()
+            with db:
+                db.execute(
+                    """
+                    INSERT INTO scout_social_usage (provider, run_at, day, requests, results,
+                        cache_hits, estimated_cost_usd)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        provider,
+                        run_at.timestamp(),
+                        _utc_day(run_at),
+                        usage.get("requests") or 0,
+                        usage.get("results") or 0,
+                        usage.get("cache_hits") or 0,
+                        usage.get("estimated_cost_usd"),
+                    ),
+                )
+
+    def _results_today(self, provider: str, at: datetime) -> int:
+        with self._lock:
+            row = (
+                self._db()
+                .execute(
+                    "SELECT SUM(results) FROM scout_social_usage WHERE provider = ? AND day = ?",
+                    (provider, _utc_day(at)),
+                )
+                .fetchone()
+            )
+        return int(row[0] or 0)
+
     def _prune(self, older_than: datetime) -> int:
         with self._lock:
             db = self._db()
@@ -441,6 +494,10 @@ _EVENT_COLUMNS = (
     "attribution_reason, candidates_json, fingerprint, simhash, has_contract, promoted, source_url, "
     "author_quality"
 )
+
+
+def _utc_day(at: datetime) -> str:
+    return at.astimezone(UTC).strftime("%Y-%m-%d")
 
 
 def _dt(value: float) -> datetime:

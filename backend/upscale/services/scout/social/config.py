@@ -18,6 +18,9 @@ class AttributionConfig(BaseModel):
     probable_weight: float = Field(default=0.5, ge=0, le=1)
     # A name shorter than this is too generic to be matched as a phrase.
     min_name_length: int = Field(default=4, ge=2)
+    # A ticker this short (e.g. $AI, $GO) is common: a chain mention alone doesn't pin it
+    # down; it also needs the token's name (or a contract / official identity).
+    short_symbol_max_length: int = Field(default=3, ge=0)
 
 
 class MomentumConfig(BaseModel):
@@ -102,6 +105,13 @@ class SocialProviderConfig(BaseModel):
     # Outgoing requests one provider may make in one run (None: only the rate limit).
     # Requests past it fail fast and the affected tokens are reported unavailable.
     max_requests_per_run: int | None = Field(default=None, ge=1)
+    # Results (posts) one provider may consume per run and per UTC day, for providers
+    # that bill per result (None: unlimited). Past them, searches stop cleanly and the
+    # affected tokens are reported unavailable, never as zero activity.
+    max_results_per_run: int | None = Field(default=None, ge=1)
+    max_results_per_day: int | None = Field(default=None, ge=1)
+    # Price of one consumed result, only to report an estimated cost (None: free / unknown).
+    cost_per_result_usd: float | None = Field(default=None, ge=0)
 
 
 class SocialConfig(BaseModel):
@@ -127,9 +137,16 @@ class SocialConfig(BaseModel):
         max_terms_per_query=1,
         max_requests_per_run=60,
     )
+    # X bills every post read ($0.005, pay-per-use, 2026-09) and every user object
+    # ($0.010). One token per query (a busy ticker would crowd a shared page out), a daily
+    # read cap, and no user expansion unless x_fetch_usernames.
     x: SocialProviderConfig = SocialProviderConfig(
         limits=ScoutProviderLimits(calls_per_minute=10, cache_ttl_seconds=120),
         max_query_chars=512,
+        max_terms_per_query=2,
+        max_requests_per_run=40,
+        max_results_per_day=2000,
+        cost_per_result_usd=0.005,
     )
     discourse: SocialProviderConfig = SocialProviderConfig(
         limits=ScoutProviderLimits(calls_per_minute=20, max_concurrency=2, cache_ttl_seconds=120),
@@ -138,7 +155,10 @@ class SocialConfig(BaseModel):
     )
     # X is paid per post read: never searched unless explicitly allowed, and capped.
     x_allow_paid: bool = False
-    x_max_reads_per_run: int = Field(default=500, ge=0)
+    x_max_reads_per_run: int = Field(default=200, ge=0)
+    # Author usernames (only used to recognize official project accounts) cost an extra
+    # billed user read per author on X.
+    x_fetch_usernames: bool = False
 
     @model_validator(mode="after")
     def _span_covers_windows(self) -> "SocialConfig":

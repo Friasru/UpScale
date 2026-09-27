@@ -123,6 +123,10 @@ class ScoutSnapshotStore:
         """(chain, address) of tokens seen since `seen_since`, most recent first."""
         return await asyncio.to_thread(self._tracked, seen_since)
 
+    async def tokens(self) -> list[tuple[str, str, str, str | None, str | None]]:
+        """(canonical id, chain, address, symbol, name) of every token ever seen."""
+        return await asyncio.to_thread(self._tokens)
+
     async def prune(self, older_than: datetime) -> int:
         """Delete snapshots older than `older_than`; returns how many were deleted."""
         return await asyncio.to_thread(self._prune, older_than)
@@ -300,6 +304,15 @@ class ScoutSnapshotStore:
                 .fetchall()
             )
         return [(r[0], r[1]) for r in rows]
+
+    def _tokens(self) -> list[tuple[str, str, str, str | None, str | None]]:
+        with self._lock:
+            rows = (
+                self._db()
+                .execute("SELECT canonical_id, chain, address, symbol, name FROM scout_tokens")
+                .fetchall()
+            )
+        return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
     def _prune(self, older_than: datetime) -> int:
         with self._lock:

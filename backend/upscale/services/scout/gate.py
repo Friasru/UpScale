@@ -18,6 +18,10 @@ from upscale.services.scout.config import ScoutProviderLimits
 T = TypeVar("T")
 
 
+class RateLimitReachedError(MarketDataUnavailableError):
+    """UpScale's own budget for a provider (or the provider's limit) was reached."""
+
+
 class RequestGate:
     def __init__(
         self,
@@ -49,7 +53,7 @@ class RequestGate:
         task = self._inflight.get(key)
         if task is None:
             if not self._limiter.try_acquire():
-                raise MarketDataUnavailableError(
+                raise RateLimitReachedError(
                     f"UpScale's {self.name} request limit was reached; try again in a minute"
                 )
             task = asyncio.ensure_future(self._fetch(key, fetch))

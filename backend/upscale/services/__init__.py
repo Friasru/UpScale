@@ -8,10 +8,17 @@ from upscale.config import (
     NEWS_DISABLED_FEEDS,
     NEWS_FEEDS,
     NEWS_MODEL,
+    NEYNAR_API_KEY,
+    REDDIT_CLIENT_ID,
+    REDDIT_CLIENT_SECRET,
+    REDDIT_USER_AGENT,
     SCOUT_CONFIG,
     SCOUT_DB_PATH,
+    SOCIAL_CONFIG,
+    SOCIAL_FORUMS,
     SOLANA_RPC_URL,
     VISION_MODEL,
+    X_BEARER_TOKEN,
 )
 from upscale.services.asset_profile import set_capability_enabled
 from upscale.services.asset_resolver import AssetResolver
@@ -31,6 +38,15 @@ from upscale.services.scout import (
     ScoutService,
     ScoutSnapshotStore,
     load_scout_config,
+)
+from upscale.services.scout.social import (
+    DiscourseForumProvider,
+    NeynarFarcasterProvider,
+    RedditProvider,
+    SocialScoutService,
+    SocialStore,
+    XRecentSearchProvider,
+    load_social_config,
 )
 from upscale.services.solana_chain import (
     HeliusProvider,
@@ -99,4 +115,29 @@ scout_service = ScoutService(
     ],
     ScoutSnapshotStore(SCOUT_DB_PATH),
     scout_config,
+)
+
+# Scout social / attention evidence (not wired into chat or UI yet; never a trade signal).
+# Providers without credentials report "not configured"; the store opens on first use.
+social_config = load_social_config(SOCIAL_CONFIG)
+social_scout_service = SocialScoutService(
+    [
+        RedditProvider(
+            REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT, social_config.reddit
+        ),
+        NeynarFarcasterProvider(NEYNAR_API_KEY, social_config.farcaster),
+        XRecentSearchProvider(
+            X_BEARER_TOKEN,
+            social_config.x_allow_paid,
+            social_config.x_max_reads_per_run,
+            social_config.x,
+        ),
+        *(
+            DiscourseForumProvider(url.strip(), social_config.discourse)
+            for url in (SOCIAL_FORUMS or "").split(",")
+            if url.strip()
+        ),
+    ],
+    SocialStore(SCOUT_DB_PATH),
+    social_config,
 )

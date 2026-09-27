@@ -55,3 +55,18 @@ SCOUT_DB_PATH = os.getenv("UPSCALE_SCOUT_DB") or str(Path.home() / ".upscale" / 
 # Optional JSON overriding Scout's validated thresholds, e.g.
 # UPSCALE_SCOUT_CONFIG='{"chains": ["solana", "base"], "filters": {"min_liquidity_usd": 5000}}'
 SCOUT_CONFIG = os.getenv("UPSCALE_SCOUT_CONFIG") or None
+
+# Scout social / attention evidence (never a trade signal). Every provider is optional;
+# without credentials it is reported as "not configured" and Scout keeps working.
+# Reddit: an API application approved under Reddit's Responsible Builder Policy.
+REDDIT_CLIENT_ID = os.getenv("UPSCALE_REDDIT_CLIENT_ID") or None
+REDDIT_CLIENT_SECRET = os.getenv("UPSCALE_REDDIT_CLIENT_SECRET") or None
+REDDIT_USER_AGENT = os.getenv("UPSCALE_REDDIT_USER_AGENT") or None
+# Farcaster cast search through Neynar (credit-based plans).
+NEYNAR_API_KEY = os.getenv("UPSCALE_NEYNAR_API_KEY") or None
+# X recent search is billed per post read: also needs "x_allow_paid": true in the config.
+X_BEARER_TOKEN = os.getenv("UPSCALE_X_BEARER_TOKEN") or None
+# Comma-separated public Discourse forum URLs whose terms allow automated public reads.
+SOCIAL_FORUMS = os.getenv("UPSCALE_SOCIAL_FORUMS") or None
+# Optional JSON overriding social thresholds, e.g. '{"momentum": {"min_mentions": 5}}'.
+SOCIAL_CONFIG = os.getenv("UPSCALE_SOCIAL_CONFIG") or None

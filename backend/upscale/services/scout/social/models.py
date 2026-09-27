@@ -90,6 +90,9 @@ class SocialPost(BaseModel):
     views: int | None = None
     promoted: bool | None = None  # None: the provider doesn't say
     source_url: str | None = None  # only when the provider's terms allow keeping it
+    # The provider's own 0..1 account-quality score for the author (e.g. Neynar's user
+    # score), when it gives one. Supporting evidence only: never trusted as truth.
+    author_quality: float | None = None
 
     @property
     def engagement(self) -> int | None:
@@ -143,6 +146,7 @@ class SocialEvent(BaseModel):
     has_contract: bool
     promoted: bool | None = None
     source_url: str | None = None
+    author_quality: float | None = None  # provider's author score (see SocialPost)
 
 
 # --- Windows, snapshots, momentum -----------------------------------------------------------
@@ -195,6 +199,11 @@ class SocialQuality(BaseModel):
     repeated_contract_share: float | None = None
     promoted_share: float | None = None
     conflicting_contracts: int = 0
+    # Provider-supplied author scores (e.g. Neynar), reported beside UpScale's own
+    # heuristics above and never used by them: supporting evidence, not truth.
+    provider_scored_posts: int = 0
+    provider_median_author_quality: float | None = None
+    provider_low_quality_share: float | None = None
 
 
 class ProviderCheck(BaseModel):

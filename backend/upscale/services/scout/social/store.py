@@ -8,7 +8,9 @@ tables). Everything is append-only: history is never rewritten.
 * ``scout_social_events``: one row per (provider, post, token) mention, including
   AMBIGUOUS mentions (with an empty token id and their candidates) and REJECTED ones. A
   post seen again is ignored (``INSERT OR IGNORE``): first-observed values are kept.
-  No post text and no author handle is stored; authors are salted opaque keys.
+  No post text and no author handle is stored; authors are salted opaque keys. A
+  provider's own author score (e.g. Neynar's), when given, is kept per mention as
+  supporting evidence.
 * ``scout_social_snapshots``: per token, provider and run, the windows and trends computed
   at that moment.
 * ``scout_social_momentum``: per token and run, the momentum state and its evidence.
@@ -35,7 +37,7 @@ from upscale.services.scout.social.models import (
     SocialSourceSnapshot,
 )
 
-SOCIAL_SCHEMA_VERSION = "1"
+SOCIAL_SCHEMA_VERSION = "2"
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS scout_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scout_social_checks (
@@ -72,6 +74,7 @@ CREATE TABLE IF NOT EXISTS scout_social_events (
     has_contract INTEGER NOT NULL,
     promoted INTEGER,
     source_url TEXT,
+    author_quality REAL,
     UNIQUE (provider, content_id, canonical_id, token_reference)
 );
 CREATE INDEX IF NOT EXISTS scout_social_events_by_token
@@ -205,7 +208,14 @@ class SocialStore:
             row = conn.execute(
                 "SELECT value FROM scout_meta WHERE key = 'social_schema_version'"
             ).fetchone()
-            if row and row[0] != SOCIAL_SCHEMA_VERSION:
+            if row and row[0] == "1":
+                with conn:  # v1 -> v2: provider author score per mention
+                    conn.execute("ALTER TABLE scout_social_events ADD COLUMN author_quality REAL")
+                    conn.execute(
+                        "UPDATE scout_meta SET value = ? WHERE key = 'social_schema_version'",
+                        (SOCIAL_SCHEMA_VERSION,),
+                    )
+            elif row and row[0] != SOCIAL_SCHEMA_VERSION:
                 conn.close()
                 raise RuntimeError(f"unsupported social schema version {row[0]}")
             with conn:
@@ -288,6 +298,7 @@ class SocialStore:
                 int(e.has_contract),
                 None if e.promoted is None else int(e.promoted),
                 e.source_url,
+                e.author_quality,
             )
             for e in events
         ]
@@ -301,8 +312,8 @@ class SocialStore:
                         platform, content_id, posted_at, fetched_at, author_key,
                         token_reference, likes, replies, reposts, quotes, views, engagement,
                         attribution_level, attribution_reason, candidates_json, fingerprint,
-                        simhash, has_contract, promoted, source_url)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        simhash, has_contract, promoted, source_url, author_quality)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
@@ -427,7 +438,8 @@ class SocialStore:
 _EVENT_COLUMNS = (
     "canonical_id, provider, platform, content_id, posted_at, fetched_at, author_key, "
     "token_reference, likes, replies, reposts, quotes, views, engagement, attribution_level, "
-    "attribution_reason, candidates_json, fingerprint, simhash, has_contract, promoted, source_url"
+    "attribution_reason, candidates_json, fingerprint, simhash, has_contract, promoted, source_url, "
+    "author_quality"
 )
 
 
@@ -463,4 +475,5 @@ def _event(r: Sequence[Any]) -> SocialEvent:
         has_contract=bool(r[19]),
         promoted=None if r[20] is None else bool(r[20]),
         source_url=r[21],
+        author_quality=r[22],
     )

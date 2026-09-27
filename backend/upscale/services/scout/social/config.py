@@ -68,6 +68,9 @@ class QualityConfig(BaseModel):
     organic_medium_authors: int = Field(default=5, ge=1)
     organic_high_authors: int = Field(default=20, ge=1)
     organic_high_authors_per_mention: float = Field(default=0.6, gt=0, le=1)
+    # Provider author scores below this count as "low quality" in the separate provider
+    # evidence (0.55 is Neynar's suggested starting point). Never affects spam_risk.
+    provider_low_quality_below: float = Field(default=0.55, ge=0, le=1)
 
 
 class CrossPlatformConfig(BaseModel):
@@ -96,6 +99,9 @@ class SocialProviderConfig(BaseModel):
     # Characters allowed in one search query (terms are batched up to this).
     max_query_chars: int = Field(default=500, ge=50)
     max_terms_per_query: int = Field(default=10, ge=1)
+    # Outgoing requests one provider may make in one run (None: only the rate limit).
+    # Requests past it fail fast and the affected tokens are reported unavailable.
+    max_requests_per_run: int | None = Field(default=None, ge=1)
 
 
 class SocialConfig(BaseModel):
@@ -114,8 +120,12 @@ class SocialConfig(BaseModel):
     reddit: SocialProviderConfig = SocialProviderConfig(
         limits=ScoutProviderLimits(calls_per_minute=60, cache_ttl_seconds=60)
     )
+    # Neynar: one term per query (see NeynarFarcasterProvider); contract searches can take
+    # several seconds; each request consumes Neynar credits, so runs are capped.
     farcaster: SocialProviderConfig = SocialProviderConfig(
-        limits=ScoutProviderLimits(calls_per_minute=30, cache_ttl_seconds=60)
+        limits=ScoutProviderLimits(calls_per_minute=30, cache_ttl_seconds=60, timeout_seconds=15),
+        max_terms_per_query=1,
+        max_requests_per_run=60,
     )
     x: SocialProviderConfig = SocialProviderConfig(
         limits=ScoutProviderLimits(calls_per_minute=10, cache_ttl_seconds=120),

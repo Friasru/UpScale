@@ -147,16 +147,18 @@ class SocialScoutService:
                 ),
                 return_exceptions=True,
             )
+            # A token's terms may be split over several queries: its outcome is only
+            # judged once all of them are in. Any failed query makes the token
+            # unavailable (a partial search never counts as a real zero); coverage is
+            # the span every query covered.
             errors: list[str] = []
+            failed: dict[str, list[str]] = {}
+            done: dict[str, list[tuple[SocialSearchResult, set[str]]]] = {}
             for (ids, _), outcome in zip(plans, outcomes, strict=True):
                 if isinstance(outcome, MarketDataError):
                     errors.append(str(outcome))
                     for cid in ids:
-                        statuses[(cid, provider.name)] = ("PROVIDER_UNAVAILABLE", str(outcome))
-                        await self.store.record_check(
-                            cid, provider.name, provider.platform, started,
-                            "PROVIDER_UNAVAILABLE", None, None, str(outcome),
-                        )  # fmt: skip
+                        failed.setdefault(cid, []).append(str(outcome))
                     continue
                 if isinstance(outcome, BaseException):
                     raise outcome  # a bug, never hidden
@@ -165,18 +167,30 @@ class SocialScoutService:
                 counts["rejected"] += sum(e.attribution_level == "REJECTED" for e in events)
                 await self.store.add_events(events)
                 for cid in ids:
-                    matched = sum(
-                        e.canonical_id == cid and e.attribution_level in COUNTED_LEVELS
+                    matched = {
+                        e.content_id
                         for e in events
-                    )
-                    status: ProviderStatus = (
-                        "PROVIDER_OK" if matched else "PROVIDER_CHECKED_ZERO_MATCHES"
-                    )
-                    statuses[(cid, provider.name)] = (status, None)
+                        if e.canonical_id == cid and e.attribution_level in COUNTED_LEVELS
+                    }
+                    done.setdefault(cid, []).append((outcome, matched))
+            for cid in dict.fromkeys(c for ids, _ in plans for c in ids):
+                if cid in failed:
+                    error = "; ".join(sorted(set(failed[cid])))
+                    statuses[(cid, provider.name)] = ("PROVIDER_UNAVAILABLE", error)
                     await self.store.record_check(
-                        cid, provider.name, provider.platform, outcome.checked_at, status,
-                        outcome.complete_since, matched, None,
+                        cid, provider.name, provider.platform, started,
+                        "PROVIDER_UNAVAILABLE", None, None, error,
                     )  # fmt: skip
+                    continue
+                results = done[cid]
+                found = len(set().union(*(m for _, m in results)))
+                status: ProviderStatus = "PROVIDER_OK" if found else "PROVIDER_CHECKED_ZERO_MATCHES"
+                statuses[(cid, provider.name)] = (status, None)
+                await self.store.record_check(
+                    cid, provider.name, provider.platform,
+                    min(r.checked_at for r, _ in results), status,
+                    max(r.complete_since for r, _ in results), found, None,
+                )  # fmt: skip
             ok = len(errors) < len(plans) or not plans
             checks.append(
                 ProviderCheck(
@@ -193,7 +207,11 @@ class SocialScoutService:
         momentum = await asyncio.gather(
             *(
                 self._momentum(
-                    t.canonical_id, statuses, configured, (market or {}).get(t.canonical_id)
+                    t.canonical_id,
+                    statuses,
+                    configured,
+                    (market or {}).get(t.canonical_id),
+                    started,
                 )
                 for t in tracked
             )
@@ -229,9 +247,11 @@ class SocialScoutService:
         statuses: Mapping[tuple[str, str], tuple[ProviderStatus, str | None]],
         configured: int,
         features: ScoutGrowthFeatures | None,
+        now: datetime,
     ) -> SocialMomentum:
+        """Momentum as of `now`, the run's start: every search of this run began after it,
+        so its windows are fully covered (a later clock reading would never be)."""
         cfg = self.config
-        now = self.now()
         longest = max(WINDOW_MINUTES[w] for w in cfg.momentum.windows)
         span_start = now - timedelta(minutes=longest * (2 + cfg.momentum.baseline_periods))
         events = await self.store.events(cid, span_start, now)
@@ -357,4 +377,5 @@ def _event(post: SocialPost, fetched_at: datetime, attribution: Attribution) -> 
         has_contract=attribution.level == "EXACT",
         promoted=post.promoted,
         source_url=post.source_url,
+        author_quality=post.author_quality,
     )

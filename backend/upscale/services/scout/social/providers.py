@@ -204,6 +204,7 @@ def _static_post(
         reposts=p.get("reposts"),
         quotes=p.get("quotes"),
         promoted=p.get("promoted"),
+        author_quality=p.get("author_quality"),
     )
 
 
@@ -228,11 +229,24 @@ class _HttpSocialProvider:
         self.now = now
         self.max_terms_per_query = settings.max_terms_per_query
         self.max_query_chars = settings.max_query_chars
+        self.requests_this_run = 0
+
+    def start_run(self) -> None:
+        self.requests_this_run = 0
 
     async def _get(
         self, url: str, params: dict[str, str], headers: dict[str, str], cache_key: str
     ) -> Any:
-        return await self.gate.run(cache_key, lambda: self._request("GET", url, params, headers))
+        async def fetch() -> Any:
+            budget = self.settings.max_requests_per_run
+            if budget is not None and self.requests_this_run >= budget:
+                raise RateLimitReachedError(
+                    f"UpScale's {self.name} request budget for this run ({budget}) was reached"
+                )
+            self.requests_this_run += 1
+            return await self._request("GET", url, params, headers)
+
+        return await self.gate.run(cache_key, fetch)
 
     async def _request(
         self,
@@ -255,6 +269,8 @@ class _HttpSocialProvider:
             raise SocialProviderError(f"could not reach {self.name}") from exc
         if response.status_code == 429:
             raise RateLimitReachedError(f"{self.name} rate limit reached")
+        if response.status_code == 402:
+            raise SocialProviderError(f"{self.name} credits are exhausted (HTTP 402)")
         if response.status_code in (401, 403):
             raise SocialProviderError(
                 f"{self.name} refused the credentials (HTTP {response.status_code})"
@@ -445,7 +461,21 @@ class RedditProvider(_HttpSocialProvider):
 
 
 class NeynarFarcasterProvider(_HttpSocialProvider):
-    """Farcaster cast search through Neynar (`GET /v2/farcaster/cast/search/`)."""
+    """Farcaster cast search through Neynar (`GET /v2/farcaster/cast/search/`).
+
+    Live-validated query behavior (literal mode):
+
+    * A bare cashtag (`$DEGEN`) matches the cashtag only. Quoting it, or combining it with
+      `|` / parentheses, drops the `$` and matches the plain word (most hits then aren't
+      cashtags), and one busy term fills the page so the others go missing. So every
+      query holds exactly **one** term, unquoted.
+    * `after:YYYY-MM-DDTHH:MM:SS` (UTC, no `Z`: a `Z` is rejected with HTTP 400) bounds
+      the search server-side, so incremental searches only fetch what's new.
+
+    The author's fid is only turned into an opaque key; the username is held in memory to
+    recognize official accounts; `author.score` (Neynar's 0..1 user score) is kept as
+    supporting evidence. No profile data is stored.
+    """
 
     name = "Farcaster (Neynar)"
     platform = "farcaster"
@@ -462,20 +492,22 @@ class NeynarFarcasterProvider(_HttpSocialProvider):
     ):
         super().__init__(settings, gate, transport, now)
         self._api_key = api_key
+        self.max_terms_per_query = 1  # batching loses mentions (see the class docstring)
 
     @property
     def configured(self) -> bool:
         return bool(self._api_key)
 
     def render_query(self, terms: Sequence[str]) -> str:
-        return " | ".join(f'"{t}"' for t in terms)
+        return " | ".join(_neynar_term(t) for t in terms)
 
     async def search(
         self, terms: Sequence[str], since: datetime, keyer: AuthorKeyer
     ) -> SocialSearchResult:
         if not self.configured:
             raise SocialProviderError(f"{self.name} is not configured")
-        query = self.render_query(terms)
+        after = since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S")
+        query = f"{self.render_query(terms)} after:{after}"
         headers = {"x-api-key": self._api_key or "", "accept": "application/json"}
         posts: list[SocialPost] = []
         cursor: str | None = None
@@ -483,14 +515,13 @@ class NeynarFarcasterProvider(_HttpSocialProvider):
         for page in range(self.settings.max_pages):
             params = {
                 "q": query,
+                "mode": "literal",
                 "sort_type": "desc_chron",
                 "limit": str(self.settings.max_results_per_page),
             }
             if cursor:
                 params["cursor"] = cursor
-            body = await self._get(
-                self.api_url, params, headers, f"{query}|{_minute(since)}|{page}"
-            )
+            body = await self._get(self.api_url, params, headers, f"{query}|{page}")
             result = body.get("result") if isinstance(body, dict) else None
             casts = result.get("casts") if isinstance(result, dict) else None
             if not isinstance(casts, list):
@@ -499,7 +530,7 @@ class NeynarFarcasterProvider(_HttpSocialProvider):
             nxt = result.get("next") if isinstance(result, dict) else None
             cursor = nxt.get("cursor") if isinstance(nxt, dict) else None
             oldest = min((p.created_at for p in posts), default=None)
-            if not cursor or (oldest is not None and oldest <= since):
+            if not cursor or not casts or (oldest is not None and oldest <= since):
                 break
         else:
             truncated = cursor is not None
@@ -511,13 +542,16 @@ class NeynarFarcasterProvider(_HttpSocialProvider):
         author = _obj(cast.get("author"))
         fid = author.get("fid")
         created = _time(cast.get("timestamp"))
-        if created is None or not isinstance(fid, int):
+        if created is None or not isinstance(fid, int) or isinstance(fid, bool):
             return None
         reactions = _obj(cast.get("reactions"))
         replies = _obj(cast.get("replies"))
         embeds = _list(cast.get("embeds"))
         urls = [e["url"] for e in embeds if isinstance(e, dict) and isinstance(e.get("url"), str)]
         username = author.get("username")
+        score = author.get("score")
+        if score is None:
+            score = _obj(author.get("experimental")).get("neynar_user_score")
         return SocialPost(
             provider=self.name,
             platform=self.platform,
@@ -530,7 +564,24 @@ class NeynarFarcasterProvider(_HttpSocialProvider):
             likes=_int(reactions.get("likes_count")),
             reposts=_int(reactions.get("recasts_count")),
             replies=_int(replies.get("count")),
+            author_quality=_unit(score),
         )
+
+
+def _neynar_term(term: str) -> str:
+    """One search term in Neynar's literal syntax: a cashtag or address stays bare (quoting
+    a cashtag would drop its `$`); anything else is a quoted phrase without operators."""
+    bare = term[1:] if term.startswith("$") else term
+    if bare.isascii() and bare.isalnum():
+        return term
+    words = "".join(ch if ch.isalnum() else " " for ch in term).split()
+    return '"' + " ".join(words) + '"'
+
+
+def _unit(value: Any) -> float | None:
+    if isinstance(value, int | float) and not isinstance(value, bool) and 0 <= value <= 1:
+        return round(float(value), 3)
+    return None
 
 
 # --- X --------------------------------------------------------------------------------------
@@ -570,6 +621,7 @@ class XRecentSearchProvider(_HttpSocialProvider):
         return bool(self._token) and self.allow_paid and self.max_reads_per_run > 0
 
     def start_run(self) -> None:
+        super().start_run()
         self.reads_this_run = 0
 
     def render_query(self, terms: Sequence[str]) -> str:

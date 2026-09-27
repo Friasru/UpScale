@@ -1,0 +1,1120 @@
+{
+ "result": {
+  "casts": [
+   {
+    "object": "cast",
+    "hash": "0x0000000000000000000000000000000000000001",
+    "author": {
+     "object": "user",
+     "fid": 101,
+     "username": "user101",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted",
+     "registered_at": "redacted",
+     "profile": {
+      "bio": {
+       "text": "redacted"
+      }
+     },
+     "follower_count": 0,
+     "following_count": 0,
+     "verifications": [
+      "redacted"
+     ],
+     "verified_addresses": {
+      "eth_addresses": [
+       "redacted"
+      ],
+      "sol_addresses": [
+       "redacted"
+      ],
+      "primary": {
+       "eth_address": "redacted",
+       "sol_address": "redacted"
+      }
+     },
+     "auth_addresses": [
+      {
+       "address": "redacted",
+       "app": {
+        "object": "user_dehydrated",
+        "fid": 0
+       }
+      }
+     ],
+     "verified_accounts": [
+      {
+       "platform": "redacted",
+       "username": "redacted"
+      }
+     ],
+     "experimental": {
+      "deprecation_notice": "redacted",
+      "neynar_user_score": 0.35
+     },
+     "score": 0.35
+    },
+    "app": {
+     "object": "user_dehydrated",
+     "fid": 1,
+     "username": "redacted",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted"
+    },
+    "thread_hash": "0x0000000000000000000000000000000000000001",
+    "parent_hash": null,
+    "parent_url": "redacted",
+    "root_parent_url": "redacted",
+    "parent_author": {
+     "fid": null
+    },
+    "text": "just claimed my daily $DEGEN drip, 12 day streak",
+    "timestamp": "2026-09-26T11:50:00.000Z",
+    "embeds": [],
+    "channel": {
+     "object": "channel_dehydrated",
+     "id": "redacted",
+     "name": "redacted",
+     "image_url": "redacted"
+    },
+    "reactions": {
+     "likes_count": 0,
+     "recasts_count": 0,
+     "likes": [],
+     "recasts": []
+    },
+    "replies": {
+     "count": 0
+    },
+    "mentioned_profiles": [
+     {
+      "object": "user",
+      "fid": 0,
+      "username": "redacted",
+      "display_name": "redacted",
+      "pfp_url": "redacted",
+      "custody_address": "redacted",
+      "registered_at": "redacted",
+      "pro": {
+       "status": "redacted",
+       "subscribed_at": "redacted",
+       "expires_at": "redacted"
+      },
+      "profile": {
+       "bio": {
+        "text": "redacted"
+       }
+      },
+      "follower_count": 0,
+      "following_count": 0,
+      "verifications": [
+       "redacted"
+      ],
+      "verified_addresses": {
+       "eth_addresses": [
+        "redacted"
+       ],
+       "sol_addresses": [
+        "redacted"
+       ],
+       "primary": {
+        "eth_address": "redacted",
+        "sol_address": "redacted"
+       }
+      },
+      "auth_addresses": [
+       {
+        "address": "redacted",
+        "app": {
+         "object": "user_dehydrated",
+         "fid": 0
+        }
+       }
+      ],
+      "verified_accounts": [
+       {
+        "platform": "redacted",
+        "username": "redacted"
+       }
+      ],
+      "url": "redacted",
+      "experimental": {
+       "neynar_user_score": 0,
+       "deprecation_notice": "redacted"
+      },
+      "score": 0
+     }
+    ],
+    "mentioned_profiles_ranges": [
+     {
+      "start": 0,
+      "end": 0
+     }
+    ],
+    "mentioned_channels": [],
+    "mentioned_channels_ranges": [],
+    "author_channel_context": {
+     "following": false
+    }
+   },
+   {
+    "object": "cast",
+    "hash": "0x0000000000000000000000000000000000000002",
+    "author": {
+     "object": "user",
+     "fid": 102,
+     "username": "user102",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted",
+     "registered_at": "redacted",
+     "profile": {
+      "bio": {
+       "text": "redacted"
+      }
+     },
+     "follower_count": 0,
+     "following_count": 0,
+     "verifications": [
+      "redacted"
+     ],
+     "verified_addresses": {
+      "eth_addresses": [
+       "redacted"
+      ],
+      "sol_addresses": [
+       "redacted"
+      ],
+      "primary": {
+       "eth_address": "redacted",
+       "sol_address": "redacted"
+      }
+     },
+     "auth_addresses": [
+      {
+       "address": "redacted",
+       "app": {
+        "object": "user_dehydrated",
+        "fid": 0
+       }
+      }
+     ],
+     "verified_accounts": [
+      {
+       "platform": "redacted",
+       "username": "redacted"
+      }
+     ],
+     "experimental": {
+      "deprecation_notice": "redacted",
+      "neynar_user_score": 0.41
+     },
+     "score": 0.41
+    },
+    "app": {
+     "object": "user_dehydrated",
+     "fid": 1,
+     "username": "redacted",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted"
+    },
+    "thread_hash": "0x0000000000000000000000000000000000000002",
+    "parent_hash": null,
+    "parent_url": "redacted",
+    "root_parent_url": "redacted",
+    "parent_author": {
+     "fid": null
+    },
+    "text": "just claimed my daily $DEGEN drip, 13 day streak",
+    "timestamp": "2026-09-26T11:49:00.000Z",
+    "embeds": [],
+    "channel": {
+     "object": "channel_dehydrated",
+     "id": "redacted",
+     "name": "redacted",
+     "image_url": "redacted"
+    },
+    "reactions": {
+     "likes_count": 0,
+     "recasts_count": 0,
+     "likes": [],
+     "recasts": []
+    },
+    "replies": {
+     "count": 0
+    },
+    "mentioned_profiles": [
+     {
+      "object": "user",
+      "fid": 0,
+      "username": "redacted",
+      "display_name": "redacted",
+      "pfp_url": "redacted",
+      "custody_address": "redacted",
+      "registered_at": "redacted",
+      "pro": {
+       "status": "redacted",
+       "subscribed_at": "redacted",
+       "expires_at": "redacted"
+      },
+      "profile": {
+       "bio": {
+        "text": "redacted"
+       }
+      },
+      "follower_count": 0,
+      "following_count": 0,
+      "verifications": [
+       "redacted"
+      ],
+      "verified_addresses": {
+       "eth_addresses": [
+        "redacted"
+       ],
+       "sol_addresses": [
+        "redacted"
+       ],
+       "primary": {
+        "eth_address": "redacted",
+        "sol_address": "redacted"
+       }
+      },
+      "auth_addresses": [
+       {
+        "address": "redacted",
+        "app": {
+         "object": "user_dehydrated",
+         "fid": 0
+        }
+       }
+      ],
+      "verified_accounts": [
+       {
+        "platform": "redacted",
+        "username": "redacted"
+       }
+      ],
+      "url": "redacted",
+      "experimental": {
+       "neynar_user_score": 0,
+       "deprecation_notice": "redacted"
+      },
+      "score": 0
+     }
+    ],
+    "mentioned_profiles_ranges": [
+     {
+      "start": 0,
+      "end": 0
+     }
+    ],
+    "mentioned_channels": [],
+    "mentioned_channels_ranges": [],
+    "author_channel_context": {
+     "following": false
+    }
+   },
+   {
+    "object": "cast",
+    "hash": "0x0000000000000000000000000000000000000003",
+    "author": {
+     "object": "user",
+     "fid": 103,
+     "username": "user103",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted",
+     "registered_at": "redacted",
+     "profile": {
+      "bio": {
+       "text": "redacted"
+      }
+     },
+     "follower_count": 0,
+     "following_count": 0,
+     "verifications": [
+      "redacted"
+     ],
+     "verified_addresses": {
+      "eth_addresses": [
+       "redacted"
+      ],
+      "sol_addresses": [
+       "redacted"
+      ],
+      "primary": {
+       "eth_address": "redacted",
+       "sol_address": "redacted"
+      }
+     },
+     "auth_addresses": [
+      {
+       "address": "redacted",
+       "app": {
+        "object": "user_dehydrated",
+        "fid": 0
+       }
+      }
+     ],
+     "verified_accounts": [
+      {
+       "platform": "redacted",
+       "username": "redacted"
+      }
+     ],
+     "experimental": {
+      "deprecation_notice": "redacted",
+      "neynar_user_score": 0.83
+     },
+     "score": 0.83
+    },
+    "app": {
+     "object": "user_dehydrated",
+     "fid": 1,
+     "username": "redacted",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted"
+    },
+    "thread_hash": "0x0000000000000000000000000000000000000003",
+    "parent_hash": null,
+    "parent_url": "redacted",
+    "root_parent_url": "redacted",
+    "parent_author": {
+     "fid": null
+    },
+    "text": "$DEGEN on base: 0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed",
+    "timestamp": "2026-09-26T11:45:00.000Z",
+    "embeds": [],
+    "channel": {
+     "object": "channel_dehydrated",
+     "id": "redacted",
+     "name": "redacted",
+     "image_url": "redacted"
+    },
+    "reactions": {
+     "likes_count": 4,
+     "recasts_count": 1,
+     "likes": [],
+     "recasts": []
+    },
+    "replies": {
+     "count": 2
+    },
+    "mentioned_profiles": [
+     {
+      "object": "user",
+      "fid": 0,
+      "username": "redacted",
+      "display_name": "redacted",
+      "pfp_url": "redacted",
+      "custody_address": "redacted",
+      "registered_at": "redacted",
+      "pro": {
+       "status": "redacted",
+       "subscribed_at": "redacted",
+       "expires_at": "redacted"
+      },
+      "profile": {
+       "bio": {
+        "text": "redacted"
+       }
+      },
+      "follower_count": 0,
+      "following_count": 0,
+      "verifications": [
+       "redacted"
+      ],
+      "verified_addresses": {
+       "eth_addresses": [
+        "redacted"
+       ],
+       "sol_addresses": [
+        "redacted"
+       ],
+       "primary": {
+        "eth_address": "redacted",
+        "sol_address": "redacted"
+       }
+      },
+      "auth_addresses": [
+       {
+        "address": "redacted",
+        "app": {
+         "object": "user_dehydrated",
+         "fid": 0
+        }
+       }
+      ],
+      "verified_accounts": [
+       {
+        "platform": "redacted",
+        "username": "redacted"
+       }
+      ],
+      "url": "redacted",
+      "experimental": {
+       "neynar_user_score": 0,
+       "deprecation_notice": "redacted"
+      },
+      "score": 0
+     }
+    ],
+    "mentioned_profiles_ranges": [
+     {
+      "start": 0,
+      "end": 0
+     }
+    ],
+    "mentioned_channels": [],
+    "mentioned_channels_ranges": [],
+    "author_channel_context": {
+     "following": false
+    }
+   },
+   {
+    "object": "cast",
+    "hash": "0x0000000000000000000000000000000000000004",
+    "author": {
+     "object": "user",
+     "fid": 104,
+     "username": "user104",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted",
+     "registered_at": "redacted",
+     "profile": {
+      "bio": {
+       "text": "redacted"
+      }
+     },
+     "follower_count": 0,
+     "following_count": 0,
+     "verifications": [
+      "redacted"
+     ],
+     "verified_addresses": {
+      "eth_addresses": [
+       "redacted"
+      ],
+      "sol_addresses": [
+       "redacted"
+      ],
+      "primary": {
+       "eth_address": "redacted",
+       "sol_address": "redacted"
+      }
+     },
+     "auth_addresses": [
+      {
+       "address": "redacted",
+       "app": {
+        "object": "user_dehydrated",
+        "fid": 0
+       }
+      }
+     ],
+     "verified_accounts": [
+      {
+       "platform": "redacted",
+       "username": "redacted"
+      }
+     ],
+     "experimental": {
+      "deprecation_notice": "redacted",
+      "neynar_user_score": 0.61
+     },
+     "score": 0.61
+    },
+    "app": {
+     "object": "user_dehydrated",
+     "fid": 1,
+     "username": "redacted",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted"
+    },
+    "thread_hash": "0x0000000000000000000000000000000000000004",
+    "parent_hash": null,
+    "parent_url": "redacted",
+    "root_parent_url": "redacted",
+    "parent_author": {
+     "fid": null
+    },
+    "text": "chart looks good",
+    "timestamp": "2026-09-26T11:40:00.000Z",
+    "embeds": [
+     {
+      "url": "https://dexscreener.com/base/0x4ed4e862860bed51a9570b96d89af5e1b0efefed",
+      "metadata": {
+       "content_type": "text/html"
+      }
+     }
+    ],
+    "channel": {
+     "object": "channel_dehydrated",
+     "id": "redacted",
+     "name": "redacted",
+     "image_url": "redacted"
+    },
+    "reactions": {
+     "likes_count": 0,
+     "recasts_count": 0,
+     "likes": [],
+     "recasts": []
+    },
+    "replies": {
+     "count": 0
+    },
+    "mentioned_profiles": [
+     {
+      "object": "user",
+      "fid": 0,
+      "username": "redacted",
+      "display_name": "redacted",
+      "pfp_url": "redacted",
+      "custody_address": "redacted",
+      "registered_at": "redacted",
+      "pro": {
+       "status": "redacted",
+       "subscribed_at": "redacted",
+       "expires_at": "redacted"
+      },
+      "profile": {
+       "bio": {
+        "text": "redacted"
+       }
+      },
+      "follower_count": 0,
+      "following_count": 0,
+      "verifications": [
+       "redacted"
+      ],
+      "verified_addresses": {
+       "eth_addresses": [
+        "redacted"
+       ],
+       "sol_addresses": [
+        "redacted"
+       ],
+       "primary": {
+        "eth_address": "redacted",
+        "sol_address": "redacted"
+       }
+      },
+      "auth_addresses": [
+       {
+        "address": "redacted",
+        "app": {
+         "object": "user_dehydrated",
+         "fid": 0
+        }
+       }
+      ],
+      "verified_accounts": [
+       {
+        "platform": "redacted",
+        "username": "redacted"
+       }
+      ],
+      "url": "redacted",
+      "experimental": {
+       "neynar_user_score": 0,
+       "deprecation_notice": "redacted"
+      },
+      "score": 0
+     }
+    ],
+    "mentioned_profiles_ranges": [
+     {
+      "start": 0,
+      "end": 0
+     }
+    ],
+    "mentioned_channels": [],
+    "mentioned_channels_ranges": [],
+    "author_channel_context": {
+     "following": false
+    }
+   },
+   {
+    "object": "cast",
+    "hash": "0x0000000000000000000000000000000000000005",
+    "author": {
+     "object": "user",
+     "fid": 105,
+     "username": "user105",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted",
+     "registered_at": "redacted",
+     "profile": {
+      "bio": {
+       "text": "redacted"
+      }
+     },
+     "follower_count": 0,
+     "following_count": 0,
+     "verifications": [
+      "redacted"
+     ],
+     "verified_addresses": {
+      "eth_addresses": [
+       "redacted"
+      ],
+      "sol_addresses": [
+       "redacted"
+      ],
+      "primary": {
+       "eth_address": "redacted",
+       "sol_address": "redacted"
+      }
+     },
+     "auth_addresses": [
+      {
+       "address": "redacted",
+       "app": {
+        "object": "user_dehydrated",
+        "fid": 0
+       }
+      }
+     ],
+     "verified_accounts": [
+      {
+       "platform": "redacted",
+       "username": "redacted"
+      }
+     ],
+     "experimental": {
+      "deprecation_notice": "redacted",
+      "neynar_user_score": 0.2
+     },
+     "score": 0.2
+    },
+    "app": {
+     "object": "user_dehydrated",
+     "fid": 1,
+     "username": "redacted",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted"
+    },
+    "thread_hash": "0x0000000000000000000000000000000000000005",
+    "parent_hash": null,
+    "parent_url": "redacted",
+    "root_parent_url": "redacted",
+    "parent_author": {
+     "fid": null
+    },
+    "text": "$DEGEN is 0x1111111111111111111111111111111111111111 now?",
+    "timestamp": "2026-09-26T11:30:00.000Z",
+    "embeds": [],
+    "channel": {
+     "object": "channel_dehydrated",
+     "id": "redacted",
+     "name": "redacted",
+     "image_url": "redacted"
+    },
+    "reactions": {
+     "likes_count": 0,
+     "recasts_count": 0,
+     "likes": [],
+     "recasts": []
+    },
+    "replies": {
+     "count": 0
+    },
+    "mentioned_profiles": [
+     {
+      "object": "user",
+      "fid": 0,
+      "username": "redacted",
+      "display_name": "redacted",
+      "pfp_url": "redacted",
+      "custody_address": "redacted",
+      "registered_at": "redacted",
+      "pro": {
+       "status": "redacted",
+       "subscribed_at": "redacted",
+       "expires_at": "redacted"
+      },
+      "profile": {
+       "bio": {
+        "text": "redacted"
+       }
+      },
+      "follower_count": 0,
+      "following_count": 0,
+      "verifications": [
+       "redacted"
+      ],
+      "verified_addresses": {
+       "eth_addresses": [
+        "redacted"
+       ],
+       "sol_addresses": [
+        "redacted"
+       ],
+       "primary": {
+        "eth_address": "redacted",
+        "sol_address": "redacted"
+       }
+      },
+      "auth_addresses": [
+       {
+        "address": "redacted",
+        "app": {
+         "object": "user_dehydrated",
+         "fid": 0
+        }
+       }
+      ],
+      "verified_accounts": [
+       {
+        "platform": "redacted",
+        "username": "redacted"
+       }
+      ],
+      "url": "redacted",
+      "experimental": {
+       "neynar_user_score": 0,
+       "deprecation_notice": "redacted"
+      },
+      "score": 0
+     }
+    ],
+    "mentioned_profiles_ranges": [
+     {
+      "start": 0,
+      "end": 0
+     }
+    ],
+    "mentioned_channels": [],
+    "mentioned_channels_ranges": [],
+    "author_channel_context": {
+     "following": false
+    }
+   },
+   {
+    "object": "cast",
+    "hash": "0x0000000000000000000000000000000000000006",
+    "author": {
+     "object": "user",
+     "fid": 106,
+     "username": "user106",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted",
+     "registered_at": "redacted",
+     "profile": {
+      "bio": {
+       "text": "redacted"
+      }
+     },
+     "follower_count": 0,
+     "following_count": 0,
+     "verifications": [
+      "redacted"
+     ],
+     "verified_addresses": {
+      "eth_addresses": [
+       "redacted"
+      ],
+      "sol_addresses": [
+       "redacted"
+      ],
+      "primary": {
+       "eth_address": "redacted",
+       "sol_address": "redacted"
+      }
+     },
+     "auth_addresses": [
+      {
+       "address": "redacted",
+       "app": {
+        "object": "user_dehydrated",
+        "fid": 0
+       }
+      }
+     ],
+     "verified_accounts": [
+      {
+       "platform": "redacted",
+       "username": "redacted"
+      }
+     ],
+     "experimental": {
+      "deprecation_notice": "redacted",
+      "neynar_user_score": 0.9
+     },
+     "score": 0.9
+    },
+    "app": {
+     "object": "user_dehydrated",
+     "fid": 1,
+     "username": "redacted",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted"
+    },
+    "thread_hash": "0x0000000000000000000000000000000000000006",
+    "parent_hash": null,
+    "parent_url": "redacted",
+    "root_parent_url": "redacted",
+    "parent_author": {
+     "fid": null
+    },
+    "text": "gm degens, what a day",
+    "timestamp": "2026-09-26T11:20:00.000Z",
+    "embeds": [],
+    "channel": {
+     "object": "channel_dehydrated",
+     "id": "redacted",
+     "name": "redacted",
+     "image_url": "redacted"
+    },
+    "reactions": {
+     "likes_count": 0,
+     "recasts_count": 0,
+     "likes": [],
+     "recasts": []
+    },
+    "replies": {
+     "count": 0
+    },
+    "mentioned_profiles": [
+     {
+      "object": "user",
+      "fid": 0,
+      "username": "redacted",
+      "display_name": "redacted",
+      "pfp_url": "redacted",
+      "custody_address": "redacted",
+      "registered_at": "redacted",
+      "pro": {
+       "status": "redacted",
+       "subscribed_at": "redacted",
+       "expires_at": "redacted"
+      },
+      "profile": {
+       "bio": {
+        "text": "redacted"
+       }
+      },
+      "follower_count": 0,
+      "following_count": 0,
+      "verifications": [
+       "redacted"
+      ],
+      "verified_addresses": {
+       "eth_addresses": [
+        "redacted"
+       ],
+       "sol_addresses": [
+        "redacted"
+       ],
+       "primary": {
+        "eth_address": "redacted",
+        "sol_address": "redacted"
+       }
+      },
+      "auth_addresses": [
+       {
+        "address": "redacted",
+        "app": {
+         "object": "user_dehydrated",
+         "fid": 0
+        }
+       }
+      ],
+      "verified_accounts": [
+       {
+        "platform": "redacted",
+        "username": "redacted"
+       }
+      ],
+      "url": "redacted",
+      "experimental": {
+       "neynar_user_score": 0,
+       "deprecation_notice": "redacted"
+      },
+      "score": 0
+     }
+    ],
+    "mentioned_profiles_ranges": [
+     {
+      "start": 0,
+      "end": 0
+     }
+    ],
+    "mentioned_channels": [],
+    "mentioned_channels_ranges": [],
+    "author_channel_context": {
+     "following": false
+    }
+   },
+   {
+    "object": "cast",
+    "hash": "0x0000000000000000000000000000000000000007",
+    "author": {
+     "object": "user",
+     "fid": 107,
+     "username": "user107",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted",
+     "registered_at": "redacted",
+     "profile": {
+      "bio": {
+       "text": "redacted"
+      }
+     },
+     "follower_count": 0,
+     "following_count": 0,
+     "verifications": [
+      "redacted"
+     ],
+     "verified_addresses": {
+      "eth_addresses": [
+       "redacted"
+      ],
+      "sol_addresses": [
+       "redacted"
+      ],
+      "primary": {
+       "eth_address": "redacted",
+       "sol_address": "redacted"
+      }
+     },
+     "auth_addresses": [
+      {
+       "address": "redacted",
+       "app": {
+        "object": "user_dehydrated",
+        "fid": 0
+       }
+      }
+     ],
+     "verified_accounts": [
+      {
+       "platform": "redacted",
+       "username": "redacted"
+      }
+     ],
+     "experimental": {
+      "deprecation_notice": "redacted"
+     }
+    },
+    "app": {
+     "object": "user_dehydrated",
+     "fid": 1,
+     "username": "redacted",
+     "display_name": "redacted",
+     "pfp_url": "redacted",
+     "custody_address": "redacted"
+    },
+    "thread_hash": "0x0000000000000000000000000000000000000007",
+    "parent_hash": null,
+    "parent_url": "redacted",
+    "root_parent_url": "redacted",
+    "parent_author": {
+     "fid": null
+    },
+    "text": "$DEGEN tip 500",
+    "timestamp": "2026-09-26T11:10:00.000Z",
+    "embeds": [],
+    "channel": {
+     "object": "channel_dehydrated",
+     "id": "redacted",
+     "name": "redacted",
+     "image_url": "redacted"
+    },
+    "reactions": {
+     "likes_count": 0,
+     "recasts_count": 0,
+     "likes": [],
+     "recasts": []
+    },
+    "replies": {
+     "count": 0
+    },
+    "mentioned_profiles": [
+     {
+      "object": "user",
+      "fid": 0,
+      "username": "redacted",
+      "display_name": "redacted",
+      "pfp_url": "redacted",
+      "custody_address": "redacted",
+      "registered_at": "redacted",
+      "pro": {
+       "status": "redacted",
+       "subscribed_at": "redacted",
+       "expires_at": "redacted"
+      },
+      "profile": {
+       "bio": {
+        "text": "redacted"
+       }
+      },
+      "follower_count": 0,
+      "following_count": 0,
+      "verifications": [
+       "redacted"
+      ],
+      "verified_addresses": {
+       "eth_addresses": [
+        "redacted"
+       ],
+       "sol_addresses": [
+        "redacted"
+       ],
+       "primary": {
+        "eth_address": "redacted",
+        "sol_address": "redacted"
+       }
+      },
+      "auth_addresses": [
+       {
+        "address": "redacted",
+        "app": {
+         "object": "user_dehydrated",
+         "fid": 0
+        }
+       }
+      ],
+      "verified_accounts": [
+       {
+        "platform": "redacted",
+        "username": "redacted"
+       }
+      ],
+      "url": "redacted",
+      "experimental": {
+       "neynar_user_score": 0,
+       "deprecation_notice": "redacted"
+      },
+      "score": 0
+     }
+    ],
+    "mentioned_profiles_ranges": [
+     {
+      "start": 0,
+      "end": 0
+     }
+    ],
+    "mentioned_channels": [],
+    "mentioned_channels_ranges": [],
+    "author_channel_context": {
+     "following": false
+    }
+   }
+  ],
+  "next": {
+   "cursor": "redacted-cursor"
+  }
+ }
+}

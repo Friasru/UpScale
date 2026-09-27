@@ -36,6 +36,8 @@ STRONG / ACCELERATING describe attention only; they never mean BUY.
 from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from statistics import median
+from typing import Any
 
 from upscale.services.scout.models import WINDOW_MINUTES, ScoutGrowthFeatures
 from upscale.services.scout.social.attribution import COUNTED_LEVELS
@@ -243,6 +245,7 @@ def social_quality(
             posts=len(posts),
             unique_authors=len({e.author_key for e in posts}),
             conflicting_contracts=rejected_contracts,
+            **_provider_quality(posts, cfg),
         )
     by_author = Counter(e.author_key for e in posts)
     authors = len(by_author)
@@ -310,7 +313,22 @@ def social_quality(
         repeated_contract_share=repeated_share if contract_posts else None,
         promoted_share=promoted_share,
         conflicting_contracts=rejected_contracts,
+        **_provider_quality(posts, cfg),
     )
+
+
+def _provider_quality(posts: Sequence[SocialEvent], cfg: SocialConfig) -> dict[str, Any]:
+    """Provider-supplied author scores, summarized as separate evidence. Deliberately not
+    used for spam_risk / organic_signal_strength: UpScale's heuristics stay its own."""
+    scores = [e.author_quality for e in posts if e.author_quality is not None]
+    if not scores:
+        return {}
+    low = cfg.quality.provider_low_quality_below
+    return {
+        "provider_scored_posts": len(scores),
+        "provider_median_author_quality": round(median(scores), 3),
+        "provider_low_quality_share": sum(s < low for s in scores) / len(scores),
+    }
 
 
 def _duplicate_count(posts: Sequence[SocialEvent], bits: int) -> int:

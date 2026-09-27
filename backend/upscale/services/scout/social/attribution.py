@@ -32,7 +32,9 @@ from upscale.services.scout.social.text import (
     domains,
     extract_addresses,
     extract_cashtags,
+    is_cashtag_symbol,
     mentioned_chains,
+    same_words,
 )
 
 COUNTED_LEVELS = frozenset({"EXACT", "STRONG", "PROBABLE"})
@@ -64,9 +66,10 @@ class AttributionIndex:
                 self.by_symbol.setdefault(t.symbol.lower(), set()).add(t.canonical_id)
 
     def terms_for(self, identity: TokenIdentity) -> list[str]:
-        """Search terms for one token: its address, and its $ticker when it has one."""
+        """Search terms for one token: its address, and its $ticker when it has one that
+        can be written as a cashtag (other symbols could never be attributed by ticker)."""
         terms = [identity.address]
-        if identity.symbol:
+        if identity.symbol and is_cashtag_symbol(identity.symbol):
             terms.append(f"${identity.symbol}")
         return terms
 
@@ -108,9 +111,12 @@ class AttributionIndex:
                 continue
             ticker = f"${token.symbol}".lower() if token.symbol else None
             has_ticker = token.symbol is not None and token.symbol.lower() in tags
+            # A name that is just the ticker again ("Degen" for $DEGEN) is no independent
+            # evidence: every ticker mention would also "name" the token.
             has_name = (
                 token.name is not None
                 and len(token.name) >= self.config.min_name_length
+                and not (token.symbol and same_words(token.name, token.symbol))
                 and contains_phrase(post.text, token.name)
             )
             reference = ticker if has_ticker and ticker else (token.name or "")

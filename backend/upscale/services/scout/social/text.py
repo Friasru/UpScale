@@ -49,6 +49,11 @@ def extract_cashtags(text: str) -> set[str]:
     return {m.lower() for m in _CASHTAG.findall(text)}
 
 
+def is_cashtag_symbol(symbol: str) -> bool:
+    """Whether `$symbol` would be recognized as a cashtag by `extract_cashtags`."""
+    return _CASHTAG.fullmatch(f"${symbol}") is not None
+
+
 def mentioned_chains(text: str) -> set[str]:
     lowered = text.lower()
     chains = {chain for phrase, chain in CHAIN_MENTIONS.items() if phrase in lowered}
@@ -64,6 +69,12 @@ def contains_phrase(text: str, phrase: str) -> bool:
         return False
     n = len(target)
     return any(words[i : i + n] == target for i in range(len(words) - n + 1))
+
+
+def same_words(a: str, b: str) -> bool:
+    """Whether two strings are the same words ("Degen" and "DEGEN", "Pepe Coin" and
+    "pepe-coin"), ignoring case and punctuation."""
+    return _WORDS.findall(a.lower()) == _WORDS.findall(b.lower())
 
 
 def domains(urls: Iterable[str]) -> set[str]:

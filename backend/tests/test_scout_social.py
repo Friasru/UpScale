@@ -7,7 +7,7 @@ All offline: providers are fixture-backed (`StaticSocialProvider`) or MockTransp
 import asyncio
 import json
 import random
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -984,10 +984,269 @@ def test_social_config_is_validated() -> None:
     assert cfg.momentum.min_mentions == 5
 
 
-def test_social_is_wired_but_not_configured_by_default() -> None:
+def test_social_is_wired_but_not_configured_without_credentials() -> None:
+    from upscale.config import NEYNAR_API_KEY
     from upscale.services import scout_service, social_scout_service
 
     names = {p.name: p.configured for p in social_scout_service.providers}
-    assert names == {"Reddit": False, "Farcaster (Neynar)": False, "X": False}
+    # Farcaster follows the local environment (a developer may have a Neynar key in .env).
+    assert names == {"Reddit": False, "Farcaster (Neynar)": bool(NEYNAR_API_KEY), "X": False}
     assert social_scout_service.store._conn is None
     assert all("social" not in type(p).__name__.lower() for p in scout_service.providers)
+
+
+# --- Neynar: live-validated behavior (sanitized real response shape) -------------------------
+
+# A real Neynar cast-search response (2026-09), structure unchanged; every identity, text
+# and handle replaced by synthetic values reproducing the patterns seen live.
+NEYNAR_FIXTURE = Path(__file__).parent / "fixtures" / "neynar_cast_search.json"
+DEGEN_ADDRESS = "0x4ed4e862860bed51a9570b96d89af5e1b0efefed"
+DEGEN = TokenIdentity(
+    canonical_id=f"base:{DEGEN_ADDRESS}",
+    chain="base",
+    address=DEGEN_ADDRESS,
+    symbol="DEGEN",
+    name="Degen",
+)
+FIXTURE_NOW = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
+
+
+def neynar_fixture() -> dict[str, Any]:
+    body: dict[str, Any] = json.loads(NEYNAR_FIXTURE.read_text())
+    return body
+
+
+def neynar(handle: Any, now: Any = lambda: FIXTURE_NOW, **kw: Any) -> NeynarFarcasterProvider:
+    return NeynarFarcasterProvider(
+        "key", settings(**kw), transport=httpx2.MockTransport(handle), now=now
+    )
+
+
+def test_neynar_parses_the_real_response_shape() -> None:
+    requests: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json=neynar_fixture())
+
+    since = FIXTURE_NOW - timedelta(hours=2)
+    result = run(neynar(handle).search(["$DEGEN"], since, keyer))
+    assert len(result.posts) == 7
+    params = requests[0].url.params
+    # bare cashtag (quoting drops the `$`), server-side bound in UTC without a `Z`
+    assert params["q"] == "$DEGEN after:2026-09-26T10:00:00"
+    assert (params["mode"], params["sort_type"], params["limit"]) == (
+        "literal",
+        "desc_chron",
+        "100",
+    )
+    by_id = {p.post_id[-1]: p for p in result.posts}
+    p3 = by_id["3"]
+    assert (p3.likes, p3.reposts, p3.replies, p3.engagement) == (4, 1, 2, 7)
+    assert p3.author_key == "k:farcaster:103" and p3.author_handle == "user103"
+    assert p3.author_quality == 0.83 and p3.source_url is None
+    assert by_id["4"].urls == [f"https://dexscreener.com/base/{DEGEN_ADDRESS}"]
+    assert by_id["7"].author_quality is None  # neither score nor experimental score given
+    # one page with a next cursor: complete only back to the oldest cast, never assumed
+    assert result.complete_since == min(p.created_at for p in result.posts)
+
+
+def test_neynar_author_score_falls_back_to_the_experimental_field() -> None:
+    body = neynar_fixture()
+    cast = body["result"]["casts"][0]
+    del cast["author"]["score"]
+    cast["author"]["experimental"]["neynar_user_score"] = 0.7
+    body["result"]["casts"] = [cast, {**cast, "hash": "0xbad", "author": {"fid": True}}]
+    result = run(
+        neynar(lambda r: httpx2.Response(200, json=body)).search(
+            ["$DEGEN"], FIXTURE_NOW - timedelta(hours=2), keyer
+        )
+    )
+    [p] = result.posts  # a boolean fid is not an author id
+    assert p.author_quality == 0.7
+
+
+def test_neynar_real_shape_attribution() -> None:
+    result = run(
+        neynar(lambda r: httpx2.Response(200, json=neynar_fixture())).search(
+            ["$DEGEN"], FIXTURE_NOW - timedelta(hours=2), keyer
+        )
+    )
+    by_id = {p.post_id[-1]: p for p in result.posts}
+    directory = AttributionIndex([DEGEN], universe=[DEGEN, OTHER])
+    assert levels(directory, by_id["3"]) == {DEGEN.canonical_id: "EXACT"}  # checksummed
+    assert levels(directory, by_id["4"]) == {DEGEN.canonical_id: "EXACT"}  # in a link only
+    assert levels(directory, by_id["5"]) == {DEGEN.canonical_id: "REJECTED"}
+    assert levels(directory, by_id["6"]) == {}  # "degens" is not the cashtag
+    [a] = directory.attribute(by_id["1"])
+    assert a.level == "PROBABLE" and "directory" in a.reason  # not "the name"
+    [b] = AttributionIndex([DEGEN]).attribute(by_id["1"])
+    assert b.level == "AMBIGUOUS" and b.canonical_id is None
+
+
+def test_neynar_queries_hold_one_bare_term() -> None:
+    provider = NeynarFarcasterProvider("key", settings(max_terms_per_query=10))
+    assert provider.max_terms_per_query == 1  # combined terms lose mentions on Neynar
+    plans = plan_queries(provider, {"a": [MINT, "$NEWT"], "b": [EVM, "$OTH"]})
+    assert [terms for _, terms in plans] == [[MINT], ["$NEWT"], [EVM], ["$OTH"]]
+    assert provider.render_query(["$NEWT"]) == "$NEWT"
+    assert provider.render_query(['$a"b | c']) == '"a b c"'  # no operators smuggled in
+
+
+def test_neynar_after_bound_is_utc_without_z() -> None:
+    seen: list[str] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.url.params["q"])
+        return httpx2.Response(200, json={"result": {"casts": [], "next": {"cursor": None}}})
+
+    eastern = timezone(timedelta(hours=-4))
+    since = datetime(2026, 9, 26, 1, 30, 15, 999, tzinfo=eastern)
+    result = run(neynar(handle).search([MINT], since, keyer))
+    assert seen == [f"{MINT} after:2026-09-26T05:30:15"]
+    assert result.posts == [] and result.complete_since == since  # a real zero
+
+
+def test_neynar_out_of_credits_is_reported() -> None:
+    provider = neynar(lambda r: httpx2.Response(402))
+    with pytest.raises(MarketDataUnavailableError, match="credits are exhausted"):
+        run(provider.search(["$NEWT"], NOW - timedelta(hours=1), keyer))
+
+
+def test_request_budget_per_run(tmp_path: Path) -> None:
+    now = Now()
+    empty = {"result": {"casts": [], "next": {"cursor": None}}}
+    provider = neynar(lambda r: httpx2.Response(200, json=empty), now=now, max_requests_per_run=2)
+    svc = social(tmp_path, [provider], now)
+    result = run(svc.observe([NEWT, OTHER]))
+    statuses = {m.canonical_id: m.sources[0].status for m in result.momentum}
+    assert statuses == {
+        NEWT.canonical_id: "PROVIDER_CHECKED_ZERO_MATCHES",
+        OTHER.canonical_id: "PROVIDER_UNAVAILABLE",
+    }
+    assert "request budget" in (result.providers[0].error or "")
+    assert provider.requests_this_run == 2
+    now.at += timedelta(minutes=10)
+    run(svc.observe([NEWT, OTHER]))
+    assert provider.requests_this_run == 2  # a new run gets a new budget
+
+
+# --- Service: live-found regressions --------------------------------------------------------
+
+
+class MovingNow(Now):
+    """A live-like clock: every reading is a little later than the previous one."""
+
+    def __call__(self) -> datetime:
+        self.at += timedelta(milliseconds=3)
+        return self.at
+
+
+def test_windows_exist_with_a_moving_clock(tmp_path: Path) -> None:
+    now = MovingNow()
+    posts = spread(4, NOW - timedelta(minutes=50), NOW - timedelta(minutes=1))
+    [m] = run(
+        social(tmp_path, [static("X fixture", "x", posts, now)], now).observe([NEWT])
+    ).momentum
+    windows = {w.window: w for w in m.windows}
+    assert windows["h1"].mentions == 4  # coverage ends after the run's start: covered
+    assert m.state != "UNAVAILABLE"
+
+
+class SplitProvider(StaticSocialProvider):
+    """One term per query; queries for `failing` terms raise."""
+
+    def __init__(self, posts: list[dict[str, Any]], now: Now, failing: set[str]):
+        super().__init__("Split", "farcaster", posts, now=now, max_terms_per_query=1)
+        self.failing = failing
+
+    async def search(self, terms: Any, since: datetime, keyer: Any) -> Any:
+        if set(terms) & self.failing:
+            raise MarketDataUnavailableError("Split returned HTTP 503")
+        return await super().search(terms, since, keyer)
+
+
+def test_a_token_split_over_queries_is_judged_on_all_of_them(tmp_path: Path) -> None:
+    now = Now()
+    posts = spread(3, NOW - timedelta(minutes=50), NOW, text=f"contract {MINT}")
+    posts += [{**posts[0], "text": f"$NEWT {MINT}"}]  # also found by the ticker query
+    [m] = run(social(tmp_path, [SplitProvider(posts, now, set())], now).observe([NEWT])).momentum
+    assert m.sources[0].status == "PROVIDER_OK"  # the ticker query's zero doesn't overwrite
+    store = SocialStore(tmp_path / "scout.sqlite3")
+    [check] = run(store.checks(NEWT.canonical_id, NOW - timedelta(days=1)))
+    assert check.status == "PROVIDER_OK"  # one check per token, not one per query
+
+
+def test_a_partially_failed_token_is_unavailable_not_zero(tmp_path: Path) -> None:
+    now = Now()
+    posts = spread(3, NOW - timedelta(minutes=50), NOW, text=f"contract {MINT}")
+    provider = SplitProvider(posts, now, {"$NEWT"})
+    svc = social(tmp_path, [provider], now)
+    [m] = run(svc.observe([NEWT])).momentum
+    assert m.sources[0].status == "PROVIDER_UNAVAILABLE"
+    assert m.sources[0].windows == []
+    assert run(svc.store.last_covered_to(NEWT.canonical_id, "Split")) is None
+
+
+def test_terms_only_include_real_cashtags() -> None:
+    index = AttributionIndex([])
+    odd = [NEWT.model_copy(update={"symbol": s}) for s in ("GTA 7VII", "d/acc", "哭哭牛", "1INCH")]
+    assert all(index.terms_for(t) == [MINT] for t in odd)
+    assert index.terms_for(NEWT) == [MINT, "$NEWT"]
+
+
+def test_a_name_equal_to_the_ticker_is_not_extra_evidence() -> None:
+    index = AttributionIndex([DEGEN])  # no directory
+    [a] = index.attribute(post("$DEGEN is up today"))
+    assert a.level == "AMBIGUOUS"
+    [b] = index.attribute(post("$DEGEN on base is up today"))
+    assert b.level == "PROBABLE"  # the chain rules others out; not STRONG (no real name)
+
+
+def test_provider_author_scores_are_separate_evidence(tmp_path: Path) -> None:
+    now = Now()
+
+    def momentum(score: float, folder: str) -> Any:
+        posts = spread(8, NOW - timedelta(minutes=50), NOW)
+        for p in posts:
+            p["author_quality"] = score
+        provider = static("X fixture", "x", posts, now)
+        (tmp_path / folder).mkdir()
+        [m] = run(social(tmp_path / folder, [provider], now).observe([NEWT])).momentum
+        return m
+
+    low, high = momentum(0.1, "low"), momentum(0.95, "high")
+    assert low.quality.provider_low_quality_share == 1.0
+    assert high.quality.provider_low_quality_share == 0.0
+    assert low.quality.provider_median_author_quality == 0.1
+    # UpScale's own verdict never follows the provider's score
+    assert (low.quality.spam_risk, low.quality.organic_signal_strength, low.state) == (
+        high.quality.spam_risk,
+        high.quality.organic_signal_strength,
+        high.state,
+    )
+
+
+def test_store_migrates_schema_v1(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "scout.sqlite3"
+    run(SocialStore(path).author_salt())
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE scout_social_events DROP COLUMN author_quality")
+    db.execute("UPDATE scout_meta SET value = '1' WHERE key = 'social_schema_version'")
+    db.commit()
+    db.close()
+    now = Now()
+    posts = spread(2, NOW - timedelta(minutes=30), NOW)
+    posts[0]["author_quality"] = 0.4
+    run(social(tmp_path, [static("X fixture", "x", posts, now)], now).observe([NEWT]))
+    store = SocialStore(path)
+    events = run(store.events(NEWT.canonical_id, NOW - timedelta(hours=1), NOW))
+    assert sorted(e.author_quality or 0 for e in events) == [0, 0.4]
+    version = (
+        sqlite3.connect(path)
+        .execute("SELECT value FROM scout_meta WHERE key = 'social_schema_version'")
+        .fetchone()
+    )
+    assert version == ("2",)

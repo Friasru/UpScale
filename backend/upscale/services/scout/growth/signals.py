@@ -429,6 +429,7 @@ class SocialEvidence:
     strong_share: float | None = None  # EXACT + STRONG share of counted mentions
     unavailable_reason: str | None = None
     age_minutes: float | None = None  # how old the measurement is
+    providers: list[tuple[str, str, str | None]] = field(default_factory=list)
 
     @property
     def rising(self) -> bool:
@@ -456,7 +457,9 @@ def social_evidence(
             status="SOCIAL_UNAVAILABLE",
             state=momentum.state,
             unavailable_reason=f"last social measurement is {age:.0f} minutes old",
-        )
+            providers=[(x.provider, "PROVIDER_UNAVAILABLE", "measurement too old")
+                       for x in momentum.sources],
+        )  # fmt: skip
     status = _STATUS.get(momentum.state, "SOCIAL_UNAVAILABLE")
     window = next((w for w in momentum.windows if w.window == momentum.window), None)
     ev = SocialEvidence(
@@ -470,6 +473,7 @@ def social_evidence(
         corroborated=momentum.cross_platform.corroborated,
         platforms_active=momentum.cross_platform.platforms_with_activity,
         age_minutes=age,
+        providers=[(x.provider, x.status, x.error) for x in momentum.sources],
     )
     if status == "SOCIAL_UNAVAILABLE":
         ev.unavailable_reason = momentum.reasons[0] if momentum.reasons else momentum.state

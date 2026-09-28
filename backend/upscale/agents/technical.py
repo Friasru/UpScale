@@ -6,7 +6,12 @@ from upscale.formatting import usd, usd_zone
 from upscale.schemas import AgentResult, Risk, Scenario
 from upscale.services import technical_analysis_service
 from upscale.services.chains import same_address
-from upscale.services.market_data import TIMEFRAMES, MarketDataError, Timeframe
+from upscale.services.market_data import (
+    TIMEFRAMES,
+    MarketDataError,
+    ProviderRateLimitedError,
+    Timeframe,
+)
 from upscale.services.solana_dex import SolanaDexSnapshot
 from upscale.services.strategy import strategy_for
 from upscale.services.technical_analysis import (
@@ -77,13 +82,18 @@ class TechnicalAnalysisAgent(Agent):
             return self._failure(symbol, str(exc))
         return self._result(context, analysis, fallback_note)
 
-    def _failure(self, symbol: str, reason: str) -> AgentResult:
+    def _failure(
+        self, symbol: str, reason: str, unavailable: dict[str, Any] | None = None
+    ) -> AgentResult:
+        findings: dict[str, Any] = {"symbol": symbol}
+        if unavailable:
+            findings["unavailable"] = unavailable
         return AgentResult(
             agent=self.name,
             status="error",
             mock=False,
             summary=f"Technical analysis could not be performed for {symbol}: {reason}.",
-            findings={"symbol": symbol},
+            findings=findings,
             error=reason,
         )
 
@@ -109,6 +119,8 @@ class TechnicalAnalysisAgent(Agent):
         market = context.trade.market if context.trade else None
         explicit = bool(market and (market.requested_dex or market.requested_pool))
 
+        rate_limited: list[str] = []
+
         async def analyze_pool(address: str) -> tuple[TechnicalAnalysis | None, str | None]:
             try:
                 series = await registry.pool_candles(
@@ -120,10 +132,27 @@ class TechnicalAnalysisAgent(Agent):
                     canonical_id=pool.canonical_id,  # every candidate pool is this token's
                 )
                 return analyze_series(series, cfg), None
+            except ProviderRateLimitedError as exc:
+                rate_limited.append(str(exc))
+                return None, str(exc)
             except (MarketDataError, InvalidCandleDataError) as exc:
                 return None, str(exc)
 
         analysis, error = await analyze_pool(pool.pair_address)
+        if analysis is None and rate_limited:
+            # Every exact candle provider is temporarily rate-limited: say so, instead of
+            # suggesting the token lacks market history (and don't spend requests on other
+            # pools, which the same limit would refuse).
+            return self._failure(
+                symbol,
+                "technical market data temporarily rate-limited; try again in about a minute",
+                {
+                    "kind": "provider_rate_limited",
+                    "provider": registry.dex_candles.provider_name,
+                    "retry_after_seconds": 60,
+                    "detail": rate_limited[0],
+                },
+            )
         pools: dict[str, Any] = {
             "market_pool": {"address": pool.pair_address, "dex": pool.dex},
             "technical_pool": {"address": pool.pair_address, "dex": pool.dex},

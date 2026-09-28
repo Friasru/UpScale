@@ -63,6 +63,7 @@ from upscale.services.scout.growth.models import (
     SafetyStatus,
     ScoutMomentumScore,
     Severity,
+    SocialProviderState,
     SubSignal,
     VerificationStatus,
 )
@@ -1104,6 +1105,10 @@ def evaluate(
             engagement_acceleration=trend.engagement.acceleration_ratio if trend else None,
             cross_platform_corroborated=social.corroborated,
             platforms_active=social.platforms_active,
+            social_providers=[
+                SocialProviderState(provider=p, status=st, detail=err)
+                for p, st, err in social.providers
+            ],
         ),
         quality=GrowthQuality(
             verification=verification,

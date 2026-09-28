@@ -14,104 +14,38 @@
 
 import asyncio
 import time
-from collections import deque
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
-from upscale.services.market_data import MarketDataUnavailableError
+from upscale.services.market_data import MarketDataUnavailableError, ProviderRateLimitedError
+from upscale.services.quota import _LANE, DEFAULT_LANE, LaneLimiter, request_lane
 from upscale.services.scout.config import ScoutProviderLimits
+
+__all__ = ["DEFAULT_LANE", "LaneLimiter", "RateLimitReachedError", "RequestGate", "request_lane"]
 
 T = TypeVar("T")
 
-DEFAULT_LANE = "default"
-_LANE: ContextVar[str] = ContextVar("upscale_request_lane", default=DEFAULT_LANE)
 
-
-@contextmanager
-def request_lane(lane: str) -> Iterator[None]:
-    """Every gated request made inside this block (including tasks it starts) counts
-    against `lane`, and may use the capacity reserved for it."""
-    token = _LANE.set(lane)
-    try:
-        yield
-    finally:
-        _LANE.reset(token)
-
-
-class LaneLimiter:
-    """A sliding-window request limit shared by lanes, with per-lane reservations.
-
-    Over any `period`: total calls <= `max_calls` (hard). While a reservation is held,
-    calls from other lanes leave room for what the lane hasn't used of it yet."""
-
-    def __init__(
-        self,
-        max_calls: int,
-        period: float,
-        reservations: dict[str, int] | None = None,
-        clock: Callable[[], float] = time.monotonic,
-    ):
-        self.max_calls = max_calls
-        self.period = period
-        self.reservations = dict(reservations or {})
-        self._clock = clock
-        self._calls: deque[tuple[float, str]] = deque()
-        self._held = set(self.reservations)
-
-    def _trim(self) -> None:
-        now = self._clock()
-        while self._calls and now - self._calls[0][0] >= self.period:
-            self._calls.popleft()
-
-    def _outstanding(self, lane: str) -> int:
-        """Reserved capacity other lanes must leave free for `lane`'s competitors."""
-        held = 0
-        for other in self._held:
-            if other == lane:
-                continue
-            used = sum(1 for _, x in self._calls if x == other)
-            held += max(0, self.reservations[other] - used)
-        return held
-
-    def available(self, lane: str = DEFAULT_LANE) -> int:
-        self._trim()
-        return max(0, self.max_calls - len(self._calls) - self._outstanding(lane))
-
-    def used(self, lane: str) -> int:
-        self._trim()
-        return sum(1 for _, x in self._calls if x == lane)
-
-    def try_acquire(self, lane: str = DEFAULT_LANE) -> bool:
-        if self.available(lane) <= 0:
-            return False
-        self._calls.append((self._clock(), lane))
-        return True
-
-    def release(self, lane: str) -> None:
-        self._held.discard(lane)
-
-    def arm(self, lane: str) -> None:
-        if lane in self.reservations:
-            self._held.add(lane)
-
-
-class RateLimitReachedError(MarketDataUnavailableError):
+class RateLimitReachedError(ProviderRateLimitedError):
     """UpScale's own budget for a provider (or the provider's limit) was reached."""
 
 
 class RequestGate:
+    """`limiter`: the provider's shared quota (see `upscale.services.quota`), when other
+    UpScale features call the same provider; otherwise the gate keeps its own."""
+
     def __init__(
         self,
         name: str,
         limits: ScoutProviderLimits,
         clock: Callable[[], float] = time.monotonic,
+        limiter: LaneLimiter | None = None,
     ):
         self.name = name
         self.limits = limits
         self._clock = clock
-        self._limiter = self._new_limiter()
+        self._shared = limiter is not None
+        self._limiter = limiter if limiter is not None else self._new_limiter()
         self._semaphore = asyncio.Semaphore(limits.max_concurrency)
         self._cache: dict[str, tuple[float, Any]] = {}
         self._inflight: dict[str, asyncio.Task[Any]] = {}
@@ -121,7 +55,10 @@ class RequestGate:
     def reset(self) -> None:
         self._cache.clear()
         self._inflight.clear()
-        self._limiter = self._new_limiter()
+        if self._shared:
+            self._limiter.reset()
+        else:
+            self._limiter = self._new_limiter()
         self._semaphore = asyncio.Semaphore(self.limits.max_concurrency)
         self.requests_made = 0
         self.cache_hits = 0
@@ -141,7 +78,7 @@ class RequestGate:
         return self._limiter.used(lane)
 
     def reserved(self, lane: str) -> int:
-        return self.limits.reservations.get(lane, 0)
+        return self._limiter.reservations.get(lane, 0)
 
     def release(self, lane: str) -> None:
         """Hand what `lane` hasn't used of its reservation back to every lane."""

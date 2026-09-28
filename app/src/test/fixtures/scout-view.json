@@ -1,0 +1,1804 @@
+{
+ "status": "ok",
+ "computed_at": "2026-09-27T12:00:00Z",
+ "mode": "NEW_AND_EARLY",
+ "limit": 10,
+ "filters": {
+  "chain": null,
+  "stage": null,
+  "min_liquidity_usd": null
+ },
+ "ranked": 8,
+ "matching": 8,
+ "candidates": [
+  {
+   "rank": 1,
+   "canonical_id": "solana:7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+   "chain": "solana",
+   "chain_label": "Solana",
+   "address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+   "symbol": "A",
+   "name": "Token A",
+   "stage": "ACCELERATING",
+   "stage_reasons": [
+    "volume, trades, buyers rising on 3 time scales (short, medium, history)",
+    "social emerging too"
+   ],
+   "scout_momentum": 95,
+   "market": {
+    "market_cap_usd": 400000.0,
+    "fdv_usd": 400000.0,
+    "liquidity_usd": 80000.0,
+    "age_hours": 30.0
+   },
+   "safety": {
+    "status": "SAFETY_CHECKS_COMPLETE",
+    "label": "Safety checks complete",
+    "flags": []
+   },
+   "freshness": {
+    "status": "CURRENT",
+    "observed_at": "2026-09-27T12:00:00Z",
+    "snapshot_age_minutes": 2.0
+   },
+   "reasons": [
+    "volume accelerating (2.0x, h1 vs h6 rate)",
+    "trade count accelerating (2.0x, h1 vs h6 rate)",
+    "buyer activity increasing (buy share +7%)",
+    "liquidity growing (+29% over 60m)",
+    "price rising (+9% in 1h)",
+    "breaking above stored highs with rising volume",
+    "social emerging, exact-contract mentions",
+    "still early: price +35% so far"
+   ],
+   "details": [
+    {
+     "title": "Identity",
+     "rows": [
+      {
+       "label": "Canonical id",
+       "value": "solana:7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+      },
+      {
+       "label": "Chain",
+       "value": "Solana"
+      },
+      {
+       "label": "Mint",
+       "value": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+      },
+      {
+       "label": "Selected market",
+       "value": "raydium pool pool-A (SOL quote)"
+      },
+      {
+       "label": "Market data from",
+       "value": "GeckoTerminal"
+      }
+     ]
+    },
+    {
+     "title": "Market",
+     "rows": [
+      {
+       "label": "Price",
+       "value": "$0.001"
+      },
+      {
+       "label": "Market cap",
+       "value": "$400.0K"
+      },
+      {
+       "label": "FDV",
+       "value": "$400.0K"
+      },
+      {
+       "label": "Liquidity",
+       "value": "$80.0K"
+      },
+      {
+       "label": "Volume acceleration",
+       "value": "1.60x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Trade acceleration",
+       "value": "1.60x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Buy pressure",
+       "value": "65% of trades are buys, 65% of wallets buying, change +7% (trade counts; flow consistent)"
+      },
+      {
+       "label": "Liquidity change",
+       "value": "+29% over 60m"
+      },
+      {
+       "label": "Price change",
+       "value": "+9% 1h, +35% 24h"
+      },
+      {
+       "label": "Pool age",
+       "value": "30 h"
+      }
+     ]
+    },
+    {
+     "title": "Social",
+     "rows": [
+      {
+       "label": "Social momentum",
+       "value": "Emerging"
+      },
+      {
+       "label": "X",
+       "value": "unavailable (X credits are exhausted (HTTP 402))"
+      },
+      {
+       "label": "Farcaster (Neynar)",
+       "value": "searched, no mentions"
+      },
+      {
+       "label": "Attribution quality",
+       "value": "exact"
+      },
+      {
+       "label": "Spam risk",
+       "value": "low"
+      },
+      {
+       "label": "Cross-platform confirmation",
+       "value": "not confirmed"
+      }
+     ]
+    },
+    {
+     "title": "Scoring",
+     "rows": [
+      {
+       "label": "Market activity",
+       "value": "28.3"
+      },
+      {
+       "label": "Liquidity quality",
+       "value": "12.8"
+      },
+      {
+       "label": "Social momentum",
+       "value": "8.9"
+      },
+      {
+       "label": "Earliness",
+       "value": "16.9"
+      },
+      {
+       "label": "Cross-confirmation",
+       "value": "20.0"
+      },
+      {
+       "label": "Base score",
+       "value": "86.9"
+      },
+      {
+       "label": "Stage adjustment",
+       "value": "+8.0"
+      },
+      {
+       "label": "Risk penalty",
+       "value": "-0.0"
+      },
+      {
+       "label": "Scout Momentum",
+       "value": "95"
+      }
+     ]
+    },
+    {
+     "title": "Safety",
+     "rows": [
+      {
+       "label": "Status",
+       "value": "Safety checks complete"
+      },
+      {
+       "label": "Largest holder",
+       "value": "5.0%"
+      },
+      {
+       "label": "Top 10 holders",
+       "value": "25.0%"
+      },
+      {
+       "label": "Mint authority",
+       "value": "revoked"
+      },
+      {
+       "label": "Freeze authority",
+       "value": "revoked"
+      }
+     ]
+    },
+    {
+     "title": "Freshness",
+     "rows": [
+      {
+       "label": "Observed",
+       "value": "12:00 UTC"
+      },
+      {
+       "label": "Snapshot age",
+       "value": "2 min"
+      },
+      {
+       "label": "This run",
+       "value": "refreshed this run"
+      }
+     ]
+    }
+   ],
+   "analyze": {
+    "chain": "solana",
+    "address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+    "symbol": "A",
+    "name": "Token A",
+    "pool_address": "pool-A",
+    "source": "scout"
+   }
+  },
+  {
+   "rank": 2,
+   "canonical_id": "solana:2x77777777777777777777777777777777777777777",
+   "chain": "solana",
+   "chain_label": "Solana",
+   "address": "2x77777777777777777777777777777777777777777",
+   "symbol": "2x77777777777777777777777777777777777777777",
+   "name": "Token 2x77777777777777777777777777777777777777777",
+   "stage": "ACCELERATING",
+   "stage_reasons": [
+    "volume, trades, buyers rising on 3 time scales (short, medium, history)"
+   ],
+   "scout_momentum": 83,
+   "market": {
+    "market_cap_usd": 400000.0,
+    "fdv_usd": 400000.0,
+    "liquidity_usd": 80000.0,
+    "age_hours": 30.0
+   },
+   "safety": {
+    "status": "INSUFFICIENT_SAFETY_DATA",
+    "label": "Insufficient safety data",
+    "flags": []
+   },
+   "freshness": {
+    "status": "CURRENT",
+    "observed_at": "2026-09-27T12:00:00Z",
+    "snapshot_age_minutes": 2.0
+   },
+   "reasons": [
+    "volume accelerating (2.0x, h1 vs h6 rate)",
+    "trade count accelerating (2.0x, h1 vs h6 rate)",
+    "buyer activity increasing (buy share +7%)",
+    "liquidity growing (+29% over 60m)",
+    "price rising (+9% in 1h)",
+    "breaking above stored highs with rising volume",
+    "still early: price +35% so far"
+   ],
+   "details": [
+    {
+     "title": "Identity",
+     "rows": [
+      {
+       "label": "Canonical id",
+       "value": "solana:2x77777777777777777777777777777777777777777"
+      },
+      {
+       "label": "Chain",
+       "value": "Solana"
+      },
+      {
+       "label": "Mint",
+       "value": "2x77777777777777777777777777777777777777777"
+      },
+      {
+       "label": "Selected market",
+       "value": "raydium pool pool-2x77777777777777777777777777777777777777777 (SOL quote)"
+      },
+      {
+       "label": "Market data from",
+       "value": "GeckoTerminal"
+      }
+     ]
+    },
+    {
+     "title": "Market",
+     "rows": [
+      {
+       "label": "Price",
+       "value": "$0.001"
+      },
+      {
+       "label": "Market cap",
+       "value": "$400.0K"
+      },
+      {
+       "label": "FDV",
+       "value": "$400.0K"
+      },
+      {
+       "label": "Liquidity",
+       "value": "$80.0K"
+      },
+      {
+       "label": "Volume acceleration",
+       "value": "1.60x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Trade acceleration",
+       "value": "1.60x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Buy pressure",
+       "value": "65% of trades are buys, 65% of wallets buying, change +7% (trade counts; flow consistent)"
+      },
+      {
+       "label": "Liquidity change",
+       "value": "+29% over 60m"
+      },
+      {
+       "label": "Price change",
+       "value": "+9% 1h, +35% 24h"
+      },
+      {
+       "label": "Pool age",
+       "value": "30 h"
+      }
+     ]
+    },
+    {
+     "title": "Social",
+     "rows": [
+      {
+       "label": "Social momentum",
+       "value": "Unavailable"
+      },
+      {
+       "label": "Note",
+       "value": "Unavailable is not zero attention"
+      },
+      {
+       "label": "Attribution quality",
+       "value": "none"
+      },
+      {
+       "label": "Spam risk",
+       "value": "unknown"
+      },
+      {
+       "label": "Cross-platform confirmation",
+       "value": "n/a"
+      }
+     ]
+    },
+    {
+     "title": "Scoring",
+     "rows": [
+      {
+       "label": "Market activity",
+       "value": "28.3"
+      },
+      {
+       "label": "Liquidity quality",
+       "value": "12.8"
+      },
+      {
+       "label": "Social momentum",
+       "value": "4.8"
+      },
+      {
+       "label": "Earliness",
+       "value": "16.9"
+      },
+      {
+       "label": "Cross-confirmation",
+       "value": "17.0"
+      },
+      {
+       "label": "Base score",
+       "value": "79.7"
+      },
+      {
+       "label": "Stage adjustment",
+       "value": "+8.0"
+      },
+      {
+       "label": "Risk penalty",
+       "value": "-5.0"
+      },
+      {
+       "label": "Scout Momentum",
+       "value": "83"
+      }
+     ]
+    },
+    {
+     "title": "Safety",
+     "rows": [
+      {
+       "label": "Status",
+       "value": "Insufficient safety data"
+      },
+      {
+       "label": "Flag (caution)",
+       "value": "on-chain safety (authorities, holders) unknown"
+      },
+      {
+       "label": "Unknown",
+       "value": "on-chain safety not checked yet"
+      }
+     ]
+    },
+    {
+     "title": "Freshness",
+     "rows": [
+      {
+       "label": "Observed",
+       "value": "12:00 UTC"
+      },
+      {
+       "label": "Snapshot age",
+       "value": "2 min"
+      },
+      {
+       "label": "This run",
+       "value": "refreshed this run"
+      }
+     ]
+    }
+   ],
+   "analyze": {
+    "chain": "solana",
+    "address": "2x77777777777777777777777777777777777777777",
+    "symbol": "2x77777777777777777777777777777777777777777",
+    "name": "Token 2x77777777777777777777777777777777777777777",
+    "pool_address": "pool-2x77777777777777777777777777777777777777777",
+    "source": "scout"
+   }
+  },
+  {
+   "rank": 3,
+   "canonical_id": "solana:3x77777777777777777777777777777777777777777",
+   "chain": "solana",
+   "chain_label": "Solana",
+   "address": "3x77777777777777777777777777777777777777777",
+   "symbol": "3x77777777777777777777777777777777777777777",
+   "name": "Token 3x77777777777777777777777777777777777777777",
+   "stage": "ACCELERATING",
+   "stage_reasons": [
+    "volume, trades, buyers rising on 3 time scales (short, medium, history)"
+   ],
+   "scout_momentum": 83,
+   "market": {
+    "market_cap_usd": 400000.0,
+    "fdv_usd": 400000.0,
+    "liquidity_usd": 80000.0,
+    "age_hours": 30.0
+   },
+   "safety": {
+    "status": "INSUFFICIENT_SAFETY_DATA",
+    "label": "Insufficient safety data",
+    "flags": []
+   },
+   "freshness": {
+    "status": "CURRENT",
+    "observed_at": "2026-09-27T12:00:00Z",
+    "snapshot_age_minutes": 2.0
+   },
+   "reasons": [
+    "volume accelerating (2.0x, h1 vs h6 rate)",
+    "trade count accelerating (2.0x, h1 vs h6 rate)",
+    "buyer activity increasing (buy share +7%)",
+    "liquidity growing (+29% over 60m)",
+    "price rising (+9% in 1h)",
+    "breaking above stored highs with rising volume",
+    "still early: price +35% so far"
+   ],
+   "details": [
+    {
+     "title": "Identity",
+     "rows": [
+      {
+       "label": "Canonical id",
+       "value": "solana:3x77777777777777777777777777777777777777777"
+      },
+      {
+       "label": "Chain",
+       "value": "Solana"
+      },
+      {
+       "label": "Mint",
+       "value": "3x77777777777777777777777777777777777777777"
+      },
+      {
+       "label": "Selected market",
+       "value": "raydium pool pool-3x77777777777777777777777777777777777777777 (SOL quote)"
+      },
+      {
+       "label": "Market data from",
+       "value": "GeckoTerminal"
+      }
+     ]
+    },
+    {
+     "title": "Market",
+     "rows": [
+      {
+       "label": "Price",
+       "value": "$0.001"
+      },
+      {
+       "label": "Market cap",
+       "value": "$400.0K"
+      },
+      {
+       "label": "FDV",
+       "value": "$400.0K"
+      },
+      {
+       "label": "Liquidity",
+       "value": "$80.0K"
+      },
+      {
+       "label": "Volume acceleration",
+       "value": "1.60x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Trade acceleration",
+       "value": "1.60x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Buy pressure",
+       "value": "65% of trades are buys, 65% of wallets buying, change +7% (trade counts; flow consistent)"
+      },
+      {
+       "label": "Liquidity change",
+       "value": "+29% over 60m"
+      },
+      {
+       "label": "Price change",
+       "value": "+9% 1h, +35% 24h"
+      },
+      {
+       "label": "Pool age",
+       "value": "30 h"
+      }
+     ]
+    },
+    {
+     "title": "Social",
+     "rows": [
+      {
+       "label": "Social momentum",
+       "value": "Unavailable"
+      },
+      {
+       "label": "Note",
+       "value": "Unavailable is not zero attention"
+      },
+      {
+       "label": "Attribution quality",
+       "value": "none"
+      },
+      {
+       "label": "Spam risk",
+       "value": "unknown"
+      },
+      {
+       "label": "Cross-platform confirmation",
+       "value": "n/a"
+      }
+     ]
+    },
+    {
+     "title": "Scoring",
+     "rows": [
+      {
+       "label": "Market activity",
+       "value": "28.3"
+      },
+      {
+       "label": "Liquidity quality",
+       "value": "12.8"
+      },
+      {
+       "label": "Social momentum",
+       "value": "4.8"
+      },
+      {
+       "label": "Earliness",
+       "value": "16.9"
+      },
+      {
+       "label": "Cross-confirmation",
+       "value": "17.0"
+      },
+      {
+       "label": "Base score",
+       "value": "79.7"
+      },
+      {
+       "label": "Stage adjustment",
+       "value": "+8.0"
+      },
+      {
+       "label": "Risk penalty",
+       "value": "-5.0"
+      },
+      {
+       "label": "Scout Momentum",
+       "value": "83"
+      }
+     ]
+    },
+    {
+     "title": "Safety",
+     "rows": [
+      {
+       "label": "Status",
+       "value": "Insufficient safety data"
+      },
+      {
+       "label": "Flag (caution)",
+       "value": "on-chain safety (authorities, holders) unknown"
+      },
+      {
+       "label": "Unknown",
+       "value": "on-chain safety not checked yet"
+      }
+     ]
+    },
+    {
+     "title": "Freshness",
+     "rows": [
+      {
+       "label": "Observed",
+       "value": "12:00 UTC"
+      },
+      {
+       "label": "Snapshot age",
+       "value": "2 min"
+      },
+      {
+       "label": "This run",
+       "value": "refreshed this run"
+      }
+     ]
+    }
+   ],
+   "analyze": {
+    "chain": "solana",
+    "address": "3x77777777777777777777777777777777777777777",
+    "symbol": "3x77777777777777777777777777777777777777777",
+    "name": "Token 3x77777777777777777777777777777777777777777",
+    "pool_address": "pool-3x77777777777777777777777777777777777777777",
+    "source": "scout"
+   }
+  },
+  {
+   "rank": 4,
+   "canonical_id": "solana:4x77777777777777777777777777777777777777777",
+   "chain": "solana",
+   "chain_label": "Solana",
+   "address": "4x77777777777777777777777777777777777777777",
+   "symbol": "4x77777777777777777777777777777777777777777",
+   "name": "Token 4x77777777777777777777777777777777777777777",
+   "stage": "ACCELERATING",
+   "stage_reasons": [
+    "volume, trades, buyers rising on 3 time scales (short, medium, history)"
+   ],
+   "scout_momentum": 83,
+   "market": {
+    "market_cap_usd": 400000.0,
+    "fdv_usd": 400000.0,
+    "liquidity_usd": 80000.0,
+    "age_hours": 30.0
+   },
+   "safety": {
+    "status": "INSUFFICIENT_SAFETY_DATA",
+    "label": "Insufficient safety data",
+    "flags": []
+   },
+   "freshness": {
+    "status": "CURRENT",
+    "observed_at": "2026-09-27T12:00:00Z",
+    "snapshot_age_minutes": 2.0
+   },
+   "reasons": [
+    "volume accelerating (2.0x, h1 vs h6 rate)",
+    "trade count accelerating (2.0x, h1 vs h6 rate)",
+    "buyer activity increasing (buy share +7%)",
+    "liquidity growing (+29% over 60m)",
+    "price rising (+9% in 1h)",
+    "breaking above stored highs with rising volume",
+    "still early: price +35% so far"
+   ],
+   "details": [
+    {
+     "title": "Identity",
+     "rows": [
+      {
+       "label": "Canonical id",
+       "value": "solana:4x77777777777777777777777777777777777777777"
+      },
+      {
+       "label": "Chain",
+       "value": "Solana"
+      },
+      {
+       "label": "Mint",
+       "value": "4x77777777777777777777777777777777777777777"
+      },
+      {
+       "label": "Selected market",
+       "value": "raydium pool pool-4x77777777777777777777777777777777777777777 (SOL quote)"
+      },
+      {
+       "label": "Market data from",
+       "value": "GeckoTerminal"
+      }
+     ]
+    },
+    {
+     "title": "Market",
+     "rows": [
+      {
+       "label": "Price",
+       "value": "$0.001"
+      },
+      {
+       "label": "Market cap",
+       "value": "$400.0K"
+      },
+      {
+       "label": "FDV",
+       "value": "$400.0K"
+      },
+      {
+       "label": "Liquidity",
+       "value": "$80.0K"
+      },
+      {
+       "label": "Volume acceleration",
+       "value": "1.60x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Trade acceleration",
+       "value": "1.60x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Buy pressure",
+       "value": "65% of trades are buys, 65% of wallets buying, change +7% (trade counts; flow consistent)"
+      },
+      {
+       "label": "Liquidity change",
+       "value": "+29% over 60m"
+      },
+      {
+       "label": "Price change",
+       "value": "+9% 1h, +35% 24h"
+      },
+      {
+       "label": "Pool age",
+       "value": "30 h"
+      }
+     ]
+    },
+    {
+     "title": "Social",
+     "rows": [
+      {
+       "label": "Social momentum",
+       "value": "Unavailable"
+      },
+      {
+       "label": "Note",
+       "value": "Unavailable is not zero attention"
+      },
+      {
+       "label": "Attribution quality",
+       "value": "none"
+      },
+      {
+       "label": "Spam risk",
+       "value": "unknown"
+      },
+      {
+       "label": "Cross-platform confirmation",
+       "value": "n/a"
+      }
+     ]
+    },
+    {
+     "title": "Scoring",
+     "rows": [
+      {
+       "label": "Market activity",
+       "value": "28.3"
+      },
+      {
+       "label": "Liquidity quality",
+       "value": "12.8"
+      },
+      {
+       "label": "Social momentum",
+       "value": "4.8"
+      },
+      {
+       "label": "Earliness",
+       "value": "16.9"
+      },
+      {
+       "label": "Cross-confirmation",
+       "value": "17.0"
+      },
+      {
+       "label": "Base score",
+       "value": "79.7"
+      },
+      {
+       "label": "Stage adjustment",
+       "value": "+8.0"
+      },
+      {
+       "label": "Risk penalty",
+       "value": "-5.0"
+      },
+      {
+       "label": "Scout Momentum",
+       "value": "83"
+      }
+     ]
+    },
+    {
+     "title": "Safety",
+     "rows": [
+      {
+       "label": "Status",
+       "value": "Insufficient safety data"
+      },
+      {
+       "label": "Flag (caution)",
+       "value": "on-chain safety (authorities, holders) unknown"
+      },
+      {
+       "label": "Unknown",
+       "value": "on-chain safety not checked yet"
+      }
+     ]
+    },
+    {
+     "title": "Freshness",
+     "rows": [
+      {
+       "label": "Observed",
+       "value": "12:00 UTC"
+      },
+      {
+       "label": "Snapshot age",
+       "value": "2 min"
+      },
+      {
+       "label": "This run",
+       "value": "refreshed this run"
+      }
+     ]
+    }
+   ],
+   "analyze": {
+    "chain": "solana",
+    "address": "4x77777777777777777777777777777777777777777",
+    "symbol": "4x77777777777777777777777777777777777777777",
+    "name": "Token 4x77777777777777777777777777777777777777777",
+    "pool_address": "pool-4x77777777777777777777777777777777777777777",
+    "source": "scout"
+   }
+  },
+  {
+   "rank": 5,
+   "canonical_id": "solana:9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+   "chain": "solana",
+   "chain_label": "Solana",
+   "address": "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+   "symbol": "B",
+   "name": "Token B",
+   "stage": "ACCELERATING",
+   "stage_reasons": [
+    "stale: evidence 8 minutes old",
+    "volume, trades, buyers rising on 3 time scales (short, medium, history)"
+   ],
+   "scout_momentum": 72,
+   "market": {
+    "market_cap_usd": null,
+    "fdv_usd": 900000.0,
+    "liquidity_usd": 80000.0,
+    "age_hours": 30.0
+   },
+   "safety": {
+    "status": "INSUFFICIENT_SAFETY_DATA",
+    "label": "Insufficient safety data",
+    "flags": [
+     {
+      "code": "stale_market_data",
+      "label": "Stale market data",
+      "severity": "high"
+     }
+    ]
+   },
+   "freshness": {
+    "status": "STALE_CARRIED",
+    "observed_at": "2026-09-27T12:00:00Z",
+    "snapshot_age_minutes": 2.0
+   },
+   "reasons": [
+    "volume accelerating (2.0x, h1 vs h6 rate)",
+    "trade count accelerating (2.0x, h1 vs h6 rate)",
+    "buyer activity increasing (buy share +7%)",
+    "liquidity growing (+29% over 60m)",
+    "price rising (+9% in 1h)",
+    "breaking above stored highs with rising volume",
+    "still early: price +35% so far"
+   ],
+   "details": [
+    {
+     "title": "Identity",
+     "rows": [
+      {
+       "label": "Canonical id",
+       "value": "solana:9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E"
+      },
+      {
+       "label": "Chain",
+       "value": "Solana"
+      },
+      {
+       "label": "Mint",
+       "value": "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E"
+      },
+      {
+       "label": "Selected market",
+       "value": "raydium pool pool-B (SOL quote)"
+      },
+      {
+       "label": "Market data from",
+       "value": "GeckoTerminal"
+      }
+     ]
+    },
+    {
+     "title": "Market",
+     "rows": [
+      {
+       "label": "Price",
+       "value": "$0.001"
+      },
+      {
+       "label": "Market cap",
+       "value": "n/a (no market cap reported (FDV only))"
+      },
+      {
+       "label": "FDV",
+       "value": "$900.0K"
+      },
+      {
+       "label": "Liquidity",
+       "value": "$80.0K"
+      },
+      {
+       "label": "Volume acceleration",
+       "value": "1.60x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Trade acceleration",
+       "value": "1.60x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Buy pressure",
+       "value": "65% of trades are buys, 65% of wallets buying, change +7% (trade counts; flow consistent)"
+      },
+      {
+       "label": "Liquidity change",
+       "value": "+29% over 60m"
+      },
+      {
+       "label": "Price change",
+       "value": "+9% 1h, +35% 24h"
+      },
+      {
+       "label": "Pool age",
+       "value": "30 h"
+      }
+     ]
+    },
+    {
+     "title": "Social",
+     "rows": [
+      {
+       "label": "Social momentum",
+       "value": "Unavailable"
+      },
+      {
+       "label": "Note",
+       "value": "Unavailable is not zero attention"
+      },
+      {
+       "label": "Attribution quality",
+       "value": "none"
+      },
+      {
+       "label": "Spam risk",
+       "value": "unknown"
+      },
+      {
+       "label": "Cross-platform confirmation",
+       "value": "n/a"
+      }
+     ]
+    },
+    {
+     "title": "Scoring",
+     "rows": [
+      {
+       "label": "Market activity",
+       "value": "28.3"
+      },
+      {
+       "label": "Liquidity quality",
+       "value": "12.0"
+      },
+      {
+       "label": "Social momentum",
+       "value": "4.8"
+      },
+      {
+       "label": "Earliness",
+       "value": "16.9"
+      },
+      {
+       "label": "Cross-confirmation",
+       "value": "17.0"
+      },
+      {
+       "label": "Base score",
+       "value": "79.0"
+      },
+      {
+       "label": "Stage adjustment",
+       "value": "+8.0"
+      },
+      {
+       "label": "Risk penalty",
+       "value": "-15.0"
+      },
+      {
+       "label": "Scout Momentum",
+       "value": "72"
+      }
+     ]
+    },
+    {
+     "title": "Safety",
+     "rows": [
+      {
+       "label": "Status",
+       "value": "Insufficient safety data"
+      },
+      {
+       "label": "Flag (high)",
+       "value": "not refreshed this run (provider unavailable): market evidence is 8 minutes old"
+      },
+      {
+       "label": "Flag (caution)",
+       "value": "on-chain safety (authorities, holders) unknown"
+      },
+      {
+       "label": "Unknown",
+       "value": "on-chain safety not checked yet"
+      }
+     ]
+    },
+    {
+     "title": "Freshness",
+     "rows": [
+      {
+       "label": "Observed",
+       "value": "12:00 UTC"
+      },
+      {
+       "label": "Snapshot age",
+       "value": "2 min"
+      },
+      {
+       "label": "This run",
+       "value": "carried forward on the last good observation (provider unavailable)"
+      }
+     ]
+    }
+   ],
+   "analyze": {
+    "chain": "solana",
+    "address": "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+    "symbol": "B",
+    "name": "Token B",
+    "pool_address": "pool-B",
+    "source": "scout"
+   }
+  },
+  {
+   "rank": 6,
+   "canonical_id": "solana:EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+   "chain": "solana",
+   "chain_label": "Solana",
+   "address": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+   "symbol": "E",
+   "name": "Token E",
+   "stage": "STEADY",
+   "stage_reasons": [
+    "activity present but neither strengthening nor deteriorating"
+   ],
+   "scout_momentum": 50,
+   "market": {
+    "market_cap_usd": 400000.0,
+    "fdv_usd": 400000.0,
+    "liquidity_usd": 80000.0,
+    "age_hours": 30.0
+   },
+   "safety": {
+    "status": "INSUFFICIENT_SAFETY_DATA",
+    "label": "Insufficient safety data",
+    "flags": []
+   },
+   "freshness": {
+    "status": "CURRENT",
+    "observed_at": "2026-09-27T12:00:00Z",
+    "snapshot_age_minutes": 2.0
+   },
+   "reasons": [
+    "liquidity healthy"
+   ],
+   "details": [
+    {
+     "title": "Identity",
+     "rows": [
+      {
+       "label": "Canonical id",
+       "value": "solana:EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
+      },
+      {
+       "label": "Chain",
+       "value": "Solana"
+      },
+      {
+       "label": "Mint",
+       "value": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
+      },
+      {
+       "label": "Selected market",
+       "value": "raydium pool pool-E (SOL quote)"
+      },
+      {
+       "label": "Market data from",
+       "value": "GeckoTerminal"
+      }
+     ]
+    },
+    {
+     "title": "Market",
+     "rows": [
+      {
+       "label": "Price",
+       "value": "$0.001"
+      },
+      {
+       "label": "Market cap",
+       "value": "$400.0K"
+      },
+      {
+       "label": "FDV",
+       "value": "$400.0K"
+      },
+      {
+       "label": "Liquidity",
+       "value": "$80.0K"
+      },
+      {
+       "label": "Volume acceleration",
+       "value": "1.00x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Trade acceleration",
+       "value": "1.00x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Buy pressure",
+       "value": "60% of trades are buys, 61% of wallets buying, change +0% (trade counts; flow consistent)"
+      },
+      {
+       "label": "Liquidity change",
+       "value": "+0% over 60m"
+      },
+      {
+       "label": "Price change",
+       "value": "+0% 1h, +0% 24h"
+      },
+      {
+       "label": "Pool age",
+       "value": "30 h"
+      }
+     ]
+    },
+    {
+     "title": "Social",
+     "rows": [
+      {
+       "label": "Social momentum",
+       "value": "Unavailable"
+      },
+      {
+       "label": "Note",
+       "value": "Unavailable is not zero attention"
+      },
+      {
+       "label": "Attribution quality",
+       "value": "none"
+      },
+      {
+       "label": "Spam risk",
+       "value": "unknown"
+      },
+      {
+       "label": "Cross-platform confirmation",
+       "value": "n/a"
+      }
+     ]
+    },
+    {
+     "title": "Scoring",
+     "rows": [
+      {
+       "label": "Market activity",
+       "value": "19.3"
+      },
+      {
+       "label": "Liquidity quality",
+       "value": "11.6"
+      },
+      {
+       "label": "Social momentum",
+       "value": "4.8"
+      },
+      {
+       "label": "Earliness",
+       "value": "14.8"
+      },
+      {
+       "label": "Cross-confirmation",
+       "value": "4.2"
+      },
+      {
+       "label": "Base score",
+       "value": "54.7"
+      },
+      {
+       "label": "Stage adjustment",
+       "value": "+0.0"
+      },
+      {
+       "label": "Risk penalty",
+       "value": "-5.0"
+      },
+      {
+       "label": "Scout Momentum",
+       "value": "50"
+      }
+     ]
+    },
+    {
+     "title": "Safety",
+     "rows": [
+      {
+       "label": "Status",
+       "value": "Insufficient safety data"
+      },
+      {
+       "label": "Flag (caution)",
+       "value": "on-chain safety (authorities, holders) unknown"
+      },
+      {
+       "label": "Unknown",
+       "value": "on-chain safety not checked yet"
+      }
+     ]
+    },
+    {
+     "title": "Freshness",
+     "rows": [
+      {
+       "label": "Observed",
+       "value": "12:00 UTC"
+      },
+      {
+       "label": "Snapshot age",
+       "value": "2 min"
+      },
+      {
+       "label": "This run",
+       "value": "refreshed this run"
+      }
+     ]
+    }
+   ],
+   "analyze": {
+    "chain": "solana",
+    "address": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+    "symbol": "E",
+    "name": "Token E",
+    "pool_address": "pool-E",
+    "source": "scout"
+   }
+  },
+  {
+   "rank": 7,
+   "canonical_id": "solana:DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+   "chain": "solana",
+   "chain_label": "Solana",
+   "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+   "symbol": "D",
+   "name": "Token D",
+   "stage": "FADING",
+   "stage_reasons": [
+    "volume declining",
+    "trades declining",
+    "buy pressure weakening",
+    "price momentum weakening"
+   ],
+   "scout_momentum": 24,
+   "market": {
+    "market_cap_usd": 400000.0,
+    "fdv_usd": 400000.0,
+    "liquidity_usd": 80000.0,
+    "age_hours": 48.0
+   },
+   "safety": {
+    "status": "INSUFFICIENT_SAFETY_DATA",
+    "label": "Insufficient safety data",
+    "flags": []
+   },
+   "freshness": {
+    "status": "CURRENT",
+    "observed_at": "2026-09-27T12:00:00Z",
+    "snapshot_age_minutes": 2.0
+   },
+   "reasons": [
+    "liquidity healthy"
+   ],
+   "details": [
+    {
+     "title": "Identity",
+     "rows": [
+      {
+       "label": "Canonical id",
+       "value": "solana:DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+      },
+      {
+       "label": "Chain",
+       "value": "Solana"
+      },
+      {
+       "label": "Mint",
+       "value": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+      },
+      {
+       "label": "Selected market",
+       "value": "raydium pool pool-D (SOL quote)"
+      },
+      {
+       "label": "Market data from",
+       "value": "GeckoTerminal"
+      }
+     ]
+    },
+    {
+     "title": "Market",
+     "rows": [
+      {
+       "label": "Price",
+       "value": "$0.001"
+      },
+      {
+       "label": "Market cap",
+       "value": "$400.0K"
+      },
+      {
+       "label": "FDV",
+       "value": "$400.0K"
+      },
+      {
+       "label": "Liquidity",
+       "value": "$80.0K"
+      },
+      {
+       "label": "Volume acceleration",
+       "value": "0.57x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Trade acceleration",
+       "value": "0.57x (m15 vs h1 rate)"
+      },
+      {
+       "label": "Buy pressure",
+       "value": "44% of trades are buys, 44% of wallets buying, change -11% (trade counts; flow consistent)"
+      },
+      {
+       "label": "Liquidity change",
+       "value": "no stored history yet"
+      },
+      {
+       "label": "Price change",
+       "value": "-8% 1h, -5% 24h"
+      },
+      {
+       "label": "Pool age",
+       "value": "2 days"
+      }
+     ]
+    },
+    {
+     "title": "Social",
+     "rows": [
+      {
+       "label": "Social momentum",
+       "value": "Unavailable"
+      },
+      {
+       "label": "Note",
+       "value": "Unavailable is not zero attention"
+      },
+      {
+       "label": "Attribution quality",
+       "value": "none"
+      },
+      {
+       "label": "Spam risk",
+       "value": "unknown"
+      },
+      {
+       "label": "Cross-platform confirmation",
+       "value": "n/a"
+      }
+     ]
+    },
+    {
+     "title": "Scoring",
+     "rows": [
+      {
+       "label": "Market activity",
+       "value": "8.5"
+      },
+      {
+       "label": "Liquidity quality",
+       "value": "12.2"
+      },
+      {
+       "label": "Social momentum",
+       "value": "4.8"
+      },
+      {
+       "label": "Earliness",
+       "value": "11.1"
+      },
+      {
+       "label": "Cross-confirmation",
+       "value": "4.2"
+      },
+      {
+       "label": "Base score",
+       "value": "40.8"
+      },
+      {
+       "label": "Stage adjustment",
+       "value": "-12.0"
+      },
+      {
+       "label": "Risk penalty",
+       "value": "-5.0"
+      },
+      {
+       "label": "Scout Momentum",
+       "value": "24"
+      }
+     ]
+    },
+    {
+     "title": "Safety",
+     "rows": [
+      {
+       "label": "Status",
+       "value": "Insufficient safety data"
+      },
+      {
+       "label": "Flag (caution)",
+       "value": "on-chain safety (authorities, holders) unknown"
+      },
+      {
+       "label": "Unknown",
+       "value": "on-chain safety not checked yet"
+      }
+     ]
+    },
+    {
+     "title": "Freshness",
+     "rows": [
+      {
+       "label": "Observed",
+       "value": "12:00 UTC"
+      },
+      {
+       "label": "Snapshot age",
+       "value": "2 min"
+      },
+      {
+       "label": "This run",
+       "value": "refreshed this run"
+      }
+     ]
+    }
+   ],
+   "analyze": {
+    "chain": "solana",
+    "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+    "symbol": "D",
+    "name": "Token D",
+    "pool_address": "pool-D",
+    "source": "scout"
+   }
+  },
+  {
+   "rank": 8,
+   "canonical_id": "solana:4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+   "chain": "solana",
+   "chain_label": "Solana",
+   "address": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+   "symbol": "C",
+   "name": "Token C",
+   "stage": "CROWDED",
+   "stage_reasons": [
+    "price already up 400%",
+    "price vertical while liquidity lags",
+    "thin market: liquidity and trade count far behind the move"
+   ],
+   "scout_momentum": 22,
+   "market": {
+    "market_cap_usd": 60000.0,
+    "fdv_usd": 60000.0,
+    "liquidity_usd": 8000.0,
+    "age_hours": 10.0
+   },
+   "safety": {
+    "status": "INSUFFICIENT_SAFETY_DATA",
+    "label": "Insufficient safety data",
+    "flags": [
+     {
+      "code": "thin_market_pump",
+      "label": "Thin-market pump",
+      "severity": "high"
+     },
+     {
+      "code": "thin_liquidity",
+      "label": "Thin liquidity",
+      "severity": "caution"
+     }
+    ]
+   },
+   "freshness": {
+    "status": "CURRENT",
+    "observed_at": "2026-09-27T12:00:00Z",
+    "snapshot_age_minutes": 2.0
+   },
+   "reasons": [
+    "volume accelerating (2.7x, h1 vs h6 rate)",
+    "trade count accelerating (3.3x, h1 vs h6 rate)",
+    "buyer activity increasing (buy share +5%)"
+   ],
+   "details": [
+    {
+     "title": "Identity",
+     "rows": [
+      {
+       "label": "Canonical id",
+       "value": "solana:4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"
+      },
+      {
+       "label": "Chain",
+       "value": "Solana"
+      },
+      {
+       "label": "Mint",
+       "value": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"
+      },
+      {
+       "label": "Selected market",
+       "value": "raydium pool pool-C (SOL quote)"
+      },
+      {
+       "label": "Market data from",
+       "value": "GeckoTerminal"
+      }
+     ]
+    },
+    {
+     "title": "Market",
+     "rows": [
+      {
+       "label": "Price",
+       "value": "$0.001"
+      },
+      {
+       "label": "Market cap",
+       "value": "$60.0K"
+      },
+      {
+       "label": "FDV",
+       "value": "$60.0K"
+      },
+      {
+       "label": "Liquidity",
+       "value": "$8.0K"
+      },
+      {
+       "label": "Volume acceleration",
+       "value": "2.67x (h1 vs h6 rate)"
+      },
+      {
+       "label": "Trade acceleration",
+       "value": "3.33x (h1 vs h6 rate)"
+      },
+      {
+       "label": "Buy pressure",
+       "value": "70% of trades are buys, 72% of wallets buying, change +5% (trade counts; flow consistent)"
+      },
+      {
+       "label": "Liquidity change",
+       "value": "no stored history yet"
+      },
+      {
+       "label": "Price change",
+       "value": "+120% 1h, +400% 24h"
+      },
+      {
+       "label": "Pool age",
+       "value": "10 h"
+      }
+     ]
+    },
+    {
+     "title": "Social",
+     "rows": [
+      {
+       "label": "Social momentum",
+       "value": "Unavailable"
+      },
+      {
+       "label": "Note",
+       "value": "Unavailable is not zero attention"
+      },
+      {
+       "label": "Attribution quality",
+       "value": "none"
+      },
+      {
+       "label": "Spam risk",
+       "value": "unknown"
+      },
+      {
+       "label": "Cross-platform confirmation",
+       "value": "n/a"
+      }
+     ]
+    },
+    {
+     "title": "Scoring",
+     "rows": [
+      {
+       "label": "Market activity",
+       "value": "33.5"
+      },
+      {
+       "label": "Liquidity quality",
+       "value": "6.3"
+      },
+      {
+       "label": "Social momentum",
+       "value": "4.8"
+      },
+      {
+       "label": "Earliness",
+       "value": "7.2"
+      },
+      {
+       "label": "Cross-confirmation",
+       "value": "12.8"
+      },
+      {
+       "label": "Base score",
+       "value": "64.6"
+      },
+      {
+       "label": "Stage adjustment",
+       "value": "-8.0"
+      },
+      {
+       "label": "Risk penalty",
+       "value": "-35.0"
+      },
+      {
+       "label": "Scout Momentum",
+       "value": "22"
+      }
+     ]
+    },
+    {
+     "title": "Safety",
+     "rows": [
+      {
+       "label": "Status",
+       "value": "Insufficient safety data"
+      },
+      {
+       "label": "Flag (caution)",
+       "value": "on-chain safety (authorities, holders) unknown"
+      },
+      {
+       "label": "Flag (high)",
+       "value": "price +400% on $8,000 liquidity and 73 trades in 24h"
+      },
+      {
+       "label": "Unknown",
+       "value": "on-chain safety not checked yet"
+      }
+     ]
+    },
+    {
+     "title": "Freshness",
+     "rows": [
+      {
+       "label": "Observed",
+       "value": "12:00 UTC"
+      },
+      {
+       "label": "Snapshot age",
+       "value": "2 min"
+      },
+      {
+       "label": "This run",
+       "value": "refreshed this run"
+      }
+     ]
+    }
+   ],
+   "analyze": {
+    "chain": "solana",
+    "address": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+    "symbol": "C",
+    "name": "Token C",
+    "pool_address": "pool-C",
+    "source": "scout"
+   }
+  }
+ ],
+ "warnings": [
+  "Some social sources are unavailable: X (credits exhausted). Missing social data shows as unavailable, never as zero attention.",
+  "Some market data sources were partially unavailable this run.",
+  "1 candidate(s) use stale market data (their provider was unavailable); they are labeled and penalized."
+ ],
+ "refreshing": false,
+ "error": null,
+ "disclaimer": "Growth Scout ranks discovery candidates by observable momentum. ScoutMomentumScore is not a probability of profit, an expected return or a BUY confidence. Analyze a candidate for UpScale's BUY / SELL / WAIT decision."
+}

@@ -252,6 +252,7 @@ class GrowthScoutService:
         carried, carried_age = await self._carry_forward(unresolved, now)
         current = [*run.candidates, *retried, *refreshed]
         momentum: dict[str, SocialMomentum] = {}
+        social_checks = []
         provisional = await self._provisional(current) if social is not None else []
         if social is not None and provisional:
             observed = await social.observe(
@@ -261,7 +262,9 @@ class GrowthScoutService:
                 priority={c.canonical_id: i for i, c in enumerate(provisional)},
             )
             momentum = {m.canonical_id: m for m in observed.momentum}
+            social_checks = observed.providers
         result = await self.rank([*current, *carried], momentum, limit=limit, carried=carried_age)
+        result.social_checks = list(social_checks)
         evaluated = [
             g for g in [*result.candidates, *result.unranked] if g.data_status == "CURRENT"
         ]

@@ -118,8 +118,11 @@ class ScoutConfig(BaseModel):
     # for listings, 300/min for pair lookups. Part of each is reserved for tracked-token
     # refresh (see `ScoutService.refresh_tokens`), so discovery can't starve it; what the
     # refresh leaves unused is handed back to discovery retries.
+    # GeckoTerminal's limits are the process-wide quota for that provider, shared with
+    # Analyze's pool candles (see upscale.services): "interactive" is held for a user
+    # waiting on Analyze and never lent to Scout, so Scout discovery gets the other 2.
     geckoterminal: ScoutProviderLimits = ScoutProviderLimits(
-        calls_per_minute=6, reservations={"refresh": 2}
+        calls_per_minute=6, reservations={"refresh": 2, "interactive": 2}
     )
     dexscreener: ScoutProviderLimits = ScoutProviderLimits(
         calls_per_minute=50, reservations={"refresh": 10}

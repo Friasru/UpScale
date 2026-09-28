@@ -90,7 +90,14 @@ class Orchestrator:
         history = [m.content for m in request.messages[:-1] if m.role == "user"]
 
         resolution: Resolution | None = None
-        if is_concept_question(query, has_images):
+        if request.asset is not None:
+            # An exact identity handed over (Scout's Analyze): analyze that token, never a
+            # ticker match.
+            t0 = time.perf_counter()
+            resolution = self.resolver.exact(request.asset.chain, request.asset.address, query)
+            timings["asset_resolution"] = _ms(t0)
+            decision = route(query, has_images, resolution)
+        elif is_concept_question(query, has_images):
             decision = route(query, has_images)
         else:
             t0 = time.perf_counter()

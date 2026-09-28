@@ -27,10 +27,11 @@ from upscale.services.market_data import (
     Candle,
     CandleSeries,
     MarketDataUnavailableError,
-    RateLimiter,
+    ProviderRateLimitedError,
     Timeframe,
     UnsupportedTimeframeError,
 )
+from upscale.services.quota import INTERACTIVE_LANE, LaneLimiter
 
 PUBLIC_BASE_URL = "https://api.geckoterminal.com/api/v2"
 GT_TIMEFRAMES: dict[Timeframe, tuple[str, int]] = {
@@ -121,7 +122,7 @@ class GeckoTerminalProvider:
         if response.status_code == 404:
             raise AssetNotFoundError(f"{self.name} doesn't know this pool")
         if response.status_code == 429:
-            raise MarketDataUnavailableError(f"{self.name} rate limit reached")
+            raise ProviderRateLimitedError(f"{self.name} rate limit reached")
         if response.status_code != 200:
             raise MarketDataUnavailableError(f"{self.name} returned HTTP {response.status_code}")
         try:
@@ -198,7 +199,12 @@ def parse_pool_candles(
 
 class DexCandleService:
     """Caches pool candles, rate-limits, de-duplicates concurrent requests; failures are
-    never cached."""
+    never cached.
+
+    `limiter`: the provider's quota shared with every other UpScale consumer of it (e.g.
+    Scout's discovery and refresh); requests count against `lane` ("interactive": a user
+    is waiting, so they may use the capacity held for interactive work). Without one, the
+    service keeps its own limit of `max_calls_per_minute`."""
 
     def __init__(
         self,
@@ -207,13 +213,17 @@ class DexCandleService:
         max_calls_per_minute: int = 20,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        limiter: LaneLimiter | None = None,
+        lane: str = INTERACTIVE_LANE,
     ):
         self.provider = provider
         self.max_cache_ttl = max_cache_ttl
         self._clock = clock
         self.now = now
         self._max_calls = max_calls_per_minute
-        self._limiter = RateLimiter(max_calls_per_minute, 60.0, clock)
+        self._shared = limiter is not None
+        self.limiter = limiter or LaneLimiter(max_calls_per_minute, 60.0, clock=clock)
+        self.lane = lane
         self._cache: dict[tuple[str, str, str, int], tuple[float, CandleSeries]] = {}
         self._locks: dict[tuple[str, str, str, int], asyncio.Lock] = {}
 
@@ -221,10 +231,20 @@ class DexCandleService:
     def supported_timeframes(self) -> frozenset[Timeframe]:
         return self.provider.supported_timeframes
 
+    @property
+    def provider_name(self) -> str:
+        return self.provider.name
+
+    def covers(self, chain: str) -> bool:
+        return chain in GECKOTERMINAL_NETWORKS
+
     def reset(self) -> None:
         self._cache.clear()
         self._locks.clear()
-        self._limiter = RateLimiter(self._max_calls, 60.0, self._clock)
+        if self._shared:
+            self.limiter.reset()
+        else:
+            self.limiter = LaneLimiter(self._max_calls, 60.0, clock=self._clock)
 
     async def get_candles(
         self,
@@ -242,10 +262,10 @@ class DexCandleService:
         async with self._locks.setdefault(key, asyncio.Lock()):
             if (hit := self._cached(key)) is not None:
                 return hit.model_copy(update={"symbol": symbol})
-            if not self._limiter.try_acquire():
-                raise MarketDataUnavailableError(
+            if not self.limiter.try_acquire(self.lane):
+                raise ProviderRateLimitedError(
                     f"UpScale's {self.provider.name} request limit was reached; try again "
-                    "in a minute"
+                    "in about a minute"
                 )
             series = await self.provider.fetch_pool_candles(
                 chain,

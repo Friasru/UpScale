@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from upscale.services.chains import DEX_CHAINS, GECKOTERMINAL_NETWORKS, SOLANA
 from upscale.services.geckoterminal import DexCandleService
@@ -30,6 +30,7 @@ from upscale.services.market_data import (
     MarketDataError,
     MarketDataService,
     MarketSnapshot,
+    ProviderRateLimitedError,
     Timeframe,
 )
 from upscale.services.solana_chain import KnownPool, OnchainSafetySnapshot, SolanaSafetyService
@@ -45,6 +46,29 @@ class CapabilityUnavailableError(MarketDataError):
     """No integrated provider can serve this capability for this asset."""
 
 
+class PoolCandleSource(Protocol):
+    """Candles for one exact DEX pool (chain + pool address), from one provider."""
+
+    @property
+    def provider_name(self) -> str: ...
+
+    @property
+    def supported_timeframes(self) -> frozenset[Timeframe]: ...
+
+    def covers(self, chain: str) -> bool: ...
+
+    async def get_candles(
+        self,
+        chain: str,
+        pool: str,
+        timeframe: Timeframe,
+        limit: int,
+        *,
+        symbol: str,
+        canonical_id: str | None,
+    ) -> CandleSeries: ...
+
+
 @dataclass
 class ProviderRegistry:
     market_data: MarketDataService
@@ -52,6 +76,9 @@ class ProviderRegistry:
     dex_candles: DexCandleService
     # Looked up on each call: the on-chain provider exists only when configured.
     onchain: Callable[[], SolanaSafetyService | None] = field(default=lambda: None)
+    # Other providers of candles for the *same exact pool*, tried in order when the ones
+    # before them fail (provider fallback only: never another pool or token).
+    pool_candle_fallbacks: Sequence[PoolCandleSource] = ()
 
     def providers_for(self, capability: Capability, chain: str | None = None) -> list[str]:
         """Which providers would serve a capability (for plans and reporting)."""
@@ -82,11 +109,26 @@ class ProviderRegistry:
         symbol: str,
         canonical_id: str | None,
     ) -> CandleSeries:
-        if chain not in GECKOTERMINAL_NETWORKS:
+        """Candles for this exact pool, from the first pool-candle source that can serve
+        them. Every source gets the same chain, pool and canonical id: a failing provider
+        is replaced by another provider of the same pool, never by another token's pool.
+        When every source was rate-limited the error says so (a temporary provider limit,
+        not missing market history)."""
+        sources: list[PoolCandleSource] = [self.dex_candles, *self.pool_candle_fallbacks]
+        able = [s for s in sources if s.covers(chain) and timeframe in s.supported_timeframes]
+        if not able:
             raise CapabilityUnavailableError(f"no pool-candle provider covers {chain}")
-        return await self.dex_candles.get_candles(
-            chain, pool, timeframe, limit, symbol=symbol, canonical_id=canonical_id
-        )
+        errors: list[MarketDataError] = []
+        for source in able:
+            try:
+                return await source.get_candles(
+                    chain, pool, timeframe, limit, symbol=symbol, canonical_id=canonical_id
+                )
+            except MarketDataError as exc:
+                errors.append(exc)
+        if all(isinstance(e, ProviderRateLimitedError) for e in errors):
+            raise ProviderRateLimitedError("; ".join(str(e) for e in errors))
+        raise next(e for e in errors if not isinstance(e, ProviderRateLimitedError))
 
     async def market_snapshot(self, symbol: str) -> MarketSnapshot:
         return await self.market_data.get_snapshot(symbol)

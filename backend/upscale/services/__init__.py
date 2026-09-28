@@ -32,6 +32,7 @@ from upscale.services.kraken import KrakenProvider
 from upscale.services.market_data import MarketDataService
 from upscale.services.news import NewsService
 from upscale.services.news_sentiment_model import ClaudeNewsSentimentModel
+from upscale.services.quota import LaneLimiter
 from upscale.services.rss_news import RssNewsProvider, configured_feeds
 from upscale.services.scout import (
     DexScreenerDiscoveryProvider,
@@ -40,6 +41,7 @@ from upscale.services.scout import (
     ScoutSnapshotStore,
     load_scout_config,
 )
+from upscale.services.scout.gate import RequestGate
 from upscale.services.scout.growth import GrowthScoutService, load_growth_config
 from upscale.services.scout.social import (
     DiscourseForumProvider,
@@ -90,7 +92,15 @@ solana_safety_service = SolanaSafetyService(_chain_provider) if _chain_provider 
 set_capability_enabled("onchain", solana_safety_service is not None)
 
 # DEX pool candles (GeckoTerminal allows ~30 requests per minute; stay below it).
-dex_candle_service = DexCandleService(GeckoTerminalProvider(), max_calls_per_minute=20)
+# Scout's settings are loaded first: they own the GeckoTerminal quota (below).
+scout_config = load_scout_config(SCOUT_CONFIG)
+# ONE GeckoTerminal quota for the whole process: its real limit is shared by Scout's
+# discovery and refresh and Analyze's pool candles, so UpScale counts them together. Part
+# is held for interactive work (Analyze) and never lent to background Scout traffic.
+geckoterminal_quota = LaneLimiter(
+    scout_config.geckoterminal.calls_per_minute, 60.0, scout_config.geckoterminal.reservations
+)
+dex_candle_service = DexCandleService(GeckoTerminalProvider(), limiter=geckoterminal_quota)
 # Agents ask this registry for data capabilities instead of calling providers directly.
 provider_registry = ProviderRegistry(
     market_data=market_data_service,
@@ -109,10 +119,14 @@ explainer_model = ClaudeExplainerModel(model=EXPLAINER_MODEL)
 
 # Scout: token discovery (not wired into chat or UI yet). The snapshot store is opened on
 # first use, so importing this module never touches the disk.
-scout_config = load_scout_config(SCOUT_CONFIG)
 scout_service = ScoutService(
     [
-        GeckoTerminalDiscoveryProvider(scout_config),
+        GeckoTerminalDiscoveryProvider(
+            scout_config,
+            gate=RequestGate(
+                "GeckoTerminal", scout_config.geckoterminal, limiter=geckoterminal_quota
+            ),
+        ),
         DexScreenerDiscoveryProvider(scout_config),
     ],
     ScoutSnapshotStore(SCOUT_DB_PATH),

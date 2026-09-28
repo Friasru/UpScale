@@ -174,6 +174,13 @@ class AssetResolver:
                 break
         return resolution
 
+    def exact(self, chain: str, address: str, text: str = "") -> Resolution:
+        """The exact token `chain` + `address` (e.g. handed over by Scout): no text or
+        ticker resolution at all, so a token sharing its ticker can never be picked."""
+        resolution = Resolution(assets=[self._address_asset(chain, address.strip())])
+        resolution.timeframe = detect_timeframe(text)
+        return resolution
+
     async def _resolve_text(self, text: str) -> Resolution:
         out = Resolution()
         lowered = text.lower()

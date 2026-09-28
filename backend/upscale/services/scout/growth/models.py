@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, computed_field
 
 from upscale.services.scout.growth.config import DiscoveryMode
 from upscale.services.scout.models import ScoutFeedReport, ScoutPool
-from upscale.services.scout.social.models import Level
+from upscale.services.scout.social.models import Level, ProviderCheck
 
 GrowthStage = Literal[
     "NEW",  # recently launched; not enough evidence to describe acceleration yet
@@ -125,6 +125,14 @@ class GrowthMarket(BaseModel):
     pool_count: int
 
 
+class SocialProviderState(BaseModel):
+    """One social provider's outcome for one token (never post text)."""
+
+    provider: str
+    status: str  # PROVIDER_OK / PROVIDER_CHECKED_ZERO_MATCHES / PROVIDER_UNAVAILABLE / ...
+    detail: str | None = None  # why unavailable (e.g. credits exhausted, deferred)
+
+
 class GrowthMomentum(BaseModel):
     """The measurements behind the market and social families (None: not measurable)."""
 
@@ -152,6 +160,9 @@ class GrowthMomentum(BaseModel):
     engagement_acceleration: float | None = None
     cross_platform_corroborated: bool | None = None
     platforms_active: int | None = None
+    # Per provider: searched (with or without matches), unavailable (and why), or not
+    # configured. Unavailable is never zero attention.
+    social_providers: list[SocialProviderState] = Field(default_factory=list)
 
 
 class TechnicalContext(BaseModel):
@@ -263,6 +274,8 @@ class GrowthScoutResult(BaseModel):
     # Evaluated but not ranked (out of scope for the mode, insufficient data), with why.
     unranked: list[GrowthCandidate] = Field(default_factory=list)
     universe: UniverseReport | None = None  # set by `scan`
+    # Set by `scan`: each social provider's run-level outcome (e.g. X credits exhausted).
+    social_checks: list[ProviderCheck] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     disclaimer: str = NOT_A_TRADE_SIGNAL
 

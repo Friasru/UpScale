@@ -2,7 +2,7 @@ import base64
 import binascii
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_ATTACHMENTS_PER_MESSAGE = 4
@@ -34,9 +34,34 @@ class ChatMessage(BaseModel):
     )
 
 
+class AssetRef(BaseModel):
+    """An exact asset identity handed over by another UpScale view (e.g. Scout's Analyze):
+    chain + contract / mint. Analyze uses it as is: no ticker search, no guessing."""
+
+    chain: str = Field(min_length=1, max_length=32)
+    address: str = Field(min_length=1, max_length=128)
+    symbol: str | None = Field(default=None, max_length=64)  # display only, never resolved
+    name: str | None = Field(default=None, max_length=200)  # display only
+    # The market the handing view had selected (context only: Analyze still chooses its
+    # own technical pool by the trading pipeline's rules).
+    pool_address: str | None = Field(default=None, max_length=128)
+    source: Literal["scout"] = "scout"
+
+    @model_validator(mode="after")
+    def _exact_identity(self) -> "AssetRef":
+        # Imported here: upscale.services imports the agents, which import this module.
+        from upscale.services.chains import is_valid_address
+
+        if not is_valid_address(self.chain, self.address.strip()):
+            raise ValueError(f"{self.address!r} is not a valid {self.chain} token address")
+        return self
+
+
 class ChatRequest(BaseModel):
     # Full conversation so far, oldest first; the last message is the new user turn.
     messages: list[ChatMessage] = Field(min_length=1, max_length=200)
+    # The exact asset the new user turn is about (from Scout's Analyze): resolved as is.
+    asset: AssetRef | None = None
 
     @field_validator("messages")
     @classmethod

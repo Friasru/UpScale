@@ -106,6 +106,11 @@ class MarketDataUnavailableError(MarketDataError):
     """The provider failed, timed out, rate-limited us, or returned unusable data."""
 
 
+class ProviderRateLimitedError(MarketDataUnavailableError):
+    """The provider's request limit (or UpScale's shared quota for it) was reached: a
+    temporary condition, never evidence about the asset itself."""
+
+
 class UnsupportedTimeframeError(MarketDataError):
     """No configured provider offers candles for the requested timeframe."""
 

@@ -248,6 +248,13 @@ def _risk_review(prior: Mapping[AgentName, AgentResult], asset: str) -> RiskAsse
     return review if review.asset == asset else None
 
 
+def _technical_rate_limited(prior: Mapping[AgentName, AgentResult]) -> bool:
+    """The technical agent failed only because its data provider was rate-limited."""
+    technical = prior.get("technical_analysis")
+    unavailable = technical.findings.get("unavailable") if technical is not None else None
+    return isinstance(unavailable, dict) and unavailable.get("kind") == "provider_rate_limited"
+
+
 def _gather(
     prior: Mapping[AgentName, AgentResult], asset: str, profile: CryptoAssetProfile | None
 ) -> _Evidence:
@@ -1109,7 +1116,11 @@ def _assess(
                     kind="blocker",
                     applies_to="both",
                     reason=(
-                        f"there are no price candles for this exact mint yet ({asset}); "
+                        f"technical market data for {asset} is temporarily rate-limited "
+                        "(a provider limit, not missing market history); try again in about "
+                        "a minute"
+                        if _technical_rate_limited(prior)
+                        else f"there are no price candles for this exact mint yet ({asset}); "
                         "ticker-matched candles can't be tied to it"
                         if profile is not None and profile.identity_basis == "contract"
                         else f"there is no live technical analysis for {asset}"

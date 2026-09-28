@@ -58,10 +58,19 @@ export interface ChatResponse {
   analysis?: Analysis | null
 }
 
+/** Where an Analyze request came from (UI-only). Scout Momentum is a discovery ranking,
+ *  kept apart from Analyze's confidence. */
+export interface ScoutContext {
+  symbol: string
+  momentum: number
+}
+
 /** A message as shown in the UI. */
 export interface UiMessage extends ChatMessage {
   id: string
   error?: boolean
+  /** UI-only; never sent back. */
+  scout?: ScoutContext
   /** Structured analysis behind an assistant reply. UI-only; never sent back. */
   analysis?: Analysis | null
 }

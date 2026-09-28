@@ -42,6 +42,9 @@ export function MessageList({ messages, isSending }: MessageListProps) {
             </div>
           )}
           <MessageBody message={message} />
+          {message.scout && (
+            <p className="message-origin">From Scout · Scout Momentum {message.scout.momentum}</p>
+          )}
         </div>
       ))}
       {isSending && (

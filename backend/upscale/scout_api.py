@@ -14,7 +14,7 @@ which receives the exact token (`analyze`: chain + contract / mint) through `/ch
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from upscale.schemas import AssetRef
 from upscale.services.chains import chain_label
+from upscale.services.outcomes.models import SurfacingHistory
 from upscale.services.scout.growth.models import (
     NOT_A_TRADE_SIGNAL,
     GrowthCandidate,
@@ -228,7 +229,12 @@ def _safety(g: GrowthCandidate) -> ScoutSafety:
     return ScoutSafety(status=status, label=SAFETY_LABELS[status], flags=list(flags.values()))
 
 
-def _details(g: GrowthCandidate, age_minutes: float) -> list[ScoutSection]:
+def _details(
+    g: GrowthCandidate,
+    age_minutes: float,
+    history: SurfacingHistory | None = None,
+    computed_at: datetime | None = None,
+) -> list[ScoutSection]:
     m, mo, q, sm = g.market, g.momentum, g.quality, g.scout_momentum
     pool = m.selected_pool
     identity = [
@@ -339,6 +345,23 @@ def _details(g: GrowthCandidate, age_minutes: float) -> list[ScoutSection]:
             else "carried forward on the last good observation (provider unavailable)",
         ),
     ]
+    if history is not None and computed_at is not None:
+        # Ranking runs before this one (the current run is already counted).
+        earlier = history.times_ranked - (1 if history.first_ranked_at <= computed_at else 0)
+        freshness += [
+            ScoutRow(
+                label="Previously surfaced",
+                value=f"{earlier} time{'s' if earlier != 1 else ''}"
+                if earlier > 0
+                else "first time",
+            ),
+            ScoutRow(
+                label="First surfaced",
+                value=f"{_minutes((computed_at - history.first_ranked_at).total_seconds() / 60)} ago"
+                if earlier > 0
+                else "this run",
+            ),
+        ]
     return [
         ScoutSection(title="Identity", rows=identity),
         ScoutSection(title="Market", rows=market),
@@ -349,7 +372,13 @@ def _details(g: GrowthCandidate, age_minutes: float) -> list[ScoutSection]:
     ]
 
 
-def card(g: GrowthCandidate, rank: int, now: datetime) -> ScoutCard:
+def card(
+    g: GrowthCandidate,
+    rank: int,
+    now: datetime,
+    history: SurfacingHistory | None = None,
+    computed_at: datetime | None = None,
+) -> ScoutCard:
     age = max(0.0, (now - g.observed_at).total_seconds() / 60)
     m = g.market
     return ScoutCard(
@@ -374,7 +403,7 @@ def card(g: GrowthCandidate, rank: int, now: datetime) -> ScoutCard:
             status=g.data_status, observed_at=g.observed_at, snapshot_age_minutes=round(age, 1)
         ),
         reasons=g.reasons_surfaced,
-        details=_details(g, age),
+        details=_details(g, age, history, computed_at),
         analyze=AssetRef(
             chain=g.chain,
             address=g.address,
@@ -426,6 +455,7 @@ def build_view(
     now: datetime,
     refreshing: bool = False,
     error: str | None = None,
+    history: Mapping[str, SurfacingHistory] | None = None,
 ) -> ScoutView:
     if result is None:
         return ScoutView(
@@ -451,7 +481,11 @@ def build_view(
             or (g.market.liquidity_usd or 0) >= filters.min_liquidity_usd
         )
     ]
-    cards = [card(g, g.rank or i + 1, now) for i, g in enumerate(matching[:limit])]
+    known = history or {}
+    cards = [
+        card(g, g.rank or i + 1, now, known.get(g.canonical_id), result.computed_at)
+        for i, g in enumerate(matching[:limit])
+    ]
     return ScoutView(
         status="ok" if cards else "empty",
         computed_at=result.computed_at,
@@ -470,6 +504,7 @@ def build_view(
 # --- The feed ---------------------------------------------------------------------------------
 
 Scan = Callable[[], Awaitable[GrowthScoutResult]]
+History = Callable[[list[str]], Awaitable[dict[str, SurfacingHistory]]]
 
 
 class ScoutFeed:
@@ -481,8 +516,10 @@ class ScoutFeed:
         min_refresh_seconds: float = 60.0,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        history: History | None = None,
     ):
         self._scan = scan
+        self._history = history
         self.min_refresh_seconds = min_refresh_seconds
         self._clock = clock
         self.now = now
@@ -525,4 +562,9 @@ class ScoutFeed:
     async def view(self, limit: int, filters: ScoutFilters) -> ScoutView:
         if self.result is None and self.error is None:
             await self.refresh()  # first request: one scan, shared by concurrent callers
-        return build_view(self.result, limit, filters, self.now(), self.refreshing, self.error)
+        history = None
+        if self._history is not None and self.result is not None:
+            history = await self._history([g.canonical_id for g in self.result.candidates])
+        return build_view(
+            self.result, limit, filters, self.now(), self.refreshing, self.error, history
+        )

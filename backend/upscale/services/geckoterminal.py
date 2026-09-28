@@ -69,7 +69,12 @@ class GeckoTerminalProvider:
         symbol: str,
         canonical_id: str | None,
         now: datetime,
+        before: datetime | None = None,
+        contiguous: bool = True,
     ) -> CandleSeries:
+        """`before`: only candles opened before it (the API's `before_timestamp`), for
+        history older than the latest `limit`. `contiguous=False` keeps every closed
+        candle instead of only the latest consecutive run (gaps stay gaps, never filled)."""
         network = GECKOTERMINAL_NETWORKS.get(chain)
         if network is None:
             raise UnsupportedTimeframeError(
@@ -78,19 +83,19 @@ class GeckoTerminalProvider:
         if timeframe not in GT_TIMEFRAMES:
             raise UnsupportedTimeframeError(f"{self.name} does not provide {timeframe} candles")
         period, aggregate = GT_TIMEFRAMES[timeframe]
-        body = await self._get(
-            f"/networks/{network}/pools/{pool}/ohlcv/{period}",
-            {
-                "aggregate": str(aggregate),
-                "limit": str(min(limit + 1, MAX_LIMIT)),
-                "currency": "usd",
-                "token": "base",
-            },
-        )
+        params = {
+            "aggregate": str(aggregate),
+            "limit": str(min(limit + 1, MAX_LIMIT)),
+            "currency": "usd",
+            "token": "base",
+        }
+        if before is not None:
+            params["before_timestamp"] = str(math.ceil(before.timestamp()))
+        body = await self._get(f"/networks/{network}/pools/{pool}/ohlcv/{period}", params)
         rows = _ohlcv_rows(body)
         if rows is None:
             raise MarketDataUnavailableError(f"{self.name} returned malformed candle data")
-        candles, notes = parse_pool_candles(rows, timeframe, now, self.name)
+        candles, notes = parse_pool_candles(rows, timeframe, now, self.name, contiguous)
         return CandleSeries(
             symbol=symbol,
             provider=self.name,
@@ -152,9 +157,10 @@ def _number(value: Any) -> float | None:
 
 
 def parse_pool_candles(
-    rows: list[Any], timeframe: Timeframe, now: datetime, provider: str
+    rows: list[Any], timeframe: Timeframe, now: datetime, provider: str, contiguous: bool = True
 ) -> tuple[list[Candle], list[str]]:
-    """Closed, consecutive candles (oldest first) and notes on anything left out."""
+    """Closed, consecutive candles (oldest first) and notes on anything left out.
+    `contiguous=False`: every closed candle (intervals without trades stay missing)."""
     malformed = MarketDataUnavailableError(f"{provider} returned malformed candle data")
     interval = timedelta(seconds=TIMEFRAME_SECONDS[timeframe])
     by_time: dict[datetime, Candle] = {}
@@ -183,6 +189,8 @@ def parse_pool_candles(
 
     closed = [by_time[t] for t in sorted(by_time) if t + interval <= now]
     notes: list[str] = []
+    if not contiguous:
+        return closed, notes
     start = len(closed)
     while start > 0 and (
         start == len(closed) or closed[start].timestamp - closed[start - 1].timestamp == interval
@@ -275,6 +283,45 @@ class DexCandleService:
                 symbol=symbol,
                 canonical_id=canonical_id,
                 now=self.now(),
+            )
+            ttl = min(self.max_cache_ttl, TIMEFRAME_SECONDS[timeframe] * 0.25)
+            self._cache[key] = (self._clock() + ttl, series)
+            return series
+
+    async def get_window(
+        self,
+        chain: str,
+        pool: str,
+        timeframe: Timeframe,
+        limit: int,
+        *,
+        before: datetime,
+        lane: str,
+        canonical_id: str | None,
+    ) -> CandleSeries:
+        """Every closed candle of one exact pool opened before `before` (the latest `limit`),
+        gaps kept as gaps, counted against `lane` of the shared quota (background work
+        passes its own lane, so it can never use the capacity held for Analyze)."""
+        key = (chain, pool, f"{timeframe}<{math.ceil(before.timestamp())}", limit)
+        if (hit := self._cached(key)) is not None:
+            return hit
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            if (hit := self._cached(key)) is not None:
+                return hit
+            if not self.limiter.try_acquire(lane):
+                raise ProviderRateLimitedError(
+                    f"UpScale's {self.provider.name} request limit was reached for {lane} work"
+                )
+            series = await self.provider.fetch_pool_candles(
+                chain,
+                pool,
+                timeframe,
+                limit,
+                symbol=pool,
+                canonical_id=canonical_id,
+                now=self.now(),
+                before=before,
+                contiguous=False,
             )
             ttl = min(self.max_cache_ttl, TIMEFRAME_SECONDS[timeframe] * 0.25)
             self._cache[key] = (self._clock() + ttl, series)

@@ -1,3 +1,12 @@
+import os
+import tempfile
+
+# Before any `upscale` import: every store the app creates (Scout, social, outcomes)
+# defaults to a throwaway database, never the user's real ~/.upscale/scout.sqlite3.
+os.environ["UPSCALE_SCOUT_DB"] = os.path.join(
+    tempfile.mkdtemp(prefix="upscale-tests-"), "scout.sqlite3"
+)
+
 import asyncio
 import base64
 import json
@@ -30,6 +39,7 @@ from upscale.services.dexscreener import DexScreenerProvider
 from upscale.services.geckoterminal import GeckoTerminalProvider
 from upscale.services.kraken import KrakenProvider
 from upscale.services.news_sentiment_model import ArticleAssessment, ArticleInput
+from upscale.services.outcomes import OutcomeStore
 from upscale.services.rss_news import DEFAULT_FEEDS, RssNewsProvider
 from upscale.services.solana_chain import HeliusProvider, SolanaSafetyService
 from upscale.services.vision import ChartReading, CheckedImage
@@ -608,6 +618,20 @@ def fake_vision() -> Iterator[FakeVisionModel]:
     yield fake
     vision_service.model = original
     vision_service.reset()
+
+
+@pytest.fixture(autouse=True)
+def isolated_outcome_store(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[OutcomeStore]:
+    """Outcome observations recorded by the app during tests go to a temporary database,
+    never the user's real Scout store."""
+    store = OutcomeStore(tmp_path_factory.mktemp("outcomes") / "scout.sqlite3")
+    monkeypatch.setattr(upscale.services, "outcome_store", store)
+    monkeypatch.setattr(upscale.services.outcome_collector, "store", store)
+    monkeypatch.setattr(upscale.services.outcome_collector, "scout_store", None)
+    yield store
+    store.close()
 
 
 @pytest.fixture

@@ -233,6 +233,11 @@ class MarketDataService:
         self._locks.clear()
         self._limiters.clear()
 
+    def available_calls(self, provider_name: str) -> int:
+        """Requests `provider_name`'s limit would let start right now (for background work
+        that must leave capacity to interactive requests)."""
+        return self._limiter(provider_name).available()
+
     def candle_cache_ttl(self, timeframe: Timeframe) -> float:
         return min(self.max_candle_cache_ttl, TIMEFRAME_SECONDS[timeframe] * CANDLE_CACHE_FRACTION)
 

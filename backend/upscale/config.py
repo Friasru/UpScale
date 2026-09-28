@@ -3,6 +3,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from upscale import log_safety
+
 # Load the repo-root .env if present; real environment variables take precedence.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -74,3 +76,30 @@ SOCIAL_CONFIG = os.getenv("UPSCALE_SOCIAL_CONFIG") or None
 # Growth Scout (discovery ranking; never BUY / SELL). Optional JSON overriding its validated
 # weights and thresholds, e.g. '{"mode": "ALL_TRENDING", "safety": {"top_k": 5}}'.
 GROWTH_CONFIG = os.getenv("UPSCALE_GROWTH_CONFIG") or None
+
+# Outcome tracking (measurement only; never changes Scout or decisions). Stored in the Scout
+# database. Optional JSON overriding its horizons / policies, e.g.
+# UPSCALE_OUTCOME_CONFIG='{"observation": {"min_score_change": 15}}'. The background
+# collector can be switched off with UPSCALE_OUTCOMES=0 (anchors are still recorded).
+OUTCOME_CONFIG = os.getenv("UPSCALE_OUTCOME_CONFIG") or None
+OUTCOMES_COLLECTOR = (os.getenv("UPSCALE_OUTCOMES") or "1").strip().lower() not in (
+    "0",
+    "false",
+    "off",
+)
+
+# Secret-safe logging for the whole process (every logger and level): the credentials above
+# and any credential-looking query parameter or header are masked in log output.
+log_safety.install()
+log_safety.register_secrets(
+    [
+        COINGECKO_API_KEY,
+        HELIUS_API_KEY,
+        REDDIT_CLIENT_SECRET,
+        NEYNAR_API_KEY,
+        X_BEARER_TOKEN,
+        os.getenv("ANTHROPIC_API_KEY"),
+        os.getenv("ANTHROPIC_AUTH_TOKEN"),
+    ]
+)
+log_safety.register_url(SOLANA_RPC_URL)

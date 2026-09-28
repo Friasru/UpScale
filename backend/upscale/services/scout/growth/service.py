@@ -126,6 +126,8 @@ class GrowthScoutService:
             )
             g.ineligible_reasons = eligibility(g, cfg)
             g.eligible = not g.ineligible_reasons
+            g.source_kinds = sorted({s.kind for s in c.sources})
+            g.market.windows = list(c.metrics.windows)
             return g
 
         assessed = {cid: assess(cid) for cid in evidence}

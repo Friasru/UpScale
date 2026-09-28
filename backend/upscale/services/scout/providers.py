@@ -244,6 +244,22 @@ class GeckoTerminalDiscoveryProvider(_HttpDiscoveryProvider):
 
         return _combine(await self._batched(chain, addresses, batch))
 
+    async def pools_by_address(self, chain: str, pool_addresses: Sequence[str]) -> list[DexPool]:
+        """Exact pools by pool address (`pools/multi`, batched), through the provider's gate.
+        A pool GeckoTerminal doesn't know is simply absent from the result."""
+        self._require("lookup", chain)
+        network = GECKOTERMINAL_NETWORKS[chain]
+        unique = list(dict.fromkeys(pool_addresses))
+        size = self.config.lookup_batch_size
+        batches = [unique[i : i + size] for i in range(0, len(unique), size)]
+        bodies = await asyncio.gather(
+            *(
+                self._get(f"/networks/{network}/pools/multi/{','.join(b)}", {"include": GT_INCLUDE})
+                for b in batches
+            )
+        )
+        return [p for body in bodies for p in parse_gt_document(body, chain, network)[0]]
+
     async def _pool_listing(
         self, chain: str, kind: DiscoveryKind, endpoint: str, params: dict[str, str], limit: int
     ) -> DiscoveryResult:
@@ -441,6 +457,29 @@ class DexScreenerDiscoveryProvider(_HttpDiscoveryProvider):
         self._require("lookup", chain)
         listing = Listing(self.name, "lookup", "tokens/v1", self.now())
         return await self._lookup(chain, addresses, listing, None)
+
+    async def token_pools(self, chain: str, addresses: Sequence[str]) -> dict[str, list[DexPool]]:
+        """Every pool DEX Screener reports with one of these exact tokens as its base, by
+        canonical id (no pool selection, no filters), in batched requests through the
+        provider's gate. A token it doesn't know maps to an empty list."""
+        self._require("lookup", chain)
+        unique = list(dict.fromkeys(normalize_address(chain, a) or a for a in addresses))
+        valid = [a for a in unique if is_valid_address(chain, a)]
+        size = self.config.lookup_batch_size
+        batches = [valid[i : i + size] for i in range(0, len(valid), size)]
+        bodies = await asyncio.gather(
+            *(self._get(f"/tokens/v1/{chain}/{','.join(b)}") for b in batches)
+        )
+        out: dict[str, list[DexPool]] = {canonical_id(chain, a): [] for a in valid}
+        for body in bodies:
+            for row in _json_list(body, self.name):
+                pool = parse_pair(row)
+                if pool is None or pool.chain != chain:
+                    continue
+                cid = canonical_id(chain, pool.base.address)
+                if cid in out:
+                    out[cid].append(pool)
+        return out
 
     async def _lookup(
         self,

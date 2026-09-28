@@ -10,6 +10,7 @@ from upscale.config import (
     NEWS_FEEDS,
     NEWS_MODEL,
     NEYNAR_API_KEY,
+    OUTCOME_CONFIG,
     REDDIT_CLIENT_ID,
     REDDIT_CLIENT_SECRET,
     REDDIT_USER_AGENT,
@@ -32,6 +33,14 @@ from upscale.services.kraken import KrakenProvider
 from upscale.services.market_data import MarketDataService
 from upscale.services.news import NewsService
 from upscale.services.news_sentiment_model import ClaudeNewsSentimentModel
+from upscale.services.outcomes import (
+    DexScreenerPools,
+    GeckoTerminalPools,
+    OutcomeCollector,
+    OutcomeStore,
+    ProviderCandles,
+    load_outcome_config,
+)
 from upscale.services.quota import LaneLimiter
 from upscale.services.rss_news import RssNewsProvider, configured_feeds
 from upscale.services.scout import (
@@ -117,18 +126,15 @@ news_service = NewsService(
 )
 explainer_model = ClaudeExplainerModel(model=EXPLAINER_MODEL)
 
-# Scout: token discovery (not wired into chat or UI yet). The snapshot store is opened on
-# first use, so importing this module never touches the disk.
+# Scout: token discovery. The snapshot store is opened on first use, so importing this
+# module never touches the disk.
+_dexscreener_discovery = DexScreenerDiscoveryProvider(scout_config)
+_geckoterminal_discovery = GeckoTerminalDiscoveryProvider(
+    scout_config,
+    gate=RequestGate("GeckoTerminal", scout_config.geckoterminal, limiter=geckoterminal_quota),
+)
 scout_service = ScoutService(
-    [
-        GeckoTerminalDiscoveryProvider(
-            scout_config,
-            gate=RequestGate(
-                "GeckoTerminal", scout_config.geckoterminal, limiter=geckoterminal_quota
-            ),
-        ),
-        DexScreenerDiscoveryProvider(scout_config),
-    ],
+    [_geckoterminal_discovery, _dexscreener_discovery],
     ScoutSnapshotStore(SCOUT_DB_PATH),
     scout_config,
 )
@@ -166,4 +172,23 @@ growth_scout_service = GrowthScoutService(
     load_growth_config(GROWTH_CONFIG),
     social_store=social_scout_service.store,
     safety=solana_safety_service,
+)
+
+# Outcome tracking: immutable Scout / decision observations and what happened afterward
+# (same database file, separate tables; opened on first use). The collector is background
+# work in its own request lane: it never uses capacity reserved for Analyze or Scout refresh,
+# leaves headroom to Scout discovery, and is started by the API app (upscale.main).
+outcome_config = load_outcome_config(OUTCOME_CONFIG)
+outcome_store = OutcomeStore(SCOUT_DB_PATH)
+outcome_collector = OutcomeCollector(
+    outcome_store,
+    outcome_config,
+    scout_store=scout_service.store,
+    candles=ProviderCandles(
+        dex_candle_service, market_data_service, outcome_config.collector.min_free_calls
+    ),
+    pools=[
+        DexScreenerPools(_dexscreener_discovery, outcome_config.collector.min_free_calls),
+        GeckoTerminalPools(_geckoterminal_discovery, outcome_config.collector.min_free_calls),
+    ],
 )

@@ -77,6 +77,33 @@ Market and Technical agents unless your message names them; screenshot values ar
 visual readings, never as live data. It needs `ANTHROPIC_API_KEY` (or an `ant auth login`
 profile); without one, screenshot analysis reports "not configured" and everything else runs.
 
+### Outcome tracking (measurement only)
+
+`services/outcomes/` records what happened after Growth Scout surfaced a token or Analyze made
+a decision. It never changes Scout scoring, stages, Risk, Opportunity or BUY / SELL / WAIT,
+and it reports no win rates, expected returns or simulated trades.
+
+* **Observations** (immutable, enforced by SQLite triggers): each Scout ranking anchors a
+  candidate when it is first ranked, re-enters, changes stage, moves 10+ points, or its last
+  anchor is 6 h old (`ObservationPolicy`). Every Analyze with a real decision on a
+  measurable market is stored with its triggers, invalidation, reference price and risk.
+* **Horizons** 5m / 15m / 1h / 4h / 24h (configurable) are PENDING until their window has
+  passed, then COMPLETE, PARTIAL or UNAVAILABLE, each missing part with its reason. Prices
+  come only from the exact pool (chain + token + pool) or exact exchange market: never a
+  ticker match, never stitched across pools. Terminal states (pool gone, liquidity
+  collapse, no trades) stay in the dataset.
+* **Collector**: a background task that sleeps until the next horizon is due. It reuses
+  Scout's stored snapshots first, then batched pool lookups and candles in its own
+  "outcomes" request lane: it never uses capacity reserved for Analyze or Scout refresh,
+  leaves headroom for Scout discovery, and makes no requests while (or just after) Scout or
+  Analyze runs. `UPSCALE_OUTCOMES=0` switches it off; `UPSCALE_OUTCOME_CONFIG` overrides
+  thresholds.
+* **API** (developer-oriented): `GET /outcomes/scout[/{id}]`, `/outcomes/decisions[/{id}]`,
+  `/outcomes/summary?group_by=stage&horizon=1h` (cohorts under 20 measured outcomes report
+  INSUFFICIENT_SAMPLE instead of statistics), `/outcomes/status`, and `/outcomes/replay`, a
+  read-only historical replay from stored snapshots (not a backtest; also
+  `python -m upscale.services.outcomes.replay`).
+
 ## Prerequisites
 
 - Node.js ≥ 20.19 (22 LTS recommended)

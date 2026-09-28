@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, computed_field
 
 from upscale.services.scout.growth.config import DiscoveryMode
-from upscale.services.scout.models import ScoutFeedReport, ScoutPool
+from upscale.services.scout.models import ScoutFeedReport, ScoutPool, ScoutWindow
 from upscale.services.scout.social.models import Level, ProviderCheck
 
 GrowthStage = Literal[
@@ -123,6 +123,9 @@ class GrowthMarket(BaseModel):
     selected_pool: ScoutPool
     market_provider: str
     pool_count: int
+    # The selected pool's rolling windows as reported (informational, for outcome
+    # tracking; scoring reads its own evidence).
+    windows: list[ScoutWindow] = Field(default_factory=list)
 
 
 class SocialProviderState(BaseModel):
@@ -220,6 +223,9 @@ class GrowthCandidate(BaseModel):
     # penalized, for a short grace period only. Never presented as current.
     data_status: Literal["CURRENT", "STALE_CARRIED"] = "CURRENT"
     snapshot_age_minutes: float | None = None
+    # How this observation reached Scout (listing kinds, "lookup" for an exact-address
+    # refresh). Informational only: never used in scoring or ranking.
+    source_kinds: list[str] = Field(default_factory=list)
     stage: GrowthStage
     stage_reasons: list[str]
     # What the current evidence alone says, when stage stability held the stage back

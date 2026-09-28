@@ -238,6 +238,13 @@ class ScoutSnapshotStore:
         """Stored stages since `since` per token, oldest first."""
         return await asyncio.to_thread(self._recent_stages, list(canonical_ids), since)
 
+    async def growth_near(
+        self, canonical_id: str, target: datetime, tolerance: timedelta
+    ) -> tuple[datetime, str, int | None, float | None] | None:
+        """The stored Growth Scout (time, stage, rank, score) of the run closest to `target`
+        within `tolerance`, or None (never interpolated)."""
+        return await asyncio.to_thread(self._growth_near, canonical_id, target, tolerance)
+
     async def tokens(self) -> list[tuple[str, str, str, str | None, str | None]]:
         """(canonical id, chain, address, symbol, name) of every token ever seen."""
         return await asyncio.to_thread(self._tokens)
@@ -647,6 +654,25 @@ class ScoutSnapshotStore:
                 for cid, at, stage in rows:
                     out.setdefault(cid, []).append((_dt(at), stage))
         return out
+
+    def _growth_near(
+        self, canonical_id: str, target: datetime, tolerance: timedelta
+    ) -> tuple[datetime, str, int | None, float | None] | None:
+        t, tol = target.timestamp(), tolerance.total_seconds()
+        with self._lock:
+            row = (
+                self._db()
+                .execute(
+                    """
+                    SELECT computed_at, stage, rank, score FROM scout_growth_stages
+                    WHERE canonical_id = ? AND computed_at BETWEEN ? AND ?
+                    ORDER BY ABS(computed_at - ?), computed_at LIMIT 1
+                    """,
+                    (canonical_id, t - tol, t + tol, t),
+                )
+                .fetchone()
+            )
+        return (_dt(row[0]), row[1], row[2], row[3]) if row else None
 
     def _tokens(self) -> list[tuple[str, str, str, str | None, str | None]]:
         with self._lock:

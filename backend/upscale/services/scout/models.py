@@ -226,6 +226,18 @@ class ScoutSourceError(BaseModel):
     error: str
 
 
+class ScoutFeedReport(BaseModel):
+    """One provider's discovery feeds in one pass. A feed is `<kind>:<chain>`."""
+
+    provider: str
+    available: list[str]  # feeds the provider offers for this pass
+    executed: list[str]  # sent this pass (whatever the outcome)
+    deferred: list[str]  # not sent: over the provider's discovery capacity (their turn comes)
+    failed: list[str] = Field(default_factory=list)  # sent, but the provider failed
+    requests: int  # listing requests sent
+    next_scheduled: list[str] = Field(default_factory=list)  # first in line next pass
+
+
 class ScoutRun(BaseModel):
     """Result of one discovery pass."""
 
@@ -233,6 +245,7 @@ class ScoutRun(BaseModel):
     candidates: list[ScoutCandidate]
     rejected: list[ScoutRejection] = Field(default_factory=list)
     errors: list[ScoutSourceError] = Field(default_factory=list)
+    feeds: list[ScoutFeedReport] = Field(default_factory=list)
     disclaimer: str = NOT_A_RECOMMENDATION
 
 

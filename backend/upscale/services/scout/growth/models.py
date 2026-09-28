@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, computed_field
 
 from upscale.services.scout.growth.config import DiscoveryMode
-from upscale.services.scout.models import ScoutPool
+from upscale.services.scout.models import ScoutFeedReport, ScoutPool
 from upscale.services.scout.social.models import Level
 
 GrowthStage = Literal[
@@ -232,7 +232,9 @@ class UniverseReport(BaseModel):
     """Where this ranking's candidates came from, and how far tracking really reaches."""
 
     discovered: int  # found by this run's discovery listings (including retried ones)
-    discovery_retried: int = 0  # failed listings retried on capacity refresh left unused
+    discovery_retried: int = 0  # deferred / failed feeds sent on capacity refresh left
+    # Per discovery provider: feeds offered, run, deferred (their turn comes), requests.
+    feeds: list[ScoutFeedReport] = Field(default_factory=list)
     refreshed: int  # tracked tokens re-observed by exact address this run
     carried_stale: int = 0  # unresolved, ranked on the last good observation (labeled)
     expired: int  # tracked recently, but not rediscovered within the horizon: dropped

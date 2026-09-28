@@ -19,6 +19,9 @@ Schema (version 2):
 * ``scout_growth_stages``: Growth Scout's stage, rank and score per token and ranking run,
   so a one-run reversal can be told from a sustained change and tracked-token refresh can
   favor recent leaders (append-only).
+* ``scout_feed_schedule``: per provider and discovery feed (``<kind>:<chain>``), its
+  stride-scheduling pass value: which feeds run next when a provider's capacity can't
+  run them all (persisted so the rotation continues across runs).
 * ``scout_latest``: each token's latest full observation (one row per token, replaced),
   so a tracked token a provider outage kept from being refreshed can be carried for a
   short, labeled grace period instead of vanishing.
@@ -83,6 +86,13 @@ CREATE TABLE IF NOT EXISTS scout_growth_stages (
     rank INTEGER,
     score REAL,
     PRIMARY KEY (canonical_id, computed_at)
+);
+CREATE TABLE IF NOT EXISTS scout_feed_schedule (
+    provider TEXT NOT NULL,
+    feed TEXT NOT NULL,
+    pass REAL NOT NULL,
+    last_run_at REAL,
+    PRIMARY KEY (provider, feed)
 );
 CREATE TABLE IF NOT EXISTS scout_latest (
     canonical_id TEXT PRIMARY KEY,
@@ -199,6 +209,16 @@ class ScoutSnapshotStore:
         """Tokens a discovery listing surfaced since `discovered_since`, with when they
         were last observed, last discovered, and which provider last priced them."""
         return await asyncio.to_thread(self._tracked_state, discovered_since)
+
+    async def feed_passes(self, provider: str) -> dict[str, float]:
+        """Each discovery feed's stored pass value for `provider`."""
+        return await asyncio.to_thread(self._feed_passes, provider)
+
+    async def save_feed_passes(
+        self, provider: str, passes: dict[str, float], ran: Sequence[str], at: datetime
+    ) -> None:
+        """Store pass values; `ran`: the feeds that ran at `at`."""
+        await asyncio.to_thread(self._save_feed_passes, provider, passes, list(ran), at)
 
     async def untrack(self, canonical_ids: Sequence[str]) -> None:
         """Stop tracking tokens confirmed gone / unusable (until a listing surfaces them
@@ -535,6 +555,37 @@ class ScoutSnapshotStore:
             )
             for r in rows
         ]
+
+    def _feed_passes(self, provider: str) -> dict[str, float]:
+        with self._lock:
+            rows = (
+                self._db()
+                .execute(
+                    "SELECT feed, pass FROM scout_feed_schedule WHERE provider = ?", (provider,)
+                )
+                .fetchall()
+            )
+        return {r[0]: float(r[1]) for r in rows}
+
+    def _save_feed_passes(
+        self, provider: str, passes: dict[str, float], ran: list[str], at: datetime
+    ) -> None:
+        with self._lock:
+            db = self._db()
+            with db:
+                db.executemany(
+                    """
+                    INSERT INTO scout_feed_schedule (provider, feed, pass, last_run_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT (provider, feed) DO UPDATE SET
+                        pass = excluded.pass,
+                        last_run_at = COALESCE(excluded.last_run_at, last_run_at)
+                    """,
+                    [
+                        (provider, feed, value, at.timestamp() if feed in ran else None)
+                        for feed, value in passes.items()
+                    ],
+                )
 
     def _untrack(self, ids: list[str]) -> None:
         with self._lock:

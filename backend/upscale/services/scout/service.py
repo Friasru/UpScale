@@ -35,6 +35,7 @@ from upscale.services.scout.gate import RequestGate, request_lane
 from upscale.services.scout.models import (
     DiscoveryKind,
     ScoutCandidate,
+    ScoutFeedReport,
     ScoutRejection,
     ScoutRun,
     ScoutSourceError,
@@ -83,6 +84,7 @@ class ScoutService:
             if chain in provider.chains
             if only is None or (provider.name, kind, chain) in only
         ]
+        calls, reports = await self._schedule_feeds(calls, started)
         outcomes = await asyncio.gather(
             *(self._listing(p, k, c) for p, k, c in calls), return_exceptions=True
         )
@@ -90,6 +92,8 @@ class ScoutService:
         errors: list[ScoutSourceError] = []
         for (provider, kind, chain), outcome in zip(calls, outcomes, strict=True):
             if isinstance(outcome, MarketDataError):
+                report = next(r for r in reports if r.provider == provider.name)
+                report.failed.append(f"{kind}:{chain}")
                 errors.append(
                     ScoutSourceError(
                         provider=provider.name, kind=kind, chain=chain, error=str(outcome)
@@ -102,7 +106,71 @@ class ScoutService:
                 collected.rejected.extend(outcome.rejected)
         candidates = merge_candidates(collected.candidates)
         candidates, enrich_errors = await self._enrich(candidates)
-        return await self._finish(started, candidates, collected.rejected, errors + enrich_errors)
+        run = await self._finish(started, candidates, collected.rejected, errors + enrich_errors)
+        run.feeds = reports
+        return run
+
+    async def _schedule_feeds(
+        self, calls: list[tuple[DiscoveryProvider, DiscoveryKind, str]], at: datetime
+    ) -> tuple[list[tuple[DiscoveryProvider, DiscoveryKind, str]], list[ScoutFeedReport]]:
+        """Fair discovery feed scheduling (stride scheduling), per provider.
+
+        A feed is `<kind>:<chain>`. Each has a persisted pass value; the feeds with the
+        lowest pass run first (ties: higher weight, then the feed name, so input order
+        never matters), as many as the provider's discovery capacity allows right now
+        (its rate limit minus any held reservation, e.g. for tracked-token refresh). A feed
+        that runs advances its pass by 1 / weight: a weight-2 feed comes round about twice
+        as often as a weight-1 feed, and every feed's turn comes, so none starves. Feeds
+        not sent are deferred, never reported as failed. A newly offered feed starts at
+        the lowest pass among the provider's feeds (no burst of priority), feeds of one
+        kind staggered across their stride so kinds interleave within a run."""
+        weights = self.config.feed_weights
+        by_provider: dict[str, list[tuple[DiscoveryProvider, DiscoveryKind, str]]] = {}
+        for call in calls:
+            by_provider.setdefault(call[0].name, []).append(call)
+        selected: list[tuple[DiscoveryProvider, DiscoveryKind, str]] = []
+        reports: list[ScoutFeedReport] = []
+        for name, group in by_provider.items():
+            provider = group[0][0]
+            gate = getattr(provider, "gate", None)
+            stored = await self.store.feed_passes(name)
+            feeds = {f"{k}:{c}": (p, k, c) for p, k, c in group}
+            known = [stored[f] for f in feeds if f in stored]
+            start = min(known) if known else 0.0
+            # Feeds of one kind start staggered across its stride (the i-th of n at i / n of
+            # it), so kinds interleave instead of moving in lockstep.
+            siblings: dict[str, list[str]] = {}
+            for f in sorted(feeds):
+                siblings.setdefault(f.split(":", 1)[0], []).append(f)
+            passes = {
+                f: stored.get(f, start + i / len(same) / _feed_weight(f, weights))
+                for same in siblings.values()
+                for i, f in enumerate(same)
+            }
+
+            capacity = gate.available() if isinstance(gate, RequestGate) else len(feeds)
+            queue = _feed_order(passes, weights)
+            run, deferred = queue[:capacity], queue[capacity:]
+            for feed in run:
+                passes[feed] += 1 / _feed_weight(feed, weights)
+            await self.store.save_feed_passes(name, passes, run, at)
+            nominal = (
+                gate.limits.calls_per_minute - sum(gate.limits.reservations.values())
+                if isinstance(gate, RequestGate)
+                else len(feeds)
+            )
+            selected += [feeds[f] for f in run]
+            reports.append(
+                ScoutFeedReport(
+                    provider=name,
+                    available=sorted(feeds),
+                    executed=run,
+                    deferred=deferred,
+                    requests=len(run),
+                    next_scheduled=_feed_order(passes, weights)[:nominal],
+                )
+            )
+        return selected, reports
 
     async def lookup_exact_token(self, chain: str, address: str) -> ScoutRun:
         """One exact token (chain + contract / mint), from the first provider that knows it."""
@@ -363,6 +431,15 @@ class ScoutService:
         full = candidate.model_copy(update={"first_seen_at": first_seen, "features": features})
         await self.store.save_latest(full)  # the last good observation, for a short grace
         return full
+
+
+def _feed_weight(feed: str, weights: dict[str, float]) -> float:
+    return weights.get(feed.split(":", 1)[0], 1.0)
+
+
+def _feed_order(passes: dict[str, float], weights: dict[str, float]) -> list[str]:
+    """Lowest pass first; ties: higher weight, then the feed name (never input order)."""
+    return sorted(passes, key=lambda feed: (passes[feed], -_feed_weight(feed, weights), feed))
 
 
 @dataclass

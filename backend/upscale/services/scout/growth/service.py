@@ -37,6 +37,7 @@ from upscale.services.scout.growth.scoring import eligibility, evaluate
 from upscale.services.scout.growth.signals import market_evidence, social_evidence
 from upscale.services.scout.models import (
     ScoutCandidate,
+    ScoutFeedReport,
     ScoutRun,
     ScoutSnapshot,
     ScoutSourceError,
@@ -212,15 +213,32 @@ class GrowthScoutService:
         if callable(release):
             release()
         retried: list[ScoutCandidate] = []
+        # Feeds discovery deferred (over capacity) or that failed, retried on whatever the
+        # refresh left of its reservation (never before the refresh is done).
         failed_listings: set[tuple[str, str, str]] = {
             (e.provider, e.kind, e.chain) for e in run.errors if e.kind != "lookup" and e.chain
         }
+        for report in run.feeds:
+            for feed in report.deferred:
+                kind, chain = feed.split(":", 1)
+                failed_listings.add((report.provider, kind, chain))
         retry_errors: list[ScoutSourceError] = []
+        feeds = list(run.feeds)
+        retried_feeds = 0
         if failed_listings and callable(release):
             retry = await scout.discover(only=failed_listings)
             retried = [c for c in retry.candidates if c.canonical_id not in discovered_ids]
             retry_errors = retry.errors
             discovered_ids |= {c.canonical_id for c in retry.candidates}
+            feeds = _merge_feed_reports(run.feeds, retry.feeds)
+            # Feeds the retry really sent (with no capacity left it defers them again).
+            retried_feeds = (
+                sum(len(r.executed) for r in retry.feeds)
+                if retry.feeds
+                else len(
+                    {(e.provider, e.kind, e.chain) for e in retry.errors if e.kind != "lookup"}
+                )
+            )
         refreshed = [c for c in refresh.candidates if c.canonical_id not in discovered_ids]
         found = {c.canonical_id for c in refreshed} | discovered_ids
         missing = [t for t in plan.selected if t.canonical_id not in found]
@@ -255,7 +273,8 @@ class GrowthScoutService:
         horizon = now - timedelta(hours=tc.horizon_hours)
         result.universe = UniverseReport(
             discovered=len(discovered_ids),
-            discovery_retried=len(failed_listings) if callable(release) else 0,
+            discovery_retried=retried_feeds,
+            feeds=feeds,
             refreshed=len({c.canonical_id for c in refreshed}),
             carried_stale=len(carried),
             expired=await self.store.expired_count(horizon, horizon),
@@ -486,3 +505,29 @@ class RefreshPlan:
     capacity_tokens: int = 0
     revisit_minutes: float | None = None
     horizon_covered: bool = True
+
+
+def _merge_feed_reports(
+    first: Sequence[ScoutFeedReport], retry: Sequence[ScoutFeedReport]
+) -> list[ScoutFeedReport]:
+    """One report per provider across discovery and its capacity retry."""
+    later = {r.provider: r for r in retry}
+    merged = []
+    for r in first:
+        again = later.get(r.provider)
+        if again is None:
+            merged.append(r)
+            continue
+        retried = set(again.executed) | set(again.deferred)
+        merged.append(
+            ScoutFeedReport(
+                provider=r.provider,
+                available=r.available,
+                executed=[*r.executed, *again.executed],
+                deferred=again.deferred + [f for f in r.deferred if f not in retried],
+                failed=[*(f for f in r.failed if f not in again.executed), *again.failed],
+                requests=r.requests + again.requests,
+                next_scheduled=again.next_scheduled,
+            )
+        )
+    return merged

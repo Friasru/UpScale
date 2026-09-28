@@ -104,6 +104,12 @@ class ScoutConfig(BaseModel):
     # Minimum seconds between stored snapshots of the same token (repeat fetches of cached
     # data are never stored twice either way).
     min_snapshot_interval_seconds: float = Field(default=30.0, ge=0)
+    # Discovery feed weights (listing kind -> weight). When a provider's discovery capacity
+    # can't run every feed (kind x chain) in one scan, feeds take turns: a feed of weight 2
+    # runs about twice as often as one of weight 1, and none is ever starved.
+    feed_weights: dict[str, float] = Field(
+        default_factory=lambda: {"new": 2.0, "active": 1.0, "trending": 1.0}
+    )
     filters: ScoutFilterConfig = ScoutFilterConfig()
     flags: ScoutRiskFlagConfig = ScoutRiskFlagConfig()
     features: ScoutFeatureConfig = ScoutFeatureConfig()
@@ -127,6 +133,10 @@ class ScoutConfig(BaseModel):
         bad = [k for k in self.kinds if k not in ("new", "active", "trending")]
         if bad:
             raise ValueError(f"unknown discovery kind(s) {', '.join(bad)}")
+        odd = [k for k, w in self.feed_weights.items()
+               if k not in ("new", "active", "trending") or w <= 0]  # fmt: skip
+        if odd:
+            raise ValueError(f"feed weights must be positive, for known kinds: {', '.join(odd)}")
         return self
 
 

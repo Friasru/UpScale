@@ -45,6 +45,10 @@ class SocialProviderError(MarketDataUnavailableError):
     pass
 
 
+class CreditsExhaustedError(SocialProviderError):
+    """The provider refused for lack of credits (HTTP 402): nothing more is sent this run."""
+
+
 class SocialTrendProvider(Protocol):
     name: str
     platform: str
@@ -216,6 +220,7 @@ class _HttpSocialProvider:
     name = "social"
     platform = "social"
     requirement = ""
+    min_page = 1  # fewest results a search can be run with
 
     def __init__(
         self,
@@ -236,10 +241,14 @@ class _HttpSocialProvider:
         self._result_budget: int | None = settings.max_results_per_run
         self._cache_hits_at_start = self.gate.cache_hits
         self.max_results_per_day = settings.max_results_per_day
+        # Set by the first HTTP 402 of a run: every later request this run fails without
+        # being sent (a new run tries again, in case credits were added).
+        self.exhausted: str | None = None
 
     def start_run(self, result_budget: int | None = None) -> None:
         """Reset per-run usage. `result_budget` further caps this run's results (e.g. what
         is left of the daily budget)."""
+        self.exhausted = None
         self.requests_this_run = 0
         self.results_this_run = 0
         self._reserved_results = 0
@@ -251,6 +260,31 @@ class _HttpSocialProvider:
         if self._result_budget is None:
             return None
         return max(0, self._result_budget - self.results_this_run - self._reserved_results)
+
+    def search_capacity(self) -> tuple[int, str] | None:
+        """How many more searches this run's budgets can afford right now, and which budget
+        binds (None: no per-run budget). A search is assumed to use every page at a full
+        page size, so this many concurrent searches are never refused for budget. Also
+        bounded by what the rate limit lets start now, and 0 once credits ran out."""
+        if self.exhausted:
+            return 0, "credits"
+        caps: list[tuple[int, str]] = [
+            (self.gate.available() // self.settings.max_pages, "request rate limit")
+        ]
+        budget = self.settings.max_requests_per_run
+        if budget is not None:
+            left = max(0, budget - self.requests_this_run)
+            caps.append((left // self.settings.max_pages, "request budget"))
+        results = self.results_left()
+        if results is not None:
+            page = self.settings.max_results_per_page
+            caps.append(
+                (
+                    results // page if results >= page else int(results >= self.min_page),
+                    "result budget",
+                )
+            )
+        return min(caps) if caps else None
 
     def usage(self) -> dict[str, Any]:
         cost = self.settings.cost_per_result_usd
@@ -278,6 +312,8 @@ class _HttpSocialProvider:
         result budget; `count_results` counts what it actually consumed."""
 
         async def fetch() -> Any:
+            if self.exhausted:
+                raise CreditsExhaustedError(self.exhausted)
             budget = self.settings.max_requests_per_run
             if budget is not None and self.requests_this_run >= budget:
                 raise RateLimitReachedError(
@@ -322,7 +358,8 @@ class _HttpSocialProvider:
         if response.status_code == 429:
             raise RateLimitReachedError(f"{self.name} rate limit reached")
         if response.status_code == 402:
-            raise SocialProviderError(f"{self.name} credits are exhausted (HTTP 402)")
+            self.exhausted = f"{self.name} credits are exhausted (HTTP 402)"
+            raise CreditsExhaustedError(self.exhausted)
         if response.status_code in (401, 403):
             raise SocialProviderError(
                 f"{self.name} refused the credentials (HTTP {response.status_code})"

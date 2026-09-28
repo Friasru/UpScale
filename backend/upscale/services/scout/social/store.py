@@ -16,7 +16,9 @@ tables). Everything is append-only: history is never rewritten.
 * ``scout_social_momentum``: per token and run, the momentum state and its evidence.
 * ``scout_social_usage``: per provider and run, requests sent, results consumed, cache
   hits and estimated cost (what enforces a provider's daily result budget).
-* ``scout_meta``: the local salt for author keys (never leaves this file).
+* ``scout_meta``: the local salt for author keys (never leaves this file), and a per-provider
+  scheduling round that rotates which equally-stale token a budgeted provider searches
+  first.
 
 Events older than the retention period are deleted by `prune` (no long-term author
 histories); snapshots and momentum hold only aggregates.
@@ -193,6 +195,11 @@ class SocialStore:
     async def last_covered_to(self, canonical_id: str, provider: str) -> datetime | None:
         return await asyncio.to_thread(self._last_covered_to, canonical_id, provider)
 
+    async def first_unavailable_at(self, canonical_id: str, provider: str) -> datetime | None:
+        """When `provider` first failed to search the token (deferred, rate-limited,
+        failed): how long a never-covered token has been waiting. None: never failed."""
+        return await asyncio.to_thread(self._first_unavailable_at, canonical_id, provider)
+
     async def add_snapshot(self, snapshot: SocialSourceSnapshot) -> None:
         await asyncio.to_thread(self._add_snapshot, snapshot)
 
@@ -210,6 +217,10 @@ class SocialStore:
 
     async def record_usage(self, provider: str, run_at: datetime, usage: dict[str, Any]) -> None:
         await asyncio.to_thread(self._record_usage, provider, run_at, usage)
+
+    async def next_schedule_round(self, provider: str) -> int:
+        """0, 1, 2, ... on successive calls for `provider` (persisted)."""
+        return await asyncio.to_thread(self._next_round, provider)
 
     async def results_today(self, provider: str, at: datetime) -> int:
         """Results consumed by `provider` on `at`'s UTC day."""
@@ -384,6 +395,21 @@ class SocialStore:
             )
         return _opt_dt(row[0]) if row else None
 
+    def _first_unavailable_at(self, canonical_id: str, provider: str) -> datetime | None:
+        with self._lock:
+            row = (
+                self._db()
+                .execute(
+                    """
+                SELECT MIN(checked_at) FROM scout_social_checks
+                WHERE canonical_id = ? AND provider = ? AND status = 'PROVIDER_UNAVAILABLE'
+                """,
+                    (canonical_id, provider),
+                )
+                .fetchone()
+            )
+        return _opt_dt(row[0]) if row else None
+
     def _add_snapshot(self, s: SocialSourceSnapshot) -> None:
         with self._lock:
             db = self._db()
@@ -464,6 +490,19 @@ class SocialStore:
                         usage.get("estimated_cost_usd"),
                     ),
                 )
+
+    def _next_round(self, provider: str) -> int:
+        key = f"schedule_round:{provider}"
+        with self._lock:
+            db = self._db()
+            with db:
+                row = db.execute("SELECT value FROM scout_meta WHERE key = ?", (key,)).fetchone()
+                current = int(row[0]) if row else 0
+                db.execute(
+                    "INSERT OR REPLACE INTO scout_meta (key, value) VALUES (?, ?)",
+                    (key, str(current + 1)),
+                )
+        return current
 
     def _results_today(self, provider: str, at: datetime) -> int:
         with self._lock:

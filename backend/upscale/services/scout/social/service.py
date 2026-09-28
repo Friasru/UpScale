@@ -4,7 +4,12 @@ One run, for a set of tracked tokens:
 
 1. Every configured provider is searched concurrently, tokens batched into as few queries
    as its API allows. Each token's search starts where its last successful search ended
-   (minus a small overlap), or `search_span_hours` back the first time.
+   (minus a small overlap), or `search_span_hours` back the first time. A provider with a
+   per-run budget or rate limit (X, Neynar) searches tokens in priority order (how long
+   each has waited, never-searched and provisional-rank bonuses; see `fair_order`), in
+   waves its remaining budget and rate limit can afford; tokens it doesn't reach are
+   PROVIDER_UNAVAILABLE (deferred), never a zero, and have waited longer next run. After
+   an HTTP 402 (credits exhausted) nothing more is sent to that provider this run.
 2. Every returned post is attributed (EXACT / STRONG / PROBABLE / AMBIGUOUS / REJECTED)
    and stored once; a post seen again is not rewritten.
 3. Each (token, provider) search outcome is stored: PROVIDER_OK,
@@ -21,10 +26,11 @@ whatever happens here. Nothing here decides BUY / SELL / WAIT.
 """
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 
 from upscale.services.market_data import MarketDataError
+from upscale.services.scout.gate import RateLimitReachedError
 from upscale.services.scout.models import WINDOW_MINUTES, ScoutCandidate, ScoutGrowthFeatures
 from upscale.services.scout.social.analysis import (
     covered,
@@ -38,7 +44,7 @@ from upscale.services.scout.social.analysis import (
     window_trend,
 )
 from upscale.services.scout.social.attribution import COUNTED_LEVELS, AttributionIndex
-from upscale.services.scout.social.config import SocialConfig
+from upscale.services.scout.social.config import SchedulingConfig, SocialConfig
 from upscale.services.scout.social.models import (
     Attribution,
     ProviderCheck,
@@ -100,7 +106,11 @@ class SocialScoutService:
         tracked: Sequence[TokenIdentity],
         universe: Sequence[TokenIdentity] = (),
         market: Mapping[str, ScoutGrowthFeatures] | None = None,
+        priority: Mapping[str, int] | None = None,
     ) -> SocialRun:
+        """`priority`: each token's provisional rank (0 = best), used by budgeted
+        providers to spend scarce searches on the leading candidates first, within the
+        anti-starvation rules of `fair_order`."""
         cfg = self.config
         started = self.now()
         await self.store.prune(started - timedelta(hours=cfg.event_retention_hours))
@@ -160,10 +170,31 @@ class SocialScoutService:
                     start_run(daily - used)
             elif callable(start_run):
                 start_run()
-            since_by_token = {
-                t.canonical_id: await self._since(t.canonical_id, provider.name, started)
+            last_covered = {
+                t.canonical_id: await self.store.last_covered_to(t.canonical_id, provider.name)
                 for t in tracked
             }
+            since_by_token = {cid: self._since(last, started) for cid, last in last_covered.items()}
+            capacity = getattr(provider, "search_capacity", None)
+            budgeted = callable(capacity) and capacity() is not None
+            order = list(tracked)
+            if budgeted:
+                # A budget may not reach every token: search the stalest first (see
+                # `fair_order`), never in the order tokens happened to be listed.
+                waiting = {
+                    cid: await self.store.first_unavailable_at(cid, provider.name)
+                    for cid, last in last_covered.items()
+                    if last is None
+                }
+                order = fair_order(
+                    tracked,
+                    last_covered,
+                    await self.store.next_schedule_round(provider.name),
+                    waiting,
+                    now=started,
+                    priority=priority,
+                    config=cfg.scheduling,
+                )
             # A provider may shape its own terms from the token's references (e.g. to
             # avoid paying for posts attribution could never count); otherwise the
             # address and cashtag.
@@ -174,16 +205,22 @@ class SocialScoutService:
                     t.canonical_id: search_terms(index.references(t))
                     if callable(search_terms)
                     else index.terms_for(t)
-                    for t in tracked
+                    for t in order
                 },
             )
-            outcomes = await asyncio.gather(
-                *(
-                    provider.search(terms, min(since_by_token[c] for c in ids), keyer)
-                    for ids, terms in plans
-                ),
-                return_exceptions=True,
-            )
+
+            async def search(plan: tuple[list[str], list[str]]) -> SocialSearchResult:
+                ids, terms = plan
+                return await provider.search(terms, min(since_by_token[c] for c in ids), keyer)
+
+            outcomes: list[SocialSearchResult | BaseException]
+            if budgeted:
+                assert callable(capacity)
+                outcomes = await _in_budget_waves(provider.name, capacity, plans, search)
+            else:
+                outcomes = list(
+                    await asyncio.gather(*(search(p) for p in plans), return_exceptions=True)
+                )
             # A token's terms may be split over several queries: its outcome is only
             # judged once all of them are in. Any failed query makes the token
             # unavailable (a partial search never counts as a real zero); coverage is
@@ -268,13 +305,12 @@ class SocialScoutService:
 
     # --- internals ------------------------------------------------------------------------
 
-    async def _since(self, cid: str, provider: str, now: datetime) -> datetime:
+    def _since(self, last_covered: datetime | None, now: datetime) -> datetime:
         cfg = self.config
         earliest = now - timedelta(hours=cfg.search_span_hours)
-        last = await self.store.last_covered_to(cid, provider)
-        if last is None:
+        if last_covered is None:
             return earliest
-        return max(earliest, last - timedelta(minutes=cfg.overlap_minutes))
+        return max(earliest, last_covered - timedelta(minutes=cfg.overlap_minutes))
 
     def _events(self, result: SocialSearchResult, index: AttributionIndex) -> list[SocialEvent]:
         events: list[SocialEvent] = []
@@ -393,6 +429,88 @@ class SocialScoutService:
                 window_trend(window, [e for p in both for e in p[0]], now, baseline_ok, cfg)
             )
         return windows, trends
+
+
+class BudgetDeferredError(RateLimitReachedError):
+    """A search this run's budget couldn't afford: deferred, never reported as zero."""
+
+
+def fair_order(
+    tracked: Sequence[TokenIdentity],
+    last_covered: Mapping[str, datetime | None],
+    schedule_round: int,
+    waiting_since: Mapping[str, datetime | None] | None = None,
+    *,
+    now: datetime,
+    priority: Mapping[str, int] | None = None,
+    config: SchedulingConfig | None = None,
+) -> list[TokenIdentity]:
+    """The order a budgeted provider searches tokens in, independent of list order.
+    Highest priority first, in minutes (see `SchedulingConfig`):
+
+        waited + never-searched bonus + provisional-rank bonus
+
+    * `waited`: since the last successful search; never searched, since the first time
+      the token was deferred (`waiting_since`), 0 when brand new;
+    * the never-searched bonus puts first-time coverage ahead of routine refreshes;
+    * the rank bonus (1 for the top provisional candidate, falling linearly to 0 for the
+      last; none without `priority`) spends scarce searches on the leading candidates.
+
+    Bonuses are bounded while `waited` keeps growing, so a deferred token overtakes
+    every fresher one eventually, however low it ranks and however many new tokens
+    discovery adds: nothing starves. Ties by canonical id, rotated by one position per
+    run (`schedule_round`), so the same token never always wins a tie.
+    """
+    cfg = config or SchedulingConfig()
+    ids = sorted({t.canonical_id for t in tracked})
+    shift = schedule_round % len(ids) if ids else 0
+    rotation = {cid: (i - shift) % len(ids) for i, cid in enumerate(ids)}
+    waiting = waiting_since or {}
+    ranks = priority or {}
+    ranked = len(ranks)
+
+    def minutes(since: datetime | None) -> float:
+        return max(0.0, (now - since).total_seconds() / 60) if since else 0.0
+
+    def score(t: TokenIdentity) -> float:
+        cid = t.canonical_id
+        last = last_covered.get(cid)
+        value = minutes(last) if last else minutes(waiting.get(cid))
+        if last is None:
+            value += cfg.never_searched_bonus_minutes
+        if cid in ranks and ranked:
+            value += cfg.rank_bonus_minutes * (1 - ranks[cid] / max(1, ranked - 1))
+        return value
+
+    return sorted(tracked, key=lambda t: (-score(t), rotation[t.canonical_id]))
+
+
+async def _in_budget_waves(
+    provider: str,
+    capacity: Callable[[], tuple[int, str] | None],
+    plans: Sequence[tuple[list[str], list[str]]],
+    search: Callable[[tuple[list[str], list[str]]], Awaitable[SocialSearchResult]],
+) -> list[SocialSearchResult | BaseException]:
+    """Run plans in priority order, each wave only as large as the budget can still afford
+    (so a concurrent reservation never crowds out later searches); once it can afford
+    none, the rest are deferred. Budgets count what searches actually consumed, so small
+    incremental searches leave room for more tokens."""
+    outcomes: list[SocialSearchResult | BaseException] = []
+    while len(outcomes) < len(plans):
+        room, limit = capacity() or (len(plans), "")
+        if room <= 0:
+            error = BudgetDeferredError(
+                f"{provider} credits are exhausted (HTTP 402); no more {provider} requests "
+                "this run: deferred to a later run"
+                if limit == "credits"
+                else f"UpScale's {provider} {limit} for this run was reached; deferred to a "
+                "later run (tokens that waited longest go first)"
+            )
+            outcomes += [error] * (len(plans) - len(outcomes))
+            break
+        wave = plans[len(outcomes) : len(outcomes) + room]
+        outcomes += await asyncio.gather(*(search(p) for p in wave), return_exceptions=True)
+    return outcomes
 
 
 def _event(post: SocialPost, fetched_at: datetime, attribution: Attribution) -> SocialEvent:

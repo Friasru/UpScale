@@ -13,17 +13,25 @@ growth features.
 5. Accepted candidates are recorded (first sighting) and snapshotted, and their growth
    features are computed against stored history.
 
+Tracked tokens are re-observed with `refresh_tokens` in the "refresh" request lane: each
+provider may reserve part of its rate limit for it (`ScoutProviderLimits.reservations`),
+which discovery can't consume while held (`hold_reservations`); `release_reservations`
+hands what is left back to discovery (e.g. to retry listings that failed for capacity).
+Provider rate limits stay hard throughout.
+
 Discovery order is the order tokens were collected; nothing here ranks candidates.
 """
 
 import asyncio
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from upscale.services.market_data import MarketDataError
 from upscale.services.scout.config import ScoutConfig
 from upscale.services.scout.features import compute_features
 from upscale.services.scout.filters import candidate_problems
+from upscale.services.scout.gate import RequestGate, request_lane
 from upscale.services.scout.models import (
     DiscoveryKind,
     ScoutCandidate,
@@ -36,6 +44,8 @@ from upscale.services.scout.providers import DiscoveryProvider
 from upscale.services.scout.store import ScoutSnapshotStore, snapshot_of
 
 LISTING_KINDS: tuple[DiscoveryKind, ...] = ("new", "active", "trending")
+# The request lane tracked-token refreshes run in (providers may reserve capacity for it).
+REFRESH_LANE = "refresh"
 
 
 class ScoutService:
@@ -57,7 +67,10 @@ class ScoutService:
         self,
         kinds: Iterable[DiscoveryKind] | None = None,
         chains: Iterable[str] | None = None,
+        only: Collection[tuple[str, str, str]] | None = None,
     ) -> ScoutRun:
+        """`only`: just these (provider, kind, chain) listings, e.g. to retry the ones that
+        failed once capacity is available again."""
         started = self.now()
         wanted_kinds = [k for k in (kinds or self.config.kinds) if k in LISTING_KINDS]
         wanted_chains = list(chains or self.config.chains)
@@ -68,6 +81,7 @@ class ScoutService:
             if kind in provider.kinds
             for chain in wanted_chains
             if chain in provider.chains
+            if only is None or (provider.name, kind, chain) in only
         ]
         outcomes = await asyncio.gather(
             *(self._listing(p, k, c) for p, k, c in calls), return_exceptions=True
@@ -94,13 +108,25 @@ class ScoutService:
         """One exact token (chain + contract / mint), from the first provider that knows it."""
         return await self.lookup_exact_tokens(chain, [address])
 
-    async def lookup_exact_tokens(self, chain: str, addresses: Sequence[str]) -> ScoutRun:
+    async def lookup_exact_tokens(
+        self,
+        chain: str,
+        addresses: Sequence[str],
+        first: str | None = None,
+        only: Collection[str] | None = None,
+        exclude: Collection[str] = (),
+    ) -> ScoutRun:
+        """Exact lookup by chain + address, provider by provider until every token is
+        found (`first`: the provider to ask first, e.g. the one that last priced them;
+        `only` / `exclude`: restrict which providers are asked)."""
         started = self.now()
         wanted = {canonical_id(chain, a) for a in addresses}
         found: list[ScoutCandidate] = []
         rejected: list[ScoutRejection] = []
         errors: list[ScoutSourceError] = []
-        for provider in self._lookup_providers(chain):
+        for provider in self._lookup_providers(chain, first):
+            if (only is not None and provider.name not in only) or provider.name in exclude:
+                continue
             missing = [a for a in addresses if canonical_id(chain, a) in wanted]
             if not missing:
                 break
@@ -117,6 +143,80 @@ class ScoutService:
             rejected.extend(result.rejected)
             wanted -= {c.canonical_id for c in result.candidates}
         return await self._finish(started, merge_candidates(found), rejected, errors)
+
+    async def refresh_tokens(
+        self, tokens: Sequence[tuple[str, str, str | None]], lane: str = REFRESH_LANE
+    ) -> "RefreshOutcome":
+        """Re-observe tracked tokens `(chain, address, provider that last priced it)` by
+        exact address, batched per provider and chain, in the request lane `lane` (so they
+        use the capacity providers reserve for it).
+
+        `unresolved`: tokens whose planned provider failed (not refreshed, but not known to
+        be gone). A token its planned provider answered for without a usable market is
+        gone / unusable, whatever a fallback provider did."""
+        groups: dict[tuple[str, str], list[str]] = {}
+        for chain, address, provider in tokens:
+            able = self._lookup_providers(chain, provider)
+            if able:
+                groups.setdefault((able[0].name, chain), []).append(address)
+        with request_lane(lane):
+            # 1. Each token from the provider it was planned for (within that provider's
+            #    reservation); fallbacks can't take capacity planned for another group.
+            runs = list(
+                await asyncio.gather(
+                    *(self.lookup_exact_tokens(ch, a, only={p}) for (p, ch), a in groups.items())
+                )
+            )
+            found = {c.canonical_id for r in runs for c in r.candidates}
+            failed_groups = {
+                (e.provider, e.chain) for r in runs for e in r.errors if e.chain is not None
+            }
+            # 2. Then whatever is still missing, from the other providers, on what's left.
+            retry = {
+                key: [a for a in addrs if canonical_id(key[1], a) not in found]
+                for key, addrs in groups.items()
+            }
+            runs += await asyncio.gather(
+                *(self.lookup_exact_tokens(ch, a, exclude={p}) for (p, ch), a in retry.items() if a)
+            )
+        found = {c.canonical_id for r in runs for c in r.candidates}
+        unresolved = {
+            canonical_id(ch, a)
+            for (p, ch), addrs in groups.items()
+            if (p, ch) in failed_groups
+            for a in addrs
+            if canonical_id(ch, a) not in found
+        }
+        return RefreshOutcome(
+            run=ScoutRun(
+                started_at=min((r.started_at for r in runs), default=self.now()),
+                candidates=[c for r in runs for c in r.candidates],
+                rejected=[x for r in runs for x in r.rejected],
+                errors=[e for r in runs for e in r.errors],
+            ),
+            unresolved=unresolved,
+        )
+
+    def _gates(self) -> list[RequestGate]:
+        return [g for p in self.providers if isinstance(g := getattr(p, "gate", None), RequestGate)]
+
+    def hold_reservations(self, lane: str = REFRESH_LANE) -> None:
+        """Hold every provider's reservation for `lane` (other lanes can't use it)."""
+        for gate in self._gates():
+            gate.arm(lane)
+
+    def release_reservations(self, lane: str = REFRESH_LANE) -> None:
+        """Hand what `lane` left unused back to every lane (e.g. discovery retries)."""
+        for gate in self._gates():
+            gate.release(lane)
+
+    def refresh_capacity(self, lane: str = REFRESH_LANE) -> dict[str, int]:
+        """Requests each lookup provider reserves per minute for `lane`."""
+        return {
+            p.name: g.reserved(lane)
+            for p in self.providers
+            if "lookup" in p.kinds and isinstance(g := getattr(p, "gate", None), RequestGate)
+        }
 
     async def refresh_tracked(self, seen_within: timedelta) -> ScoutRun:
         """Re-observe every token seen within `seen_within`, in batched exact lookups, to
@@ -163,10 +263,10 @@ class ScoutService:
             return await provider.discover_active_tokens(chain, limit)
         return await provider.discover_trending_tokens(chain, limit)
 
-    def _lookup_providers(self, chain: str) -> list[DiscoveryProvider]:
+    def _lookup_providers(self, chain: str, first: str | None = None) -> list[DiscoveryProvider]:
         able = [p for p in self.providers if "lookup" in p.kinds and chain in p.chains]
-        # The enrichment provider first, so exact lookups match the Analyze pipeline.
-        return sorted(able, key=lambda p: p.name != self.enrichment_provider)
+        # `first`, then the enrichment provider, so exact lookups match the Analyze pipeline.
+        return sorted(able, key=lambda p: (p.name != first, p.name != self.enrichment_provider))
 
     async def _enrich(
         self, candidates: list[ScoutCandidate]
@@ -260,7 +360,15 @@ class ScoutService:
         await self.store.save_snapshot(
             snapshot_of(candidate), self.config.min_snapshot_interval_seconds
         )
-        return candidate.model_copy(update={"first_seen_at": first_seen, "features": features})
+        full = candidate.model_copy(update={"first_seen_at": first_seen, "features": features})
+        await self.store.save_latest(full)  # the last good observation, for a short grace
+        return full
+
+
+@dataclass
+class RefreshOutcome:
+    run: ScoutRun
+    unresolved: set[str] = field(default_factory=set)  # planned provider failed
 
 
 def _unique_rejections(rejections: Iterable[ScoutRejection]) -> list[ScoutRejection]:

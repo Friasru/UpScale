@@ -4,16 +4,26 @@ SQLite (standard library), one file, opened lazily on first use. Only observed v
 stored: there is no interpolation and no backfill, so "15 minutes ago" is answered by the
 stored snapshot closest to that moment within a tolerance, or not at all.
 
-Schema (version 1):
+Schema (version 2):
 
 * ``scout_tokens``: one row per canonical id (``<chain>:<address>``) with the first time
-  and source Scout saw it, and the last time it was seen.
+  and source Scout saw it, the last time it was observed (any way), and the last time a
+  discovery listing surfaced it (exact-address refreshes don't count: they keep a token's
+  history going, never its place among tracked candidates).
 * ``scout_snapshots``: one row per observation of a token's selected pool: time, provider,
   pool, price, market cap / FDV (each only if reported), liquidity, the reported rolling
   windows as JSON, and nullable holder / social columns reserved for later sources.
   ``(canonical_id, provider, pool_address, observed_at)`` is unique, so storing the same
   (cached) observation twice is a no-op; ``(canonical_id, observed_at)`` is indexed for
   time-window lookups.
+* ``scout_growth_stages``: Growth Scout's stage, rank and score per token and ranking run,
+  so a one-run reversal can be told from a sustained change and tracked-token refresh can
+  favor recent leaders (append-only).
+* ``scout_latest``: each token's latest full observation (one row per token, replaced),
+  so a tracked token a provider outage kept from being refreshed can be carried for a
+  short, labeled grace period instead of vanishing.
+
+Version 1 stores are upgraded in place (the discovery time starts at the last-seen time).
 """
 
 import asyncio
@@ -21,6 +31,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,7 +43,7 @@ from upscale.services.scout.models import (
     ScoutWindow,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS scout_tokens (
     canonical_id TEXT PRIMARY KEY,
@@ -43,7 +54,8 @@ CREATE TABLE IF NOT EXISTS scout_tokens (
     first_seen_at REAL NOT NULL,
     first_seen_provider TEXT NOT NULL,
     first_seen_kind TEXT NOT NULL,
-    last_seen_at REAL NOT NULL
+    last_seen_at REAL NOT NULL,
+    last_discovered_at REAL
 );
 CREATE TABLE IF NOT EXISTS scout_snapshots (
     id INTEGER PRIMARY KEY,
@@ -64,11 +76,38 @@ CREATE TABLE IF NOT EXISTS scout_snapshots (
 CREATE INDEX IF NOT EXISTS scout_snapshots_by_time
     ON scout_snapshots (canonical_id, observed_at);
 CREATE INDEX IF NOT EXISTS scout_tokens_by_last_seen ON scout_tokens (last_seen_at);
+CREATE TABLE IF NOT EXISTS scout_growth_stages (
+    canonical_id TEXT NOT NULL,
+    computed_at REAL NOT NULL,
+    stage TEXT NOT NULL,
+    rank INTEGER,
+    score REAL,
+    PRIMARY KEY (canonical_id, computed_at)
+);
+CREATE TABLE IF NOT EXISTS scout_latest (
+    canonical_id TEXT PRIMARY KEY,
+    observed_at REAL NOT NULL,
+    body_json TEXT NOT NULL
+);
+"""
+_MIGRATE_V1 = """
+ALTER TABLE scout_tokens ADD COLUMN last_discovered_at REAL;
+UPDATE scout_tokens SET last_discovered_at = last_seen_at;
 """
 
 
 class ScoutStoreError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class TrackedToken:
+    canonical_id: str
+    chain: str
+    address: str
+    last_seen_at: datetime  # last observed (discovery or refresh)
+    last_discovered_at: datetime  # last surfaced by a discovery listing
+    market_provider: str | None  # the provider that last priced it (None: unknown)
 
 
 class ScoutSnapshotStore:
@@ -123,6 +162,62 @@ class ScoutSnapshotStore:
         """(chain, address) of tokens seen since `seen_since`, most recent first."""
         return await asyncio.to_thread(self._tracked, seen_since)
 
+    async def discovered_tokens(self, since: datetime) -> list[tuple[str, str, str]]:
+        """(canonical id, chain, address) of tokens a discovery listing surfaced since
+        `since` (exact-address refreshes don't count), most recent first."""
+        return await asyncio.to_thread(self._discovered, since)
+
+    async def expired_count(self, discovered_before: datetime, seen_since: datetime) -> int:
+        """Tokens still observed since `seen_since` but not surfaced by discovery since
+        `discovered_before`: recently dropped from the tracked universe."""
+        return await asyncio.to_thread(self._expired, discovered_before, seen_since)
+
+    async def record_stages(
+        self,
+        at: datetime,
+        stages: dict[str, str],
+        ranks: dict[str, tuple[int | None, float]] | None = None,
+    ) -> None:
+        """Growth Scout's stage (and rank, score) per token for one ranking run."""
+        await asyncio.to_thread(self._record_stages, at, stages, ranks or {})
+
+    async def latest_growth(
+        self, canonical_ids: Sequence[str]
+    ) -> dict[str, tuple[datetime, str, int | None]]:
+        """Each token's most recent Growth Scout (time, stage, rank)."""
+        return await asyncio.to_thread(self._latest_growth, list(canonical_ids))
+
+    async def ranking_run_times(self, limit: int = 6) -> list[datetime]:
+        """The most recent Growth Scout ranking runs, newest first."""
+        return await asyncio.to_thread(self._run_times, limit)
+
+    async def ranking_runs(self) -> int:
+        """How many Growth Scout ranking runs are stored (a persisted rotation counter)."""
+        return await asyncio.to_thread(self._ranking_runs)
+
+    async def tracked_state(self, discovered_since: datetime) -> list[TrackedToken]:
+        """Tokens a discovery listing surfaced since `discovered_since`, with when they
+        were last observed, last discovered, and which provider last priced them."""
+        return await asyncio.to_thread(self._tracked_state, discovered_since)
+
+    async def untrack(self, canonical_ids: Sequence[str]) -> None:
+        """Stop tracking tokens confirmed gone / unusable (until a listing surfaces them
+        again). Their history is kept."""
+        await asyncio.to_thread(self._untrack, list(canonical_ids))
+
+    async def save_latest(self, candidate: ScoutCandidate) -> None:
+        """Replace the token's latest full observation (kept only if newer)."""
+        await asyncio.to_thread(self._save_latest, candidate)
+
+    async def latest_candidates(self, canonical_ids: Sequence[str]) -> dict[str, ScoutCandidate]:
+        return await asyncio.to_thread(self._latest_candidates, list(canonical_ids))
+
+    async def recent_stages(
+        self, canonical_ids: Sequence[str], since: datetime
+    ) -> dict[str, list[tuple[datetime, str]]]:
+        """Stored stages since `since` per token, oldest first."""
+        return await asyncio.to_thread(self._recent_stages, list(canonical_ids), since)
+
     async def tokens(self) -> list[tuple[str, str, str, str | None, str | None]]:
         """(canonical id, chain, address, symbol, name) of every token ever seen."""
         return await asyncio.to_thread(self._tokens)
@@ -148,7 +243,13 @@ class ScoutSnapshotStore:
                     f"Scout store {self.path} has schema v{version}; this UpScale knows "
                     f"v{SCHEMA_VERSION}"
                 )
+            if version == 1:
+                conn.executescript(_MIGRATE_V1)
             conn.executescript(_SCHEMA)
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(scout_growth_stages)")}
+            for column, kind in (("rank", "INTEGER"), ("score", "REAL")):
+                if column not in columns:  # stores written before these columns existed
+                    conn.execute(f"ALTER TABLE scout_growth_stages ADD COLUMN {column} {kind}")
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
             self._conn = conn
@@ -157,19 +258,26 @@ class ScoutSnapshotStore:
     def _record_seen(self, c: ScoutCandidate) -> datetime:
         seen = c.observed_at.timestamp()
         source = c.sources[0] if c.sources else None
+        # Surfaced by a listing (new / active / trending), not only an exact lookup.
+        discovered = seen if any(s.kind != "lookup" for s in c.sources) else None
         with self._lock:
             db = self._db()
             with db:
                 db.execute(
                     """
                     INSERT INTO scout_tokens (canonical_id, chain, address, symbol, name,
-                        first_seen_at, first_seen_provider, first_seen_kind, last_seen_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        first_seen_at, first_seen_provider, first_seen_kind, last_seen_at,
+                        last_discovered_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (canonical_id) DO UPDATE SET
                         symbol = COALESCE(excluded.symbol, symbol),
                         name = COALESCE(excluded.name, name),
                         first_seen_at = MIN(first_seen_at, excluded.first_seen_at),
-                        last_seen_at = MAX(last_seen_at, excluded.last_seen_at)
+                        last_seen_at = MAX(last_seen_at, excluded.last_seen_at),
+                        last_discovered_at = MAX(
+                            COALESCE(last_discovered_at, excluded.last_discovered_at),
+                            COALESCE(excluded.last_discovered_at, last_discovered_at)
+                        )
                     """,
                     (
                         c.canonical_id,
@@ -181,6 +289,7 @@ class ScoutSnapshotStore:
                         source.provider if source else "unknown",
                         source.kind if source else "lookup",
                         seen,
+                        discovered,
                     ),
                 )
             row = db.execute(
@@ -304,6 +413,189 @@ class ScoutSnapshotStore:
                 .fetchall()
             )
         return [(r[0], r[1]) for r in rows]
+
+    def _discovered(self, since: datetime) -> list[tuple[str, str, str]]:
+        with self._lock:
+            rows = (
+                self._db()
+                .execute(
+                    """
+                    SELECT canonical_id, chain, address FROM scout_tokens
+                    WHERE last_discovered_at >= ? ORDER BY last_discovered_at DESC
+                    """,
+                    (since.timestamp(),),
+                )
+                .fetchall()
+            )
+        return [(r[0], r[1], r[2]) for r in rows]
+
+    def _expired(self, discovered_before: datetime, seen_since: datetime) -> int:
+        with self._lock:
+            row = (
+                self._db()
+                .execute(
+                    """
+                    SELECT COUNT(*) FROM scout_tokens
+                    WHERE last_seen_at >= ? AND last_discovered_at < ?
+                    """,
+                    (seen_since.timestamp(), discovered_before.timestamp()),
+                )
+                .fetchone()
+            )
+        return int(row[0])
+
+    def _record_stages(
+        self, at: datetime, stages: dict[str, str], ranks: dict[str, tuple[int | None, float]]
+    ) -> None:
+        with self._lock:
+            db = self._db()
+            with db:
+                db.executemany(
+                    """
+                    INSERT OR IGNORE INTO scout_growth_stages
+                        (canonical_id, computed_at, stage, rank, score) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (cid, at.timestamp(), stage, *ranks.get(cid, (None, None)))
+                        for cid, stage in stages.items()
+                    ],
+                )
+
+    def _latest_growth(self, ids: list[str]) -> dict[str, tuple[datetime, str, int | None]]:
+        out: dict[str, tuple[datetime, str, int | None]] = {}
+        with self._lock:
+            db = self._db()
+            for i in range(0, len(ids), 500):
+                chunk = ids[i : i + 500]
+                rows = db.execute(
+                    f"""
+                    SELECT canonical_id, computed_at, stage, rank FROM scout_growth_stages s
+                    WHERE canonical_id IN ({",".join("?" * len(chunk))}) AND computed_at = (
+                        SELECT MAX(computed_at) FROM scout_growth_stages
+                        WHERE canonical_id = s.canonical_id
+                    )
+                    """,
+                    chunk,
+                ).fetchall()
+                for cid, at, stage, rank in rows:
+                    out[cid] = (_dt(at), stage, rank)
+        return out
+
+    def _run_times(self, limit: int) -> list[datetime]:
+        with self._lock:
+            rows = (
+                self._db()
+                .execute(
+                    "SELECT DISTINCT computed_at FROM scout_growth_stages "
+                    "ORDER BY computed_at DESC LIMIT ?",
+                    (limit,),
+                )
+                .fetchall()
+            )
+        return [_dt(r[0]) for r in rows]
+
+    def _ranking_runs(self) -> int:
+        with self._lock:
+            row = (
+                self._db()
+                .execute("SELECT COUNT(DISTINCT computed_at) FROM scout_growth_stages")
+                .fetchone()
+            )
+        return int(row[0])
+
+    def _tracked_state(self, since: datetime) -> list["TrackedToken"]:
+        with self._lock:
+            rows = (
+                self._db()
+                .execute(
+                    """
+                    SELECT t.canonical_id, t.chain, t.address, t.last_seen_at,
+                        t.last_discovered_at, 1,
+                        COALESCE(
+                            json_extract(l.body_json, '$.market_provider'),
+                            (SELECT s.provider FROM scout_snapshots s
+                             WHERE s.canonical_id = t.canonical_id
+                             ORDER BY s.observed_at DESC LIMIT 1)
+                        )
+                    FROM scout_tokens t LEFT JOIN scout_latest l USING (canonical_id)
+                    WHERE t.last_discovered_at >= ?
+                    """,
+                    (since.timestamp(),),
+                )
+                .fetchall()
+            )
+        return [
+            TrackedToken(
+                canonical_id=r[0],
+                chain=r[1],
+                address=r[2],
+                last_seen_at=_dt(r[3]),
+                last_discovered_at=_dt(r[4]),
+                market_provider=r[6],
+            )
+            for r in rows
+        ]
+
+    def _untrack(self, ids: list[str]) -> None:
+        with self._lock:
+            db = self._db()
+            with db:
+                db.executemany(
+                    "UPDATE scout_tokens SET last_discovered_at = NULL WHERE canonical_id = ?",
+                    [(cid,) for cid in ids],
+                )
+
+    def _save_latest(self, c: ScoutCandidate) -> None:
+        with self._lock:
+            db = self._db()
+            with db:
+                db.execute(
+                    """
+                    INSERT INTO scout_latest (canonical_id, observed_at, body_json)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT (canonical_id) DO UPDATE SET
+                        observed_at = excluded.observed_at, body_json = excluded.body_json
+                    WHERE excluded.observed_at >= scout_latest.observed_at
+                    """,
+                    (c.canonical_id, c.observed_at.timestamp(), c.model_dump_json()),
+                )
+
+    def _latest_candidates(self, ids: list[str]) -> dict[str, ScoutCandidate]:
+        out: dict[str, ScoutCandidate] = {}
+        with self._lock:
+            db = self._db()
+            for i in range(0, len(ids), 500):
+                chunk = ids[i : i + 500]
+                rows = db.execute(
+                    f"""
+                    SELECT canonical_id, body_json FROM scout_latest
+                    WHERE canonical_id IN ({",".join("?" * len(chunk))})
+                    """,
+                    chunk,
+                ).fetchall()
+                for cid, body in rows:
+                    out[cid] = ScoutCandidate.model_validate_json(body)
+        return out
+
+    def _recent_stages(
+        self, ids: list[str], since: datetime
+    ) -> dict[str, list[tuple[datetime, str]]]:
+        out: dict[str, list[tuple[datetime, str]]] = {}
+        with self._lock:
+            db = self._db()
+            for i in range(0, len(ids), 500):
+                chunk = ids[i : i + 500]
+                rows = db.execute(
+                    f"""
+                    SELECT canonical_id, computed_at, stage FROM scout_growth_stages
+                    WHERE computed_at >= ? AND canonical_id IN ({",".join("?" * len(chunk))})
+                    ORDER BY computed_at
+                    """,
+                    [since.timestamp(), *chunk],
+                ).fetchall()
+                for cid, at, stage in rows:
+                    out.setdefault(cid, []).append((_dt(at), stage))
+        return out
 
     def _tokens(self) -> list[tuple[str, str, str, str | None, str | None]]:
         with self._lock:

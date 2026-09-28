@@ -151,13 +151,17 @@ class RateLimiter:
         self._calls: deque[float] = deque()
 
     def try_acquire(self) -> bool:
+        if self.available() <= 0:
+            return False
+        self._calls.append(self._clock())
+        return True
+
+    def available(self) -> int:
+        """Calls that can start right now (nothing is reserved)."""
         now = self._clock()
         while self._calls and now - self._calls[0] >= self.period:
             self._calls.popleft()
-        if len(self._calls) >= self.max_calls:
-            return False
-        self._calls.append(now)
-        return True
+        return max(0, self.max_calls - len(self._calls))
 
 
 @dataclass

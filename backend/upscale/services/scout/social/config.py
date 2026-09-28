@@ -113,6 +113,35 @@ class SocialProviderConfig(BaseModel):
     # Price of one consumed result, only to report an estimated cost (None: free / unknown).
     cost_per_result_usd: float | None = Field(default=None, ge=0)
 
+    @model_validator(mode="after")
+    def _budget_within_rate_limit(self) -> "SocialProviderConfig":
+        # A run's searches are sent within seconds and the gate fails fast over its
+        # per-minute limit: a larger per-run budget only schedules calls that can't run.
+        budget = self.max_requests_per_run
+        if budget is not None and budget > self.limits.calls_per_minute:
+            raise ValueError(
+                f"max_requests_per_run ({budget}) exceeds the provider's rate limit "
+                f"({self.limits.calls_per_minute} per minute)"
+            )
+        return self
+
+
+class SchedulingConfig(BaseModel):
+    """Who a budgeted provider (X, Neynar) searches first. Priority, in minutes:
+
+        waited + never_searched_bonus (if never searched) + rank_bonus x provisional share
+
+    `waited` is the time since the token's last successful search (or, never searched,
+    since its first deferral; 0 when brand new), and the provisional share is 1 for the
+    top provisional candidate falling linearly to 0 for the last. The bonuses are
+    bounded and `waited` grows without bound, so every token is eventually searched:
+    nobody is starved for ranking low. Ties rotate by persisted round."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    never_searched_bonus_minutes: float = Field(default=120.0, ge=0)
+    rank_bonus_minutes: float = Field(default=90.0, ge=0)
+
 
 class SocialConfig(BaseModel):
     model_config = _FROZEN
@@ -122,6 +151,7 @@ class SocialConfig(BaseModel):
     quality: QualityConfig = QualityConfig()
     cross_platform: CrossPlatformConfig = CrossPlatformConfig()
     market: MarketCheckConfig = MarketCheckConfig()
+    scheduling: SchedulingConfig = SchedulingConfig()
     # How far back a first search reaches; later searches only fetch what's new.
     search_span_hours: float = Field(default=48.0, gt=0, le=168)
     overlap_minutes: float = Field(default=5.0, ge=0)  # re-read this much on each search
@@ -135,7 +165,7 @@ class SocialConfig(BaseModel):
     farcaster: SocialProviderConfig = SocialProviderConfig(
         limits=ScoutProviderLimits(calls_per_minute=30, cache_ttl_seconds=60, timeout_seconds=15),
         max_terms_per_query=1,
-        max_requests_per_run=60,
+        max_requests_per_run=30,  # its rate limit: more can't run within one run
     )
     # X bills every post read ($0.005, pay-per-use, 2026-09) and every user object
     # ($0.010). One token per query (a busy ticker would crowd a shared page out), a daily
@@ -144,7 +174,7 @@ class SocialConfig(BaseModel):
         limits=ScoutProviderLimits(calls_per_minute=10, cache_ttl_seconds=120),
         max_query_chars=512,
         max_terms_per_query=2,
-        max_requests_per_run=40,
+        max_requests_per_run=10,  # its rate limit: more can't run within one run
         max_results_per_day=2000,
         cost_per_result_usd=0.005,
     )

@@ -79,6 +79,17 @@ class ScoutProviderLimits(BaseModel):
     max_concurrency: int = Field(default=4, gt=0)
     timeout_seconds: float = Field(default=10.0, gt=0)
     cache_ttl_seconds: float = Field(default=30.0, ge=0)
+    # Part of `calls_per_minute` reserved for a named request lane (e.g. {"refresh": 3}):
+    # other lanes can't use it while it is held. The total stays hard at calls_per_minute.
+    reservations: dict[str, int] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _reservations_fit(self) -> "ScoutProviderLimits":
+        if any(v < 0 for v in self.reservations.values()):
+            raise ValueError("reservations must not be negative")
+        if sum(self.reservations.values()) >= self.calls_per_minute:
+            raise ValueError("reservations must leave some of calls_per_minute unreserved")
+        return self
 
 
 class ScoutConfig(BaseModel):
@@ -96,10 +107,17 @@ class ScoutConfig(BaseModel):
     filters: ScoutFilterConfig = ScoutFilterConfig()
     flags: ScoutRiskFlagConfig = ScoutRiskFlagConfig()
     features: ScoutFeatureConfig = ScoutFeatureConfig()
-    # Stay below each provider's published limits (GeckoTerminal ~30/min, DEX Screener
-    # 60/min for listings and 300/min for pair lookups).
-    geckoterminal: ScoutProviderLimits = ScoutProviderLimits(calls_per_minute=20)
-    dexscreener: ScoutProviderLimits = ScoutProviderLimits(calls_per_minute=50)
+    # Stay within each provider's real limits. GeckoTerminal's free API, measured live
+    # (2026-09): a burst of ~6, then ~1 request per 10 s (429 beyond); DEX Screener: 60/min
+    # for listings, 300/min for pair lookups. Part of each is reserved for tracked-token
+    # refresh (see `ScoutService.refresh_tokens`), so discovery can't starve it; what the
+    # refresh leaves unused is handed back to discovery retries.
+    geckoterminal: ScoutProviderLimits = ScoutProviderLimits(
+        calls_per_minute=6, reservations={"refresh": 2}
+    )
+    dexscreener: ScoutProviderLimits = ScoutProviderLimits(
+        calls_per_minute=50, reservations={"refresh": 10}
+    )
 
     @model_validator(mode="after")
     def _known_values(self) -> "ScoutConfig":

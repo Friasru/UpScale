@@ -3,6 +3,7 @@
 from upscale.config import (
     COINGECKO_API_KEY,
     EXPLAINER_MODEL,
+    GROWTH_CONFIG,
     HELIUS_API_KEY,
     HELIUS_MAX_HOLDER_PAGES,
     NEWS_DISABLED_FEEDS,
@@ -39,6 +40,7 @@ from upscale.services.scout import (
     ScoutSnapshotStore,
     load_scout_config,
 )
+from upscale.services.scout.growth import GrowthScoutService, load_growth_config
 from upscale.services.scout.social import (
     DiscourseForumProvider,
     NeynarFarcasterProvider,
@@ -141,4 +143,13 @@ social_scout_service = SocialScoutService(
     ],
     SocialStore(SCOUT_DB_PATH),
     social_config,
+)
+
+# Growth Scout: ranks Scout's candidates (not wired into chat or UI yet; never BUY / SELL).
+# Reuses Scout's snapshots, stored social momentum and the cached on-chain safety service.
+growth_scout_service = GrowthScoutService(
+    scout_service.store,
+    load_growth_config(GROWTH_CONFIG),
+    social_store=social_scout_service.store,
+    safety=solana_safety_service,
 )

@@ -70,3 +70,7 @@ X_BEARER_TOKEN = os.getenv("UPSCALE_X_BEARER_TOKEN") or None
 SOCIAL_FORUMS = os.getenv("UPSCALE_SOCIAL_FORUMS") or None
 # Optional JSON overriding social thresholds, e.g. '{"momentum": {"min_mentions": 5}}'.
 SOCIAL_CONFIG = os.getenv("UPSCALE_SOCIAL_CONFIG") or None
+
+# Growth Scout (discovery ranking; never BUY / SELL). Optional JSON overriding its validated
+# weights and thresholds, e.g. '{"mode": "ALL_TRENDING", "safety": {"top_k": 5}}'.
+GROWTH_CONFIG = os.getenv("UPSCALE_GROWTH_CONFIG") or None

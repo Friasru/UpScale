@@ -5,7 +5,9 @@
 * `GET /outcomes/decisions`, `GET /outcomes/decisions/{id}`: Analyze decisions.
 * `GET /outcomes/summary`: cohort aggregates for one horizon (small cohorts report
   INSUFFICIENT_SAMPLE, never statistics).
-* `GET /outcomes/status`: stored counts and the collector's last cycle.
+* `GET /outcomes/status`: stored counts, the collector's last cycle (why due work was
+  deferred: UpScale's own quota vs. a real provider 429) and the shared GeckoTerminal
+  quota as outcome work sees it right now.
 * `GET /outcomes/replay`: historical replay from stored Scout snapshots (not a backtest).
 
 Nothing here is a win rate, expected return or profitability claim.
@@ -18,6 +20,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, HTTPException, Query
 
 import upscale.services as services
+from upscale.services.outcomes import OUTCOME_LANE
 from upscale.services.outcomes.analytics import (
     DECISION_DIMENSIONS,
     SCOUT_DIMENSIONS,
@@ -31,6 +34,7 @@ from upscale.services.outcomes.models import (
     ScoutOutcomeRecord,
 )
 from upscale.services.outcomes.replay import ReplayReport, replay
+from upscale.services.quota import DEFAULT_LANE
 
 router = APIRouter(prefix="/outcomes", tags=["outcomes"])
 Limit = Annotated[int, Query(ge=1, le=500)]
@@ -113,11 +117,15 @@ async def outcome_status() -> dict[str, Any]:
     store, collector = services.outcome_store, services.outcome_collector
     cc = services.outcome_config.collector
     cycle = collector.last_cycle
+    quota = services.geckoterminal_quota
+    gt = quota.snapshot([OUTCOME_LANE, DEFAULT_LANE])
+    gt["provider_429_cooldown_active"] = quota.rate_limited_within(cc.rate_limit_cooldown_seconds)
     return {
         "counts": await store.counts(),
         "next_wake": await store.next_wake(cc.settle_seconds, cc.retry_seconds),
         "horizons": [h.label for h in services.outcome_config.horizons],
         "last_cycle": cycle.__dict__ if cycle else None,
+        "quota": {"GeckoTerminal": gt},
         "disclaimer": NOT_A_PERFORMANCE_CLAIM,
     }
 

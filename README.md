@@ -94,9 +94,12 @@ and it reports no win rates, expected returns or simulated trades.
   collapse, no trades) stay in the dataset.
 * **Collector**: a background task that sleeps until the next horizon is due. It reuses
   Scout's stored snapshots first, then batched pool lookups and candles in its own
-  "outcomes" request lane: it never uses capacity reserved for Analyze or Scout refresh,
-  leaves headroom for Scout discovery, and makes no requests while (or just after) Scout or
-  Analyze runs. `UPSCALE_OUTCOMES=0` switches it off; `UPSCALE_OUTCOME_CONFIG` overrides
+  "outcomes" request lane: it never uses capacity reserved for Analyze, outranks Scout on
+  the shared GeckoTerminal quota (it may use Scout refresh's idle reservation), makes no
+  requests while (or just after) Scout or Analyze runs or for 2 minutes after a real HTTP
+  429, and serves the longest-deferred work first so nothing due starves. Observations
+  without a reference price make no candle requests (their price outcome is not
+  measurable). `UPSCALE_OUTCOMES=0` switches it off; `UPSCALE_OUTCOME_CONFIG` overrides
   thresholds.
 * **Background Scout**: the same Scout scan a manual refresh runs, every 30 minutes while
   the backend is up (first run 5 minutes after startup), so anchors accumulate without the
@@ -108,7 +111,9 @@ and it reports no win rates, expected returns or simulated trades.
   `GET /scout/background/status` shows its state and last result.
 * **API** (developer-oriented): `GET /outcomes/scout[/{id}]`, `/outcomes/decisions[/{id}]`,
   `/outcomes/summary?group_by=stage&horizon=1h` (cohorts under 20 measured outcomes report
-  INSUFFICIENT_SAMPLE instead of statistics), `/outcomes/status`, and `/outcomes/replay`, a
+  INSUFFICIENT_SAMPLE instead of statistics), `/outcomes/status` (the last cycle's
+  deferrals split into UpScale's own quota vs. provider 429s, and the live GeckoTerminal
+  quota), and `/outcomes/replay`, a
   read-only historical replay from stored snapshots (not a backtest; also
   `python -m upscale.services.outcomes.replay`).
 

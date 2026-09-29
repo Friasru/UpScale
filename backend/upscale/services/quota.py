@@ -15,13 +15,18 @@ itself may also use free unreserved capacity, and the total never exceeds the li
   use what it left.
 * "default": everything else (e.g. Scout discovery): unreserved capacity only.
 
+A lane may *outrank* another (`outranks`): it may then use that lane's held reservation too
+(e.g. due outcome measurements outrank Scout refresh, which otherwise keeps its reservation
+held between scans). Nothing outranks "interactive" unless configured, and the total is
+still hard.
+
 A limiter also remembers when the provider itself last answered "rate limited" (HTTP 429),
 so optional background work can stay away from a provider that is pushing back.
 """
 
 import time
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -46,7 +51,8 @@ class LaneLimiter:
     """A sliding-window request limit shared by lanes, with per-lane reservations.
 
     Over any `period`: total calls <= `max_calls` (hard). While a reservation is held,
-    calls from other lanes leave room for what the lane hasn't used of it yet."""
+    calls from other lanes leave room for what the lane hasn't used of it yet, except lanes
+    that outrank it (`outranks`: lane -> the lanes whose reservations it may use)."""
 
     def __init__(
         self,
@@ -54,10 +60,12 @@ class LaneLimiter:
         period: float,
         reservations: Mapping[str, int] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        outranks: Mapping[str, Collection[str]] | None = None,
     ):
         self.max_calls = max_calls
         self.period = period
         self.reservations = dict(reservations or {})
+        self.outranks = {lane: frozenset(lower) for lane, lower in (outranks or {}).items()}
         self._clock = clock
         self._calls: deque[tuple[float, str]] = deque()
         self._held = set(self.reservations)
@@ -74,15 +82,38 @@ class LaneLimiter:
         while self._calls and now - self._calls[0][0] >= self.period:
             self._calls.popleft()
 
+    def _consumed(self) -> dict[str, int]:
+        """Calls counted against each held reservation: its own lane's, plus what a lane
+        that outranks it took beyond the unreserved capacity (a borrowed call uses up the
+        reservation it came from, so that reservation isn't also held for anyone else)."""
+        counts: dict[str, int] = {}
+        for _, x in self._calls:
+            counts[x] = counts.get(x, 0) + 1
+        consumed = {r: min(self.reservations[r], counts.get(r, 0)) for r in self._held}
+        unreserved = self.max_calls - sum(self.reservations[r] for r in self._held)
+        for x, n in counts.items():
+            if x not in self.outranks:  # borrowers are placed below
+                unreserved -= n - consumed.get(x, 0)
+        for lane in sorted(self.outranks):
+            rest = counts.get(lane, 0) - consumed.get(lane, 0)
+            take = min(rest, max(0, unreserved))
+            unreserved -= take
+            rest -= take
+            for lower in sorted(self.outranks[lane] & self._held):
+                took = min(rest, self.reservations[lower] - consumed[lower])
+                consumed[lower] += took
+                rest -= took
+        return consumed
+
     def _outstanding(self, lane: str) -> int:
-        """Reserved capacity other lanes must leave free for `lane`'s competitors."""
-        held = 0
-        for other in self._held:
-            if other == lane:
-                continue
-            used = sum(1 for _, x in self._calls if x == other)
-            held += max(0, self.reservations[other] - used)
-        return held
+        """Reserved capacity `lane` must leave free for other lanes."""
+        consumed = self._consumed()
+        lower = self.outranks.get(lane, frozenset())
+        return sum(
+            self.reservations[other] - consumed[other]
+            for other in self._held
+            if other != lane and other not in lower
+        )
 
     def available(self, lane: str = DEFAULT_LANE) -> int:
         self._trim()
@@ -112,6 +143,30 @@ class LaneLimiter:
     def rate_limited_within(self, seconds: float) -> bool:
         at = self._rate_limited_at
         return at is not None and self._clock() - at < seconds
+
+    def rate_limited_ago(self) -> float | None:
+        """Seconds since the provider last answered "rate limited" (None: never)."""
+        at = self._rate_limited_at
+        return None if at is None else self._clock() - at
+
+    def snapshot(self, lanes: Collection[str] = ()) -> dict[str, object]:
+        """The current window (for diagnostics): calls per lane, what each of `lanes` (and
+        every reserved lane) could start now, and the held reservations."""
+        self._trim()
+        used: dict[str, int] = {}
+        for _, lane in self._calls:
+            used[lane] = used.get(lane, 0) + 1
+        ago = self.rate_limited_ago()
+        return {
+            "limit": self.max_calls,
+            "period_seconds": self.period,
+            "used": used,
+            "available": {x: self.available(x) for x in sorted({*lanes, *self.reservations})},
+            "reservations": dict(self.reservations),
+            "held": sorted(self._held),
+            "outranks": {k: sorted(v) for k, v in self.outranks.items()},
+            "provider_429_seconds_ago": None if ago is None else round(ago, 1),
+        }
 
 
 def current_lane() -> str:

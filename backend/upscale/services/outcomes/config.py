@@ -87,9 +87,14 @@ class CollectorConfig(BaseModel):
     # 300 / min, 30 tokens each; GeckoTerminal's quota is tight and shared with Analyze).
     max_requests_per_cycle: int = Field(default=3, ge=0)
     request_budgets: dict[str, int] = Field(default_factory=lambda: {"DEX Screener": 10})
-    # Leave at least this many requests of a provider's current window free for others
-    # (Scout discovery, which outranks outcome work).
+    # On a provider quota that holds no reservation for Analyze (exchange candles, DEX
+    # Screener), leave at least this many requests of the current window free for it. The
+    # shared GeckoTerminal quota protects Analyze with its "interactive" reservation, and
+    # due outcome work outranks Scout there, so nothing more is kept back on it.
     min_free_calls: int = Field(default=1, ge=0)
+    # After a provider really answered "rate limited" (HTTP 429), outcome work leaves it
+    # alone this long (UpScale's own quota deferrals are not provider pushback).
+    rate_limit_cooldown_seconds: float = Field(default=120.0, ge=0)
     # Short horizons wait for the longest horizon on the same candle timeframe (when it
     # ends within their retry window): one candle request then measures all of them. The
     # time-sensitive horizon-end market state is still captured when each horizon ends.

@@ -125,6 +125,9 @@ class FakeCandles:
     def headroom(self, ref: PriceRef) -> int:
         return self._headroom
 
+    def rate_limited(self, ref: PriceRef, seconds: float) -> bool:
+        return False
+
     async def window(
         self, ref: PriceRef, timeframe: Timeframe, start: datetime, end: datetime, now: datetime
     ) -> CandleSeries:
@@ -941,9 +944,14 @@ def test_t_collector_respects_provider_quota_priority(
     assert "before_timestamp" in request.url.params and request.url.path.endswith("/ohlcv/minute")
     assert quota.available("interactive") == 2 and quota.used(OUTCOME_LANE) == 2
     assert horizon(store, obs.id or 0, "5m").price is not None
-    # With `min_free_calls`, outcome work leaves capacity to Scout discovery.
+    # `min_free_calls` keeps a margin for Analyze only on quotas without an "interactive"
+    # reservation; this one holds it (and outcome work outranks Scout), so none is kept.
     polite = ProviderCandles(dex, upscale.services.market_data_service, min_free=2)
-    assert polite.headroom(obs.price_ref) == quota.available(OUTCOME_LANE) - 2
+    assert polite.headroom(obs.price_ref) == quota.available(OUTCOME_LANE)
+    unreserved = LaneLimiter(6, 60.0, clock=lambda: 0.0)
+    plain = DexCandleService(GeckoTerminalProvider(), limiter=unreserved, now=clock)
+    polite = ProviderCandles(plain, upscale.services.market_data_service, min_free=2)
+    assert polite.headroom(obs.price_ref) == unreserved.available(OUTCOME_LANE) - 2 == 4
 
 
 def test_t_collector_makes_no_requests_while_scout_or_analyze_runs(tmp_path: Path) -> None:

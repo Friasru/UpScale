@@ -13,10 +13,15 @@ Each cycle:
    provides, while it can still describe the horizon end; and candles of the exact pool
    (GeckoTerminal) or exact exchange market (Kraken), one request per market and
    timeframe for every window due. Requests run in the "outcomes" lane: they can never
-   use the capacity reserved for Analyze ("interactive") or Scout refresh, leave
-   `min_free_calls` of each provider's window to Scout discovery, stop at
-   `max_requests_per_cycle`, and are skipped entirely while Scout or Analyze is running
-   (`busy`). Deferred work waits for a later cycle.
+   use the capacity reserved for Analyze ("interactive"); on the shared GeckoTerminal
+   quota they outrank Scout (they may use Scout refresh's reservation, and keep nothing
+   back for discovery), elsewhere they leave `min_free_calls` of the window to Analyze.
+   They stop at `max_requests_per_cycle`, are skipped entirely while Scout or Analyze is
+   running (`busy`), and stay away from a provider that answered HTTP 429 within
+   `rate_limit_cooldown_seconds`. Deferred work waits for a later cycle, and whatever was
+   deferred longest goes first then (so nothing due starves behind newer work).
+   Observations without a reference price make no candle request: their price outcome
+   can't be measured, so only the market state is still collected.
 4. **Finalize or wait**: COMPLETE when the price path (candles) and the horizon-end market
    state are both measured; a confirmed terminal state (pool gone, liquidity collapsed,
    no trades) finalizes as soon as it is known; otherwise the horizon stays PENDING until
@@ -70,7 +75,7 @@ from upscale.services.outcomes.models import (
     TriggerOutcome,
 )
 from upscale.services.outcomes.store import DueHorizon, HorizonUpdate, OutcomeStore
-from upscale.services.quota import request_lane
+from upscale.services.quota import INTERACTIVE_LANE, LaneLimiter, request_lane
 from upscale.services.scout.models import ScoutMarketMetrics, ScoutSnapshot
 from upscale.services.scout.normalize import canonical_id, metrics_from_pool
 from upscale.services.scout.providers import (
@@ -93,6 +98,11 @@ class CandleSource(Protocol):
 
     def headroom(self, ref: PriceRef) -> int:
         """Requests the outcome lane may start for this market right now."""
+        ...
+
+    def rate_limited(self, ref: PriceRef, seconds: float) -> bool:
+        """Whether this market's provider really answered "rate limited" (HTTP 429) within
+        the last `seconds`."""
         ...
 
     async def window(
@@ -139,10 +149,15 @@ class ProviderCandles:
         if ref.kind == "dex_pool":
             if ref.chain is None or not self.dex.covers(ref.chain):
                 return 0
-            return self.dex.limiter.available(OUTCOME_LANE) - self.min_free
+            limiter = self.dex.limiter
+            return limiter.available(OUTCOME_LANE) - _kept_free(limiter, self.min_free)
         if ref.provider is None:
             return 0
         return self.exchange.available_calls(ref.provider) - self.min_free
+
+    def rate_limited(self, ref: PriceRef, seconds: float) -> bool:
+        # Exchange providers' 429s end the cycle's requests to them (see `_fetch_candles`).
+        return ref.kind == "dex_pool" and self.dex.limiter.rate_limited_within(seconds)
 
     async def window(
         self, ref: PriceRef, timeframe: Timeframe, start: datetime, end: datetime, now: datetime
@@ -228,7 +243,9 @@ class GeckoTerminalPools:
     def headroom(self, chain: str) -> int:
         if chain not in self.provider.chains:
             return 0
-        return self.provider.gate.available(OUTCOME_LANE) - self.min_free
+        gate = self.provider.gate
+        keep = 0 if gate.reserved(INTERACTIVE_LANE) else self.min_free
+        return gate.available(OUTCOME_LANE) - keep
 
     def requests(self, count: int) -> int:
         return math.ceil(count / self.provider.config.lookup_batch_size)
@@ -249,6 +266,12 @@ class GeckoTerminalPools:
         return out
 
 
+def _kept_free(limiter: LaneLimiter, min_free: int) -> int:
+    """What outcome work leaves free for Analyze on this quota: nothing more when the quota
+    already holds a reservation for it (which outcome work can never use)."""
+    return 0 if limiter.reservations.get(INTERACTIVE_LANE) else min_free
+
+
 # --- The collector ------------------------------------------------------------------------
 
 
@@ -259,7 +282,17 @@ class CycleReport:
     finalized: dict[str, int] = field(default_factory=dict)
     still_pending: int = 0
     requests: dict[str, int] = field(default_factory=dict)
+    # Horizons whose provider requests were deferred this cycle, for any provider-access
+    # reason; `deferred_by_reason` splits them: "quota" (UpScale's own quota or per-cycle
+    # budget, not provider pushback), "provider_429" (the provider answered HTTP 429 this
+    # cycle) and "429_cooldown" (it did so recently).
     deferred_for_quota: int = 0
+    deferred_by_reason: dict[str, int] = field(default_factory=dict)
+    # Most consecutive cycles any still-due horizon's candles have been deferred (a number
+    # that keeps growing means starvation).
+    longest_candle_deferral: int = 0
+    # What each candle provider's quota let outcome work start when this cycle began.
+    candle_headroom: dict[str, int] = field(default_factory=dict)
     waiting_to_share_candles: int = 0
     network_skipped: bool = False
     reused_snapshots: int = 0
@@ -312,6 +345,9 @@ class OutcomeCollector:
         self.now = now
         self.last_cycle: CycleReport | None = None
         self._wake = asyncio.Event()
+        # Consecutive cycles each due horizon's candles were deferred (kind, id, horizon):
+        # the longest-deferred go first, so every due horizon eventually gets capacity.
+        self._deferrals: dict[tuple[str, int, str], int] = {}
 
     def wake(self) -> None:
         """New observations were anchored: re-plan the next wake-up."""
@@ -366,6 +402,10 @@ class OutcomeCollector:
                 report.still_pending += 1
             else:
                 report.finalized[status] = report.finalized.get(status, 0) + 1
+                self._deferrals.pop(_key(item), None)
+        pending = {_key(i) for i in items}
+        self._deferrals = {k: v for k, v in self._deferrals.items() if k in pending and v > 0}
+        report.longest_candle_deferral = max(self._deferrals.values(), default=0)
         self.last_cycle = report
         return report
 
@@ -416,6 +456,9 @@ class OutcomeCollector:
             token_id=token, observed=None, reference_liquidity=o.liquidity_usd, rank=0,
             pool_source="DEX Screener",  # Analyze's DEX market and its pools come from it
             )  # fmt: skip
+        # Without a reference price no candles can measure the price outcome: none are
+        # requested (the market state is still collected; see `_finish`).
+        item.candles_final = item.reference_price is None
         # Parts an earlier attempt already measured are kept (first write wins).
         item.market = d.horizon.market
         if d.horizon.price is not None and d.horizon.price.source == "candles":
@@ -507,6 +550,7 @@ class OutcomeCollector:
             used = report.requests.get(name, 0)
             if used + batches > self._budget(name) or source.headroom(chain) < batches:
                 report.deferred_for_quota += len(group)
+                _count(report.deferred_by_reason, "quota", len(group))
                 for i in group:
                     i.missing.append(f"{name} pool lookup deferred: background quota in use")
                 continue
@@ -540,9 +584,10 @@ class OutcomeCollector:
             for i in items:
                 i.missing.append("no candle source configured")
             return
+        cc = self.config.collector
         groups: dict[tuple[str, ...], list[_Item]] = {}
         for i in items:
-            if i.stored_price is not None:
+            if i.stored_price is not None or i.candles_final:
                 continue
             if (longer := self._shares_later(i, now)) is not None:
                 report.waiting_to_share_candles += 1
@@ -552,25 +597,50 @@ class OutcomeCollector:
                    i.ref.pair or "", i.ref.symbol or "", i.spec.candles)  # fmt: skip
             groups.setdefault(key, []).append(i)
         limited: set[str] = set()
+        # Longest-deferred first (aging), then priority: decisions, then Scout rank.
         ordered = sorted(
-            groups.values(), key=lambda g: (min(i.rank for i in g), min(i.end for i in g))
+            groups.values(),
+            key=lambda g: (
+                -max(self._deferrals.get(_key(i), 0) for i in g),
+                min(i.rank for i in g),
+                min(i.end for i in g),
+            ),
         )
         for group in ordered:
             ref, tf = group[0].ref, group[0].spec.candles
             provider = self.candles.provider(ref)
+            cooling = self.candles.rate_limited(ref, cc.rate_limit_cooldown_seconds)
+            if provider not in report.candle_headroom:
+                report.candle_headroom[provider] = self.candles.headroom(ref)
             for chunk in _chunks_by_span(group, TIMEFRAME_SECONDS[tf], MAX_LIMIT - 2):
                 used = report.requests.get(provider, 0)
                 budget = self._budget(provider)
-                if provider in limited or used >= budget or self.candles.headroom(ref) <= 0:
-                    report.deferred_for_quota += len(chunk)
+                reason, why = "quota", None
+                if provider in limited:
+                    reason, why = "provider_429", "rate limited (HTTP 429) this cycle"
+                elif cooling:
+                    reason = "429_cooldown"
                     why = (
-                        "rate limited this cycle"
-                        if provider in limited
-                        else "background quota in use"
+                        "provider answered HTTP 429 within the last "
+                        f"{cc.rate_limit_cooldown_seconds:.0f} s"
                     )
+                elif used >= budget:
+                    reason, why = "quota", f"per-cycle budget of {budget} request(s) used"
+                elif self.candles.headroom(ref) <= 0:
+                    reason, why = "quota", "UpScale's quota for outcome work is in use"
+                if why is not None:
+                    report.deferred_for_quota += len(chunk)
+                    _count(report.deferred_by_reason, reason, len(chunk))
                     for i in chunk:
-                        i.missing.append(f"{provider} candles deferred: {why}")
+                        streak = self._deferrals.get(_key(i), 0) + 1
+                        self._deferrals[_key(i)] = streak
+                        i.missing.append(
+                            f"{provider} candles deferred: {why} (deferred {streak} cycle(s) "
+                            "in a row)"
+                        )
                     continue
+                for i in chunk:
+                    self._deferrals.pop(_key(i), None)
                 start, end = min(i.start for i in chunk), max(i.end for i in chunk)
                 report.requests[provider] = used + 1
                 try:
@@ -703,6 +773,14 @@ class OutcomeCollector:
             item.due.kind, item.due.horizon.observation_id, item.due.horizon.horizon, u, now
         )
         return u.finalize
+
+
+def _key(item: _Item) -> tuple[str, int, str]:
+    return (item.kind, item.due.horizon.observation_id, item.due.horizon.horizon)
+
+
+def _count(counts: dict[str, int], reason: str, n: int) -> None:
+    counts[reason] = counts.get(reason, 0) + n
 
 
 def _same(chain: str, a: str | None, b: str | None) -> bool:

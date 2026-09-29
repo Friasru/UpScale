@@ -34,6 +34,7 @@ from upscale.services.market_data import MarketDataService
 from upscale.services.news import NewsService
 from upscale.services.news_sentiment_model import ClaudeNewsSentimentModel
 from upscale.services.outcomes import (
+    OUTCOME_LANE,
     DexScreenerPools,
     GeckoTerminalPools,
     OutcomeCollector,
@@ -52,6 +53,7 @@ from upscale.services.scout import (
 )
 from upscale.services.scout.gate import RequestGate
 from upscale.services.scout.growth import GrowthScoutService, load_growth_config
+from upscale.services.scout.service import REFRESH_LANE
 from upscale.services.scout.social import (
     DiscourseForumProvider,
     NeynarFarcasterProvider,
@@ -106,8 +108,14 @@ scout_config = load_scout_config(SCOUT_CONFIG)
 # ONE GeckoTerminal quota for the whole process: its real limit is shared by Scout's
 # discovery and refresh and Analyze's pool candles, so UpScale counts them together. Part
 # is held for interactive work (Analyze) and never lent to background Scout traffic.
+# Priority: Analyze > due outcome collection > Scout refresh > Scout discovery, so outcome
+# work may also use Scout refresh's reservation (held from startup until a scan releases
+# it); it never touches the interactive one.
 geckoterminal_quota = LaneLimiter(
-    scout_config.geckoterminal.calls_per_minute, 60.0, scout_config.geckoterminal.reservations
+    scout_config.geckoterminal.calls_per_minute,
+    60.0,
+    scout_config.geckoterminal.reservations,
+    outranks={OUTCOME_LANE: {REFRESH_LANE}},
 )
 dex_candle_service = DexCandleService(GeckoTerminalProvider(), limiter=geckoterminal_quota)
 # Agents ask this registry for data capabilities instead of calling providers directly.
@@ -176,8 +184,9 @@ growth_scout_service = GrowthScoutService(
 
 # Outcome tracking: immutable Scout / decision observations and what happened afterward
 # (same database file, separate tables; opened on first use). The collector is background
-# work in its own request lane: it never uses capacity reserved for Analyze or Scout refresh,
-# leaves headroom to Scout discovery, and is started by the API app (upscale.main).
+# work in its own request lane: it never uses capacity reserved for Analyze, outranks Scout
+# (refresh and discovery) on the shared GeckoTerminal quota, and is started by the API app
+# (upscale.main).
 outcome_config = load_outcome_config(OUTCOME_CONFIG)
 outcome_store = OutcomeStore(SCOUT_DB_PATH)
 outcome_collector = OutcomeCollector(

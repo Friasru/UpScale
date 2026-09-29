@@ -88,6 +88,15 @@ class RequestGate:
         """Hold `lane`'s reservation again (e.g. at the start of a run)."""
         self._limiter.arm(lane)
 
+    def note_rate_limited(self) -> None:
+        """The provider answered "rate limited" (recorded on its shared quota)."""
+        self._limiter.note_rate_limited()
+
+    def rate_limited_within(self, seconds: float) -> bool:
+        """Whether the provider (by any UpScale consumer of its quota) answered "rate
+        limited" within the last `seconds`."""
+        return self._limiter.rate_limited_within(seconds)
+
     async def run(self, key: str, fetch: Callable[[], Awaitable[T]]) -> T:
         entry = self._cache.get(key)
         if entry is not None and entry[0] > self._clock():

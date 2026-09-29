@@ -14,6 +14,9 @@ itself may also use free unreserved capacity, and the total never exceeds the li
 * "refresh": Scout's tracked-token refresh; released after the refresh, so discovery can
   use what it left.
 * "default": everything else (e.g. Scout discovery): unreserved capacity only.
+
+A limiter also remembers when the provider itself last answered "rate limited" (HTTP 429),
+so optional background work can stay away from a provider that is pushing back.
 """
 
 import time
@@ -58,11 +61,13 @@ class LaneLimiter:
         self._clock = clock
         self._calls: deque[tuple[float, str]] = deque()
         self._held = set(self.reservations)
+        self._rate_limited_at: float | None = None
 
     def reset(self) -> None:
         """Forget every call and hold every reservation again (e.g. between tests)."""
         self._calls.clear()
         self._held = set(self.reservations)
+        self._rate_limited_at = None
 
     def _trim(self) -> None:
         now = self._clock()
@@ -99,6 +104,14 @@ class LaneLimiter:
     def arm(self, lane: str) -> None:
         if lane in self.reservations:
             self._held.add(lane)
+
+    def note_rate_limited(self) -> None:
+        """The provider itself rejected a request for its rate limit (e.g. HTTP 429)."""
+        self._rate_limited_at = self._clock()
+
+    def rate_limited_within(self, seconds: float) -> bool:
+        at = self._rate_limited_at
+        return at is not None and self._clock() - at < seconds
 
 
 def current_lane() -> str:

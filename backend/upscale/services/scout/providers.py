@@ -138,6 +138,7 @@ class _HttpDiscoveryProvider:
         except httpx2.HTTPError as exc:
             raise MarketDataUnavailableError(f"could not reach {self.name}") from exc
         if response.status_code == 429:
+            self.gate.note_rate_limited()
             raise MarketDataUnavailableError(f"{self.name} rate limit reached")
         if response.status_code == 404:
             return None

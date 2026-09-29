@@ -268,6 +268,10 @@ class ScoutService:
     def _gates(self) -> list[RequestGate]:
         return [g for p in self.providers if isinstance(g := getattr(p, "gate", None), RequestGate)]
 
+    def gates(self) -> list[RequestGate]:
+        """Every discovery provider's request gate (their shared quotas, read-only use)."""
+        return self._gates()
+
     def hold_reservations(self, lane: str = REFRESH_LANE) -> None:
         """Hold every provider's reservation for `lane` (other lanes can't use it)."""
         for gate in self._gates():

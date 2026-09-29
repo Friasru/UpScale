@@ -275,15 +275,19 @@ class DexCandleService:
                     f"UpScale's {self.provider.name} request limit was reached; try again "
                     "in about a minute"
                 )
-            series = await self.provider.fetch_pool_candles(
-                chain,
-                pool,
-                timeframe,
-                limit,
-                symbol=symbol,
-                canonical_id=canonical_id,
-                now=self.now(),
-            )
+            try:
+                series = await self.provider.fetch_pool_candles(
+                    chain,
+                    pool,
+                    timeframe,
+                    limit,
+                    symbol=symbol,
+                    canonical_id=canonical_id,
+                    now=self.now(),
+                )
+            except ProviderRateLimitedError:
+                self.limiter.note_rate_limited()  # the provider pushed back: shared
+                raise
             ttl = min(self.max_cache_ttl, TIMEFRAME_SECONDS[timeframe] * 0.25)
             self._cache[key] = (self._clock() + ttl, series)
             return series
@@ -312,17 +316,21 @@ class DexCandleService:
                 raise ProviderRateLimitedError(
                     f"UpScale's {self.provider.name} request limit was reached for {lane} work"
                 )
-            series = await self.provider.fetch_pool_candles(
-                chain,
-                pool,
-                timeframe,
-                limit,
-                symbol=pool,
-                canonical_id=canonical_id,
-                now=self.now(),
-                before=before,
-                contiguous=False,
-            )
+            try:
+                series = await self.provider.fetch_pool_candles(
+                    chain,
+                    pool,
+                    timeframe,
+                    limit,
+                    symbol=pool,
+                    canonical_id=canonical_id,
+                    now=self.now(),
+                    before=before,
+                    contiguous=False,
+                )
+            except ProviderRateLimitedError:
+                self.limiter.note_rate_limited()  # the provider pushed back: shared
+                raise
             ttl = min(self.max_cache_ttl, TIMEFRAME_SECONDS[timeframe] * 0.25)
             self._cache[key] = (self._clock() + ttl, series)
             return series

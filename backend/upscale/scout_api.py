@@ -13,6 +13,7 @@ which receives the exact token (`analyze`: chain + contract / mint) through `/ch
 """
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
@@ -29,6 +30,8 @@ from upscale.services.scout.growth.models import (
     GrowthScoutResult,
     GrowthStage,
 )
+
+logger = logging.getLogger("upscale.scout")
 
 # The UI offers the top 10 or top 20 (never hundreds of cards).
 SCOUT_LIMITS = (10, 20)
@@ -537,27 +540,30 @@ class ScoutFeed:
             self.result = await self._scan()
             self.error = None
         except Exception as exc:  # the previous ranking stays usable
+            logger.exception("Scout scan failed")
             self.error = f"Scout refresh failed ({type(exc).__name__}); showing the last results."
             if self.result is None:
                 self.error = f"Scout refresh failed ({type(exc).__name__})."
         finally:
             self._last_scan = self._clock()
 
-    async def refresh(self, force: bool = False) -> None:
+    async def refresh(self, force: bool = False) -> bool:
         """Run a scan unless one is running (then wait for it) or one finished less than
-        `min_refresh_seconds` ago (then keep that result), so providers aren't hammered."""
+        `min_refresh_seconds` ago (then keep that result), so providers aren't hammered.
+        Returns whether a scan ran (started here or joined), False if it was skipped."""
         if self.refreshing:
             assert self._task is not None
             await asyncio.shield(self._task)
-            return
+            return True
         recent = (
             self._last_scan is not None
             and self._clock() - self._last_scan < self.min_refresh_seconds
         )
         if recent and not force:
-            return
+            return False
         self._task = asyncio.create_task(self._run())
         await asyncio.shield(self._task)
+        return True
 
     async def view(self, limit: int, filters: ScoutFilters) -> ScoutView:
         if self.result is None and self.error is None:

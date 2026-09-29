@@ -88,6 +88,12 @@ OUTCOMES_COLLECTOR = (os.getenv("UPSCALE_OUTCOMES") or "1").strip().lower() not 
     "off",
 )
 
+# Background Scout: the regular Scout scan, run automatically while the backend is alive
+# (lowest priority on every provider quota; see upscale.background_scout). On by default;
+# UPSCALE_BACKGROUND_SCOUT=0 disables it. Interval in minutes (default 30, at least 5).
+BACKGROUND_SCOUT = os.getenv("UPSCALE_BACKGROUND_SCOUT") or None
+BACKGROUND_SCOUT_INTERVAL_MINUTES = os.getenv("UPSCALE_BACKGROUND_SCOUT_INTERVAL_MINUTES") or None
+
 # Secret-safe logging for the whole process (every logger and level): the credentials above
 # and any credential-looking query parameter or header are masked in log output.
 log_safety.install()

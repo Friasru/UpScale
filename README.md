@@ -98,6 +98,14 @@ and it reports no win rates, expected returns or simulated trades.
   leaves headroom for Scout discovery, and makes no requests while (or just after) Scout or
   Analyze runs. `UPSCALE_OUTCOMES=0` switches it off; `UPSCALE_OUTCOME_CONFIG` overrides
   thresholds.
+* **Background Scout**: the same Scout scan a manual refresh runs, every 30 minutes while
+  the backend is up (first run 5 minutes after startup), so anchors accumulate without the
+  UI open. It is the lowest priority on every provider quota: it defers (retrying in 5
+  minutes) while Analyze runs or just ran, while due outcome work is waiting for provider
+  quota, while a Scout refresh runs, or while a discovery provider is busy or recently
+  answered "rate limited". `UPSCALE_BACKGROUND_SCOUT=0` switches it off;
+  `UPSCALE_BACKGROUND_SCOUT_INTERVAL_MINUTES` sets the interval (at least 5).
+  `GET /scout/background/status` shows its state and last result.
 * **API** (developer-oriented): `GET /outcomes/scout[/{id}]`, `/outcomes/decisions[/{id}]`,
   `/outcomes/summary?group_by=stage&horizon=1h` (cohorts under 20 measured outcomes report
   INSUFFICIENT_SAMPLE instead of statistics), `/outcomes/status`, and `/outcomes/replay`, a

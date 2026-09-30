@@ -9,6 +9,7 @@ python -m upscale.services.calibration candidates
 python -m upscale.services.calibration validate <candidate_id>
 python -m upscale.services.calibration compare <candidate_id>
 python -m upscale.services.calibration final-evaluate <candidate_id> --confirm-final-evaluation
+python -m upscale.services.calibration origins --horizon 1h   (LIVE / REPLAY / SHADOW, separate)
 """
 
 import argparse
@@ -25,6 +26,7 @@ from upscale.services.calibration.config import (
     default_calibration_db,
     default_live_db,
     default_replay_db,
+    default_shadow_db,
     parse_timestamp,
 )
 from upscale.services.calibration.dataset import HoldoutSealedError
@@ -57,6 +59,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--db", default=None, help="calibration database (UPSCALE_CALIBRATION_DB)")
     p.add_argument("--live-db", default=None, help="live Scout / outcome database, read-only")
     p.add_argument("--replay-db", default=None, help="Replay Lab database, read-only")
+    p.add_argument("--shadow-db", default=None, help="Shadow / Paper database, read-only")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
     _cohort(sub.add_parser("readiness"))
@@ -70,6 +73,9 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--horizon", default="1h", choices=HORIZONS)
     _cohort(c)
     sub.add_parser("candidates")
+    og = sub.add_parser("origins", help="LIVE_FORWARD / HISTORICAL_REPLAY / SHADOW, never merged")
+    og.add_argument("--horizon", default="1h", choices=HORIZONS)
+    _cohort(og)
     for name in ("validate", "compare"):
         v = sub.add_parser(name)
         v.add_argument("candidate_id")
@@ -107,6 +113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     engine = CalibrationEngine(
         store, args.live_db or default_live_db(), args.replay_db or default_replay_db(),
         time_filter=time_filter, origin=getattr(args, "origin", None),
+        shadow_db=args.shadow_db or default_shadow_db(),
     )  # fmt: skip
     try:
         if args.command == "status":
@@ -139,6 +146,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Candidates are research only: production configuration is unchanged.")
         elif args.command == "candidates":
             _print(store.candidates())
+        elif args.command == "origins":
+            _print(engine.compare_origins(args.horizon))
         elif args.command == "validate":
             result = engine.validate(args.candidate_id)
             print(f"{args.candidate_id}: {result['outcome']}")

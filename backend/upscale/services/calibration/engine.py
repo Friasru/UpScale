@@ -88,10 +88,12 @@ class CalibrationEngine:
         triggered_by: Callable[[], str] = _default_trigger,
         time_filter: TimeFilter | None = None,
         origin: Origin | None = None,
+        shadow_db: str | None = None,
     ):
         self.store = store
         self.live_db = live_db
         self.replay_db = replay_db
+        self.shadow_db = shadow_db  # read-only; SHADOW is never merged with the other origins
         self.cfg = cfg or CalibrationConfig()
         self.now = now
         self.triggered_by = triggered_by
@@ -108,7 +110,8 @@ class CalibrationEngine:
             obs += load_live(self.live_db, self.cfg, include_holdout=include_holdout)
         if self.replay_db:
             obs += load_replay(self.replay_db, include_holdout=include_holdout)
-            obs += load_shadow(self.replay_db)
+        if self.shadow_db:
+            obs += load_shadow(self.shadow_db, self.cfg.live_split, include_holdout=include_holdout)
         return obs
 
     def _load(self, include_holdout: bool = False) -> list[Observation]:
@@ -122,7 +125,9 @@ class CalibrationEngine:
             "raw_before_time_filter": dict(Counter(o.origin for o in obs)),
             "raw_after_time_filter": dict(Counter(o.origin for o in kept)),
         }
-        return with_regimes(kept)
+        # Regimes describe the observed market universe: simulated trades never shape them.
+        shadow = [o for o in kept if o.origin == "SHADOW"]
+        return with_regimes([o for o in kept if o.origin != "SHADOW"]) + shadow
 
     def _keeps(self, origin: str, at: datetime) -> bool:
         if self.origin is not None and origin != self.origin:
@@ -410,7 +415,8 @@ class CalibrationEngine:
         version = _hash([k for k, _ in index])
         self.store.log_holdout_access(cid, "final evaluation", self.triggered_by(), window, version)
         horizon = c["parent_version"]["evaluation_horizon"]
-        holdout = diversify([o for o in self._load(include_holdout=True) if o.split == "HOLDOUT"],
+        holdout = diversify([o for o in self._load(include_holdout=True)
+                             if o.split == "HOLDOUT" and o.origin != "SHADOW"],
                             self.cfg.correlation)  # fmt: skip
         m = evaluate(c["changes"], holdout, horizon, self.cfg)
         base = evaluate([], holdout, horizon, self.cfg)
@@ -468,6 +474,22 @@ class CalibrationEngine:
                     "distinct_assets": len({o.asset_id for o in raw if o.origin == origin}),
                     "completed": completed([o for o in raw if o.origin == origin]),
                 }
+                | (
+                    {
+                        "closed_trades": sum(
+                            1 for o in raw if o.origin == origin and "trade" in o.outcomes
+                        ),
+                        "resolved_trades": sum(
+                            1
+                            for o in raw
+                            if o.origin == origin
+                            and (v := o.outcomes.get("trade")) is not None
+                            and v.measured
+                        ),
+                    }
+                    if origin == "SHADOW"
+                    else {}
+                )
                 for origin in ("LIVE_FORWARD", "HISTORICAL_REPLAY", "SHADOW")
             },
             "calibration_eligible": {
@@ -504,6 +526,34 @@ class CalibrationEngine:
             "rules": rules.model_dump(),
         }
 
+    def compare_origins(self, horizon: str) -> dict[str, Any]:
+        """LIVE_FORWARD, HISTORICAL_REPLAY and SHADOW side by side, never merged. Live and
+        replay are fixed-horizon market outcomes on CALIBRATION + VALIDATION (diversified);
+        SHADOW is each strategy's simulated entry-to-exit trades (IDEALIZED_NO_FEES), per
+        strategy version. HOLDOUT is excluded everywhere."""
+        raw = self._load()
+        base = [o for o in raw if o.split in ("CALIBRATION", "VALIDATION") and not o.purged]
+        out: dict[str, Any] = {
+            "label": NOT_A_PROFIT_CLAIM,
+            **self._filter_report(),
+            "horizon": horizon,
+            "note": (
+                "Origins are reported separately and never merged. SHADOW rows are simulated "
+                "paper trades (entry to exit, no fees or slippage), not fixed-horizon outcomes "
+                "and not real profit."
+            ),
+        }
+        for origin in ("LIVE_FORWARD", "HISTORICAL_REPLAY"):
+            obs = diversify([o for o in base if o.origin == origin], self.cfg.correlation)
+            out[origin] = analysis._summary(cohort(origin, obs, horizon, self.cfg))
+        shadow = [o for o in base if o.origin == "SHADOW"]
+        out["SHADOW"] = {
+            key: analysis._summary(cohort(key, [o for o in shadow if o.s("strategy") == key],
+                                          "trade", self.cfg))
+            for key in sorted({o.s("strategy") or "unknown" for o in shadow})
+        }  # fmt: skip
+        return out
+
     def status(self) -> dict[str, Any]:
         cands = self.store.candidates()
         return {
@@ -515,6 +565,9 @@ class CalibrationEngine:
                 else None,
                 "replay_db": self.replay_db
                 if self.replay_db and Path(self.replay_db).expanduser().exists()
+                else None,
+                "shadow_db": self.shadow_db
+                if self.shadow_db and Path(self.shadow_db).expanduser().exists()
                 else None,
             },
             "runs": self.store.runs(),

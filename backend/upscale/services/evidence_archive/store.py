@@ -422,6 +422,51 @@ class EvidenceStore:
             )
         return [_record(r) for r in rows]
 
+    def after(
+        self,
+        kinds: Sequence[Kind],
+        cursor: tuple[float, int],
+        until: datetime,
+        limit: int = 2000,
+    ) -> list[EvidenceRecord]:
+        """Records of `kinds` strictly after `cursor` = (observed_at, id) in that order and
+        observed at or before `until`, oldest first (a resumable, ordered scan)."""
+        at, rid = cursor
+        marks = ",".join("?" for _ in kinds)
+        with self._lock:
+            rows = (
+                self._db()
+                .execute(
+                    f"SELECT {_COLUMNS} FROM evidence_records WHERE kind IN ({marks}) "
+                    "AND (observed_at > ? OR (observed_at = ? AND id > ?)) AND observed_at <= ? "
+                    "ORDER BY observed_at, id LIMIT ?",
+                    [*kinds, at, at, rid, until.timestamp(), limit],
+                )
+                .fetchall()
+            )
+        out = [_record(r) for r in rows]
+        if any(r.observed_at > until for r in out):
+            raise FutureEvidenceError(f"evidence observed after {until.isoformat()}")
+        return out
+
+    def archived_late(
+        self, kinds: Sequence[Kind], since: float, observed_by: float, archived_after: float
+    ) -> int:
+        """Records of `kinds` observed in [since, observed_by] but archived after
+        `archived_after` (they arrived after an ordered scan had passed them)."""
+        marks = ",".join("?" for _ in kinds)
+        with self._lock:
+            row = (
+                self._db()
+                .execute(
+                    f"SELECT COUNT(*) FROM evidence_records WHERE kind IN ({marks}) "
+                    "AND observed_at >= ? AND observed_at <= ? AND archived_at > ?",
+                    [*kinds, since, observed_by, archived_after],
+                )
+                .fetchone()
+            )
+        return int(row[0])
+
     def index(
         self, since: datetime | None = None
     ) -> list[tuple[str, str, float, str, str | None, str, dict[str, Any]]]:

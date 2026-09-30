@@ -35,6 +35,11 @@ def default_replay_db() -> str:
     return os.getenv("UPSCALE_REPLAY_DB") or str(_scout_dir() / "replay.sqlite3")
 
 
+def default_shadow_db() -> str:
+    """The Shadow / Paper Strategy database (read-only here)."""
+    return os.getenv("UPSCALE_SHADOW_DB") or str(_scout_dir() / "shadow.sqlite3")
+
+
 class SampleRules(BaseModel):
     """Minimum support. Below `descriptive` a cohort is INSUFFICIENT_SAMPLE (counts only)."""
 

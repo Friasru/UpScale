@@ -507,11 +507,11 @@ def test_cli_and_api(tmp_path: Path, client: TestClient, monkeypatch: pytest.Mon
     assert cli_main([*base, "final-evaluate", "cand-x"]) == 1
     assert cli_main([*base, "validate", "cand-missing"]) == 1
     monkeypatch.setenv("UPSCALE_CALIBRATION_DB", db)
-    for path in ("status", "readiness", "findings", "candidates"):
+    for path in ("status", "readiness", "findings", "candidates", "origins"):
         assert client.get(f"/calibration/{path}").status_code == 200, path
     paths = {p: set(ops) for p, ops in client.get("/openapi.json").json()["paths"].items()
              if p.startswith("/calibration")}  # fmt: skip
     assert set(paths) == {
-        f"/calibration/{x}" for x in ("status", "readiness", "findings", "candidates")
+        f"/calibration/{x}" for x in ("status", "readiness", "findings", "candidates", "origins")
     }
     assert all(ops == {"get"} for ops in paths.values())  # read-only: nothing can change state

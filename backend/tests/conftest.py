@@ -638,6 +638,17 @@ def isolated_outcome_store(
     store.close()
 
 
+@pytest.fixture(autouse=True)
+def isolated_shadow_db(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shadow / Paper databases opened by the app, the CLI or Calibration during tests are
+    temporary files, never the user's real one."""
+    monkeypatch.setenv(
+        "UPSCALE_SHADOW_DB", str(tmp_path_factory.mktemp("shadow") / "shadow.sqlite3")
+    )
+
+
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(app)

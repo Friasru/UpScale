@@ -27,6 +27,10 @@ from upscale.config import (
     BACKGROUND_SCOUT_INTERVAL_MINUTES,
     CORS_ORIGINS,
     OUTCOMES_COLLECTOR,
+    SHADOW,
+    SHADOW_INTERVAL_MINUTES,
+    SHADOW_RUN,
+    SHADOW_SINCE,
 )
 from upscale.evidence_api import router as evidence_router
 from upscale.orchestrator import Orchestrator
@@ -44,6 +48,9 @@ from upscale.services.evidence_archive import hooks as evidence
 from upscale.services.outcomes import record_decision, record_scout_run
 from upscale.services.outcomes.models import SurfacingHistory
 from upscale.services.scout.growth.models import GrowthScoutResult
+from upscale.services.shadow.config import load_settings as load_shadow_settings
+from upscale.services.shadow.service import BackgroundShadow
+from upscale.shadow_api import router as shadow_router
 
 logger = logging.getLogger("upscale.outcomes")
 # Analyze requests in flight, and when a scan or Analyze last finished: background outcome
@@ -71,9 +78,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         collector.busy = _busy
         task = asyncio.create_task(collector.run_forever(stop))
     background_scout.start()
+    background_shadow.start()
     try:
         yield
     finally:
+        await background_shadow.stop()
         await background_scout.stop()
         if _enrichment_task is not None and not _enrichment_task.done():
             _enrichment_task.cancel()
@@ -93,6 +102,7 @@ app.add_middleware(
 app.include_router(outcomes_router)
 app.include_router(evidence_router)
 app.include_router(calibration_router)
+app.include_router(shadow_router)
 
 orchestrator = Orchestrator()
 
@@ -210,6 +220,25 @@ background_scout = BackgroundScout(
 )
 
 
+def _shadow_defer_reason() -> str | None:
+    """Shadow makes no provider request, and still yields to every production workload:
+    Analyze, Scout scans (manual or background) and safety enrichment."""
+    quiet = services.outcome_config.collector.quiet_after_seconds
+    if _interactive > 0 or time.monotonic() - _last_analyze < quiet:
+        return "Analyze is active"
+    if scout_feed.refreshing or background_scout.running:
+        return "a Scout scan is running"
+    if services.safety_enrichment.running:
+        return "safety enrichment is running"
+    return None
+
+
+background_shadow = BackgroundShadow(
+    load_shadow_settings(SHADOW, SHADOW_INTERVAL_MINUTES, SHADOW_RUN, SHADOW_SINCE),
+    _shadow_defer_reason,
+)
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -279,3 +308,9 @@ async def scout_refresh(
 async def scout_background_status() -> BackgroundScoutStatus:
     """The background Scout scheduler's actual state and its last attempt."""
     return background_scout.status()
+
+
+@app.get("/shadow/background/status")
+async def shadow_background_status() -> dict[str, object]:
+    """The background Shadow scheduler's state (off unless UPSCALE_SHADOW=1)."""
+    return background_shadow.status()

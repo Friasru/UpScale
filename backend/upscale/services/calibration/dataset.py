@@ -5,8 +5,10 @@
   (`LiveSplitPolicy`).
 * HISTORICAL_REPLAY: Replay Lab samples, decisions and outcomes, read-only, keeping the
   split each sample was assigned when planned (including sticky HOLDOUT windows).
-* SHADOW: shadow-strategy evaluations (none exist yet); strategy calibration, kept apart
-  from Scout signal calibration.
+* SHADOW: closed Shadow / Paper Strategy positions (simulated, IDEALIZED_NO_FEES) from
+  clean-data runs only, one observation per position with its entry-to-exit outcome under
+  the key ``trade``; strategy calibration, kept apart from Scout signal calibration (never
+  in splits, regimes or the combined view).
 
 Every observation keeps its origin, split, decision time, asset and version fingerprints.
 Features are the values the system had at decision time; missing evidence is a label
@@ -405,16 +407,69 @@ def load_replay(path: str | Path, include_holdout: bool = False) -> list[Observa
         conn.close()
 
 
-def load_shadow(path: str | Path) -> list[Observation]:
-    """Shadow-strategy evaluations (strategy calibration only). None exist in v1."""
+def load_shadow(
+    path: str | Path, policy: LiveSplitPolicy, include_holdout: bool = False
+) -> list[Observation]:
+    """Closed shadow positions of clean-data runs (read-only). The split is the live
+    calendar split of the ENTRY decision time; HOLDOUT days stay sealed like live data. The
+    outcome is known only after the entry decision was frozen (it is its exit)."""
+    from upscale.services.shadow.metrics import closed_positions
+
     conn = _ro(path)
     if conn is None:
         return []
     try:
-        if "shadow_evaluations" not in _tables(conn):
+        if not {"shadow_trades", "shadow_runs", "shadow_decisions"} <= _tables(conn):
             return []
-        n = conn.execute("SELECT COUNT(*) FROM shadow_evaluations").fetchone()[0]
-        return [] if not n else []  # the evaluation format is defined when strategies exist
+        clean = {r[0] for r in conn.execute("SELECT run_id FROM shadow_runs WHERE clean_data")}
+        cur = conn.execute("SELECT * FROM shadow_trades ORDER BY position_id, fill_no")
+        names = [d[0] for d in cur.description]
+        trades = [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+        trades = [t for t in trades if t["run_id"] in clean]
+        owner = {t["position_id"]: t for t in trades}
+        entry_evidence = {
+            d: json.loads(e)
+            for d, e in conn.execute(
+                "SELECT decision_id, evidence_json FROM shadow_decisions WHERE action = 'ENTER'"
+            )
+        }
+        out: list[Observation] = []
+        for p in closed_positions(trades):
+            t = owner[p["position_id"]]
+            at = datetime.fromtimestamp(p["entry_at"], UTC)
+            split = live_split(at, policy)
+            if split == "HOLDOUT" and not include_holdout:
+                continue
+            ev = entry_evidence.get(t["entry_decision_id"], {})
+            scout = ev.get("scout") or {}
+            risk = ev.get("risk") or {}
+            strategy = f"{t['strategy_id']}@v{t['strategy_version']}"
+            feats: dict[str, Value] = {
+                "strategy": strategy, "run": t["run_id"], "exit_reason": p["exit_reason"],
+                "execution_model": t["execution_model"], "holding_minutes": p["holding_minutes"],
+                "score": scout.get("score"), "stage": scout.get("stage"),
+                "liquidity_usd": scout.get("liquidity_usd"),
+                "market_cap_usd": scout.get("market_cap_usd"),
+                "risk_penalty": risk.get("risk_penalty"),
+                "safety_status": risk.get("safety_status"),
+                "social_status": scout.get("social_status"),
+            }  # fmt: skip
+            resolved = p["resolved"]
+            view = OutcomeView(
+                status="COMPLETE" if resolved else "UNAVAILABLE",
+                return_pct=p["return_pct"], mfe_pct=p["mfe_pct"], mae_pct=p["mae_pct"],
+                market_status=None if resolved else "MARKET_UNAVAILABLE",
+            )  # fmt: skip
+            # Purged when the trade itself (entry to exit) crosses into another split.
+            held = timedelta(minutes=max(0.0, p["holding_minutes"] or 0.0))
+            out.append(Observation(
+                origin="SHADOW", kind="shadow", key=f"shadow:{t['run_id']}:{strategy}:{p['position_id']}",
+                asset_id=p["asset_id"], at=at, split=split, purged=live_purged(at, policy, held),
+                features=feats, flags=frozenset(f["code"] for f in risk.get("flags") or []),
+                missing=frozenset(ev.get("missing") or []), outcomes={"trade": view},
+                run_id=t["run_id"], versions={"strategy": strategy},
+            ))  # fmt: skip
+        return sorted(out, key=lambda o: (o.at, o.key))
     finally:
         conn.close()
 

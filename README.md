@@ -194,6 +194,37 @@ production scoring, thresholds, confidence or decisions, and never promotes a ca
   --confirm-final-evaluation`. API (read-only): `GET /calibration/status`, `/readiness`,
   `/findings`, `/candidates`.
 
+### Shadow / Paper Strategy Engine (simulation only)
+
+`services/shadow/` simulates what UpScale would have done, without any real trade: no
+private keys, exchange credentials, orders, transaction signing or provider requests. It
+replays the Evidence Archive (read-only) in time order: each archived Growth Scout
+evaluation is shown to every strategy at its decision time (plus, if a strategy asks, the
+latest Analyze decision observed at or before it), and later exact-pool price observations
+drive exits. Results are `IDEALIZED_NO_FEES` (fills at the observed price, no fees or
+slippage) and are not real profit.
+
+* Strategies: immutable `(strategy_id, version)` configurations (entry, exit, risk rules)
+  fingerprinted by a hash; changed rules need a new version, and a run freezes the versions
+  it uses. v1 baselines: `scout_threshold`, `scout_technical`, `scout_safety_technical`,
+  `random_eligible` (seeded), sharing the same exits (+30% / -15% / 24h / FADING) and risk
+  ($10,000 paper capital, $500 per entry, one position per asset, cooldowns).
+* Exits: TAKE_PROFIT, STOP_LOSS, TRAILING_STOP, MAX_HOLD_TIME, SIGNAL_EXIT and
+  MARKET_UNAVAILABLE (no observed price of the exact pool: closed without a price, never a
+  fabricated one; excluded from returns and from equity).
+* Clean data: runs start no earlier than `2026-09-30T05:50:00Z` unless explicitly labeled a
+  contaminated research run (never read by Calibration).
+* Storage: `UPSCALE_SHADOW_DB` (default `shadow.sqlite3` next to the Scout database),
+  append-only history (triggers); a checkpoint makes runs resumable.
+* Background: `UPSCALE_SHADOW=1` (off by default), every `UPSCALE_SHADOW_INTERVAL_MINUTES`
+  (15), deferred while Analyze or a Scout scan runs.
+* CLI: `python -m upscale.services.shadow init | strategies | run | status | positions
+  [--open|--closed] | trades | decisions | metrics` (filters `--run --strategy --asset --since
+  --until`). API (read-only): `GET /shadow/status`, `/strategies`, `/positions`, `/trades`,
+  `/decisions`, `/metrics`, `/shadow/background/status`.
+* Calibration reads closed shadow trades as the SHADOW origin, kept apart from LIVE_FORWARD
+  and HISTORICAL_REPLAY: `python -m upscale.services.calibration origins --horizon 1h`.
+
 ## Prerequisites
 
 - Node.js ≥ 20.19 (22 LTS recommended)

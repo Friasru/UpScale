@@ -112,6 +112,16 @@ EVIDENCE_DB_PATH = os.getenv("UPSCALE_EVIDENCE_DB") or str(
 EVIDENCE_SAFETY_ENRICHMENT = os.getenv("UPSCALE_EVIDENCE_SAFETY_ENRICHMENT") or None
 EVIDENCE_SAFETY_MAX_PER_REFRESH = os.getenv("UPSCALE_EVIDENCE_SAFETY_MAX_PER_REFRESH") or None
 
+# Shadow / Paper Strategy Engine: simulated strategies over archived evidence (no orders,
+# keys or provider requests). OFF by default; UPSCALE_SHADOW=1 runs it in the background at
+# the lowest priority. Stored in UPSCALE_SHADOW_DB (default shadow.sqlite3 next to the Scout
+# database). The background run id (default "production") and its start time (default and
+# minimum: the clean-data cutoff 2026-09-30T05:50:00Z).
+SHADOW = os.getenv("UPSCALE_SHADOW") or None
+SHADOW_INTERVAL_MINUTES = os.getenv("UPSCALE_SHADOW_INTERVAL_MINUTES") or None
+SHADOW_RUN = os.getenv("UPSCALE_SHADOW_RUN") or None
+SHADOW_SINCE = os.getenv("UPSCALE_SHADOW_SINCE") or None
+
 # Secret-safe logging for the whole process (every logger and level): the credentials above
 # and any credential-looking query parameter or header are masked in log output.
 log_safety.install()

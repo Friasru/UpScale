@@ -11,6 +11,7 @@ from upscale.services.calibration.config import (
     default_calibration_db,
     default_live_db,
     default_replay_db,
+    default_shadow_db,
 )
 from upscale.services.calibration.engine import NOT_A_PROFIT_CLAIM, CalibrationEngine
 from upscale.services.calibration.store import CalibrationStore
@@ -23,13 +24,16 @@ def _engine() -> CalibrationEngine | None:
     store = CalibrationStore(path, read_only=True) if path.exists() else None
     if store is None:
         return None
-    return CalibrationEngine(store, default_live_db(), default_replay_db())
+    return CalibrationEngine(
+        store, default_live_db(), default_replay_db(), shadow_db=default_shadow_db()
+    )
 
 
 def _readiness() -> dict[str, Any]:
     engine = _engine() or CalibrationEngine(
-        CalibrationStore(":memory:"), default_live_db(), default_replay_db()
-    )
+        CalibrationStore(":memory:"), default_live_db(), default_replay_db(),
+        shadow_db=default_shadow_db(),
+    )  # fmt: skip
     try:
         return engine.readiness()
     finally:
@@ -75,5 +79,18 @@ async def calibration_candidates() -> list[dict[str, Any]]:
         return []
     try:
         return await asyncio.to_thread(engine.store.candidates)
+    finally:
+        engine.store.close()
+
+
+@router.get("/origins")
+async def calibration_origins(horizon: str = "1h") -> dict[str, Any]:
+    """LIVE_FORWARD, HISTORICAL_REPLAY and SHADOW summaries side by side (never merged)."""
+    engine = _engine() or CalibrationEngine(
+        CalibrationStore(":memory:"), default_live_db(), default_replay_db(),
+        shadow_db=default_shadow_db(),
+    )  # fmt: skip
+    try:
+        return await asyncio.to_thread(engine.compare_origins, horizon)
     finally:
         engine.store.close()

@@ -283,9 +283,10 @@ class ReplayRunner:
         timeframe: Timeframe,
         start: datetime,
         end: datetime,
+        token_priced: bool = False,
     ) -> None:
         loaded = await self.fetcher.range(
-            candles.chain, candles.token, candles.pool, timeframe, start, end
+            candles.chain, candles.token, candles.pool, timeframe, start, end, token_priced
         )
         candles.load(timeframe, loaded)
 
@@ -306,7 +307,7 @@ class ReplayRunner:
         # The live request: the latest `candles_to_fetch` (+1 in progress) before T.
         await self._load(candles, tf, t - interval_of(tf) * (technical.candles_to_fetch + 2), t)
         if p.evidence == "CANDLES":
-            await self._load(candles, "1m", t - timedelta(hours=2), t)
+            await self._load(candles, "1m", t - timedelta(hours=2), t, token_priced=True)
         clock.check_decision_phase("the decision")
 
         warnings: list[str] = []
@@ -617,7 +618,7 @@ class ReplayRunner:
         for timeframe, minutes in spans.items():
             end = t + timedelta(minutes=minutes) + interval_of(timeframe)
             clock.check_request(end, f"{timeframe} outcome candles")
-            await self._load(candles, timeframe, t, end)
+            await self._load(candles, timeframe, t, end, token_priced=True)
 
 
 def archived_links_used(links: dict[str, Any]) -> bool:

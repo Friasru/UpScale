@@ -201,7 +201,7 @@ class FakeGeckoTerminal:
     async def fetch_pool_candles(
         self, chain: str, pool: str, timeframe: Timeframe, limit: int, *, symbol: str,
         canonical_id: str | None, now: datetime, before: datetime | None = None,
-        contiguous: bool = True,
+        contiguous: bool = True, token: str | None = None,
     ) -> CandleSeries:  # fmt: skip
         self.calls.append((pool, timeframe, before))
         if self.fail is not None:
@@ -835,7 +835,10 @@ def test_historical_candles_are_cached_and_reused(tmp_path: Path) -> None:
         .execute("SELECT DISTINCT provider, chain, token_address, pool_address FROM candle_cache")
         .fetchall()
     )
-    assert rows == [("GeckoTerminal", "solana", mint(0), pool_address(0))]
+    # Technical input (pool base, as live Analyze) and outcomes (the exact token) are cached
+    # apart, never mixed.
+    assert sorted(rows) == [("GeckoTerminal", "solana", mint(0), pool_address(0)),
+                            ("GeckoTerminal:token-priced", "solana", mint(0), pool_address(0))]  # fmt: skip
     assert chunk_bounds("1m", T0, T0 + timedelta(minutes=1))[0][1] - chunk_bounds(
         "1m", T0, T0 + timedelta(minutes=1)
     )[0][0] == timedelta(minutes=1000)

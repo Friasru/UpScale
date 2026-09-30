@@ -117,6 +117,16 @@ class CalibrationEngine:
                 for (o, s), n in sorted(Counter((o.origin, o.split) for o in raw).items())
             },
             "purged": sum(1 for o in raw if o.purged),
+            # Outcomes left out because an integrity audit confirmed them invalid (raw
+            # observations are kept and counted above; unaudited rows are never excluded).
+            "integrity_excluded": dict(
+                Counter(s for o in raw for s in o.integrity_excluded.values())
+            ),
+            "integrity_excluded_by_horizon": {
+                h: dict(Counter(o.integrity_excluded[h] for o in raw if h in o.integrity_excluded))
+                for h in HORIZONS
+                if any(h in o.integrity_excluded for o in raw)
+            },
             "calibration": dict(Counter(o.origin for o in cal)),
             "validation": dict(Counter(o.origin for o in val)),
             "dropped_by_correlation_controls": {

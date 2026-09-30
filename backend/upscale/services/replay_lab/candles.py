@@ -46,6 +46,8 @@ from upscale.services.replay_lab.store import ReplayStore
 
 CHUNK_CANDLES = 1000
 PROVIDER = "GeckoTerminal"
+# Cache key of candles priced for the exact token (never mixed with base-priced ones).
+TOKEN_PRICED_KEY = "GeckoTerminal:token-priced"
 
 
 class PoolHistoryUnavailableError(Exception):
@@ -107,14 +109,19 @@ class HistoricalCandleFetcher:
         timeframe: Timeframe,
         start: datetime,
         end: datetime,
+        token_priced: bool = False,
     ) -> list[Candle]:
         """Every candle of this exact pool opened in [start, end), oldest first (gaps stay
-        gaps). May raise `ReplayDeferred` (try later) or `PoolHistoryUnavailableError`."""
+        gaps). May raise `ReplayDeferred` (try later) or `PoolHistoryUnavailableError`.
+
+        `token_priced`: priced in USD for this exact token (outcomes, reference prices);
+        otherwise for the provider's pool base token, as live Analyze requests them (the
+        production-faithful Technical input). Cached separately."""
         if chain not in GECKOTERMINAL_NETWORKS or timeframe not in GT_TIMEFRAMES:
             raise PoolHistoryUnavailableError(f"{PROVIDER} has no {timeframe} candles for {chain}")
         out: dict[datetime, Candle] = {}
         for lo, hi in chunk_bounds(timeframe, start, end):
-            for c in await self._chunk(chain, token, pool, timeframe, lo, hi, end):
+            for c in await self._chunk(chain, token, pool, timeframe, lo, hi, end, token_priced):
                 if start <= c.timestamp < end:
                     out[c.timestamp] = c
         return [out[t] for t in sorted(out)]
@@ -128,8 +135,10 @@ class HistoricalCandleFetcher:
         lo: datetime,
         hi: datetime,
         needed_until: datetime,
+        token_priced: bool = False,
     ) -> list[Candle]:
-        cached = self.store.cached_candles(PROVIDER, chain, token, pool, timeframe, lo, hi)
+        key = TOKEN_PRICED_KEY if token_priced else PROVIDER
+        cached = self.store.cached_candles(key, chain, token, pool, timeframe, lo, hi)
         if cached is not None:
             candles, fetched_at, complete = cached
             if complete or min(hi, needed_until).timestamp() <= fetched_at:
@@ -146,6 +155,7 @@ class HistoricalCandleFetcher:
             series = await self.provider.fetch_pool_candles(
                 chain, pool, timeframe, CHUNK_CANDLES, symbol=pool, canonical_id=f"{chain}:{token}",
                 now=utc(fetched), before=hi, contiguous=False,
+                token=token if token_priced else None,
             )  # fmt: skip
         except ProviderRateLimitedError as exc:
             self.usage.rate_limited += 1
@@ -162,7 +172,7 @@ class HistoricalCandleFetcher:
         candles = [c for c in series.candles if lo <= c.timestamp < hi]
         complete = hi.timestamp() <= fetched
         self.store.cache_candles(
-            PROVIDER, chain, token, pool, timeframe, lo, hi, candles, fetched, complete
+            key, chain, token, pool, timeframe, lo, hi, candles, fetched, complete
         )
         return candles
 

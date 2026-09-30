@@ -477,7 +477,7 @@ def test_stored_parts_are_kept_across_attempts(tmp_path: Path) -> None:
     first = horizon(store, obs.id or 0, "5m")
     assert first.status == "PENDING" and first.market is not None
     candles._headroom = 10
-    candles.by_pool[obs.pool_address] = minute_candles(start, [(p0, p0, p0, p0 * 1.01)] * 5)
+    candles.by_pool[obs.pool_address] = minute_candles(start, [(p0, p0 * 1.01, p0, p0 * 1.01)] * 5)
     clock.at = start + 30 * MINUTE  # long after the horizon end: no new lookup possible
     run(c.collect())
     h = horizon(store, obs.id or 0, "5m")
@@ -910,8 +910,11 @@ def test_aggregates_group_by_every_dimension(tmp_path: Path) -> None:
 # --- T: quota priority -------------------------------------------------------------------------
 
 
-def gt_rows(start: datetime, count: int) -> list[list[float]]:
-    return [[(start + i * MINUTE).timestamp(), 1.0, 1.1, 0.9, 1.0, 5.0] for i in range(count)]
+def gt_rows(start: datetime, count: int, price: float = 1.0) -> list[list[float]]:
+    return [
+        [(start + i * MINUTE).timestamp(), price, price * 1.1, price * 0.9, price, 5.0]
+        for i in range(count)
+    ]
 
 
 def test_t_collector_respects_provider_quota_priority(
@@ -919,7 +922,10 @@ def test_t_collector_respects_provider_quota_priority(
 ) -> None:
     store, obs, scout = anchor(tmp_path)
     clock = Clock(obs.observed_at + 7 * MINUTE)
-    fake_geckoterminal.candles[obs.pool_address] = gt_rows(obs.observed_at, 10)
+    # Priced like the observed market (the token's own price, not another token's).
+    fake_geckoterminal.candles[obs.pool_address] = gt_rows(
+        obs.observed_at, 10, obs.market.price_usd or 1.0
+    )
     quota = LaneLimiter(6, 60.0, {"refresh": 2, "interactive": 2})
     dex = DexCandleService(GeckoTerminalProvider(transport=fake_geckoterminal.transport()),
                            limiter=quota, now=clock)  # fmt: skip

@@ -55,6 +55,11 @@ from upscale.services.market_data import (
     Timeframe,
 )
 from upscale.services.outcomes.config import HorizonSpec, OutcomeConfig
+from upscale.services.outcomes.integrity import (
+    TOKEN_ORIENTED,
+    candle_path_problem,
+    path_problems,
+)
 from upscale.services.outcomes.metrics import (
     first_event,
     in_window,
@@ -174,6 +179,9 @@ class ProviderCandles:
                 before=end + timedelta(seconds=interval),
                 lane=OUTCOME_LANE,
                 canonical_id=canonical_id(ref.chain, ref.token_address or ""),
+                # Priced for the exact token: the provider may orient the pool the other
+                # way round (its "base" can be the token's quote, e.g. DOGE / GOAT).
+                token=ref.token_address,
             )
         # Exchange candles: the latest `limit` completed ones, which must reach back to
         # `start` (older windows are beyond what the provider returns).
@@ -685,6 +693,7 @@ class OutcomeCollector:
         u = HorizonUpdate(missing=list(item.missing))
         price: PricePath | None = None
         inside: list[Candle] = []
+        integrity_failed = False
         if item.reference_price is None:
             u.missing.append("no reference price at observation: price outcome not measurable")
         elif item.stored_price is not None:
@@ -697,7 +706,16 @@ class OutcomeCollector:
                 price_drop_pct=cfg.collapse.price_drop_pct,
             )  # fmt: skip
             inside = in_window(item.series.candles, interval, item.start, item.end)
-            if price.points == 0:
+            if item.ref.kind == "dex_pool" and item.ref.token_address:
+                price.notes.append(f"{TOKEN_ORIENTED}{item.ref.token_address}")
+            problem = candle_path_problem(inside, item.reference_price) or next(
+                (why for _, why in path_problems(price)), None
+            )
+            if problem is not None:  # never store a number that measures another price
+                u.missing.append(f"outcome integrity: {problem}")
+                integrity_failed = True
+                price, inside = None, []
+            elif price.points == 0:
                 u.missing.append("no trades in the window: price path not measurable")
         if item.token_id is not None and self.scout_store is not None:
             stage = await self.scout_store.growth_near(item.token_id, item.end, item.tolerance)
@@ -720,7 +738,12 @@ class OutcomeCollector:
             )
         u.market = item.market
         priced = price is not None and price.points > 0
-        candles_done = priced or item.candles_final or (price is not None and price.points == 0)
+        candles_done = (
+            priced
+            or item.candles_final
+            or (price is not None and price.points == 0)
+            or integrity_failed  # re-requesting the same candles can't fix provenance
+        )
         # A lookup not listing the pool is a fact about the lookup; the pool is only gone
         # when the candles don't show it trading up to the horizon end.
         step = TIMEFRAME_SECONDS[item.spec.candles]

@@ -71,10 +71,17 @@ class GeckoTerminalProvider:
         now: datetime,
         before: datetime | None = None,
         contiguous: bool = True,
+        token: str | None = None,
     ) -> CandleSeries:
         """`before`: only candles opened before it (the API's `before_timestamp`), for
         history older than the latest `limit`. `contiguous=False` keeps every closed
-        candle instead of only the latest consecutive run (gaps stay gaps, never filled)."""
+        candle instead of only the latest consecutive run (gaps stay gaps, never filled).
+
+        `token`: price the candles in USD for this token address of the pool. Without it
+        the API prices the pool's *base* token as GeckoTerminal orients the pool, which is
+        not always the token UpScale means (e.g. GeckoTerminal lists a pool as
+        "DOGE / GOAT" where DEX Screener has GOAT as base): outcome measurements always
+        pass the exact token."""
         network = GECKOTERMINAL_NETWORKS.get(chain)
         if network is None:
             raise UnsupportedTimeframeError(
@@ -87,7 +94,7 @@ class GeckoTerminalProvider:
             "aggregate": str(aggregate),
             "limit": str(min(limit + 1, MAX_LIMIT)),
             "currency": "usd",
-            "token": "base",
+            "token": token or "base",
         }
         if before is not None:
             params["before_timestamp"] = str(math.ceil(before.timestamp()))
@@ -110,6 +117,22 @@ class GeckoTerminalProvider:
             as_of=now,
             notes=notes,
         )
+
+    async def pool_tokens(self, chain: str, pool: str) -> tuple[str | None, str | None]:
+        """(base, quote) token addresses of the pool as GeckoTerminal orients it."""
+        network = GECKOTERMINAL_NETWORKS.get(chain)
+        if network is None:
+            raise UnsupportedTimeframeError(f"{self.name} has no pools for {chain_label(chain)}")
+        body = await self._get(f"/networks/{network}/pools/{pool}", {})
+        data = body.get("data") if isinstance(body, dict) else None
+        rel = data.get("relationships") if isinstance(data, dict) else None
+
+        def token_of(side: str) -> str | None:
+            ref = (rel or {}).get(side, {}).get("data") if isinstance(rel, dict) else None
+            ident = ref.get("id") if isinstance(ref, dict) else None
+            return ident.split("_", 1)[1] if isinstance(ident, str) and "_" in ident else None
+
+        return token_of("base_token"), token_of("quote_token")
 
     async def _get(self, path: str, params: dict[str, str]) -> Any:
         try:
@@ -302,11 +325,13 @@ class DexCandleService:
         before: datetime,
         lane: str,
         canonical_id: str | None,
+        token: str | None = None,
     ) -> CandleSeries:
         """Every closed candle of one exact pool opened before `before` (the latest `limit`),
         gaps kept as gaps, counted against `lane` of the shared quota (background work
-        passes its own lane, so it can never use the capacity held for Analyze)."""
-        key = (chain, pool, f"{timeframe}<{math.ceil(before.timestamp())}", limit)
+        passes its own lane, so it can never use the capacity held for Analyze). `token`:
+        the exact token the candles are priced for (see `fetch_pool_candles`)."""
+        key = (chain, pool, f"{timeframe}<{math.ceil(before.timestamp())}|{token or 'base'}", limit)
         if (hit := self._cached(key)) is not None:
             return hit
         async with self._locks.setdefault(key, asyncio.Lock()):
@@ -327,6 +352,7 @@ class DexCandleService:
                     now=self.now(),
                     before=before,
                     contiguous=False,
+                    token=token,
                 )
             except ProviderRateLimitedError:
                 self.limiter.note_rate_limited()  # the provider pushed back: shared

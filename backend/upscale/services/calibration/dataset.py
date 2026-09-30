@@ -30,6 +30,8 @@ from upscale.services.calibration.config import (
     Origin,
     Split,
 )
+from upscale.services.outcomes.audit import latest_audits
+from upscale.services.outcomes.integrity import INVALID_STATUSES
 from upscale.services.outcomes.models import DecisionObservation, HorizonOutcome, ScoutObservation
 from upscale.services.outcomes.store import _H_COLUMNS, _decision, _horizon, _scout
 from upscale.services.replay_lab.models import ReplayDecisionRecord, ReplayHorizonOutcome
@@ -85,6 +87,8 @@ class Observation:
     run_id: str | None = None
     versions: dict[str, str] = field(default_factory=dict)
     regime: dict[str, str] = field(default_factory=dict)
+    # Horizons left out because an integrity audit confirmed them invalid (horizon -> status).
+    integrity_excluded: dict[str, str] = field(default_factory=dict)
 
     def f(self, name: str) -> float | None:
         v = self.features.get(name)
@@ -288,8 +292,14 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
 
 
 def load_live(
-    path: str | Path, cfg: CalibrationConfig, include_holdout: bool = False
+    path: str | Path,
+    cfg: CalibrationConfig,
+    include_holdout: bool = False,
+    exclude_invalid: bool = True,
 ) -> list[Observation]:
+    """`exclude_invalid`: outcomes an integrity audit confirmed invalid (the latest audit of
+    that horizon, `outcomes.integrity.INVALID_STATUSES`) are left out and reported. Valid
+    extreme moves and unaudited outcomes are always kept: size alone excludes nothing."""
     conn = _ro(path)
     if conn is None:
         return []
@@ -299,12 +309,18 @@ def load_live(
         policy = cfg.live_split
         out: list[Observation] = []
         horizons: dict[tuple[str, int], dict[str, OutcomeView]] = {}
+        audits = latest_audits(conn)
+        excluded: dict[tuple[str, int], dict[str, str]] = {}
         for table, kind in (
             ("scout_outcome_horizons", "scout"),
             ("decision_outcome_horizons", "decision"),
         ):
             for r in conn.execute(f"SELECT {_H_COLUMNS} FROM {table} h ORDER BY observation_id"):
                 h = _horizon(r)
+                verdict = audits.get((kind, h.observation_id, h.horizon))
+                if exclude_invalid and verdict is not None and verdict[0] in INVALID_STATUSES:
+                    excluded.setdefault((kind, h.observation_id), {})[h.horizon] = verdict[0]
+                    continue
                 horizons.setdefault((kind, h.observation_id), {})[h.horizon] = _live_outcome(h)
         scouts: dict[int, ScoutObservation] = {}
         for body, oid in conn.execute(
@@ -321,6 +337,7 @@ def load_live(
                 at=o.observed_at, split=split, purged=live_purged(o.observed_at, policy),
                 features=feats, flags=frozenset(f.code for f in o.risk_flags), missing=_missing(feats),
                 outcomes=horizons.get(("scout", oid), {}), run_id=o.run_id,
+                integrity_excluded=excluded.get(("scout", oid), {}),
             ))  # fmt: skip
         for body, did in conn.execute(
             "SELECT body_json, id FROM decision_observations ORDER BY id"
@@ -340,6 +357,7 @@ def load_live(
                 at=d.analyzed_at, split=split, purged=live_purged(d.analyzed_at, policy),
                 features=feats, flags=flags, missing=_missing(feats),
                 outcomes=horizons.get(("decision", did), {}),
+                integrity_excluded=excluded.get(("decision", did), {}),
             ))  # fmt: skip
         return out
     finally:

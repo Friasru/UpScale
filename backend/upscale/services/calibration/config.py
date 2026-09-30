@@ -2,10 +2,11 @@
 here (validated), never in the analysis code."""
 
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import upscale.config  # noqa: F401  (loads the repo-root .env before reading variables)
 
@@ -109,3 +110,61 @@ class CalibrationConfig(BaseModel):
     prior_move_ceilings_pct: tuple[float, ...] = (20.0, 40.0, 60.0)
     # A candidate filter must keep at least this share of the base sample.
     min_retention: float = Field(default=0.3, gt=0, le=1)
+
+
+class TimeFilter(BaseModel):
+    """Only observations whose decision time is in [since, until) (`since` inclusive,
+    `until` exclusive), for the origins listed (LIVE_FORWARD by default: a live cutoff such
+    as a data fix never removes replay samples unless asked). Cohort membership uses the
+    observation / decision time, never when its outcome was completed. Inactive when both
+    bounds are None: every command then behaves exactly as without a filter."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    since: datetime | None = None
+    until: datetime | None = None
+    origins: tuple[Origin, ...] = ("LIVE_FORWARD",)
+
+    @field_validator("since", "until")
+    @classmethod
+    def _aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("timestamps must include a timezone, e.g. 2026-09-30T05:50:00Z")
+        return value.astimezone(UTC) if value is not None else None
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "TimeFilter":
+        if self.since and self.until and self.until <= self.since:
+            raise ValueError("--until must be after --since")
+        if not self.origins:
+            raise ValueError("the time filter needs at least one origin")
+        return self
+
+    @property
+    def active(self) -> bool:
+        return self.since is not None or self.until is not None
+
+    def keeps(self, origin: str, at: datetime) -> bool:
+        if not self.active or origin not in self.origins:
+            return True
+        return (self.since is None or at >= self.since) and (self.until is None or at < self.until)
+
+    def describe(self) -> dict[str, object]:
+        return {
+            "since": self.since.isoformat() if self.since else None,
+            "until": self.until.isoformat() if self.until else None,
+            "origins": list(self.origins),
+        }
+
+
+def parse_timestamp(raw: str) -> datetime:
+    """An ISO-8601 timestamp with a timezone (``Z`` or an offset)."""
+    try:
+        value = datetime.fromisoformat(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"invalid ISO-8601 timestamp {raw!r} (e.g. 2026-09-30T05:50:00Z)") from exc
+    if value.tzinfo is None:
+        raise ValueError(
+            f"timestamp {raw!r} has no timezone: add Z or an offset, e.g. 2026-09-30T05:50:00Z"
+        )
+    return value.astimezone(UTC)

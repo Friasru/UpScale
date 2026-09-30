@@ -33,7 +33,6 @@ from upscale.services.calibration.dataset import (
     live_split,
     load_live,
     load_replay,
-    with_regimes,
 )
 from upscale.services.calibration.engine import CalibrationEngine, CalibrationError
 from upscale.services.calibration.stats import cohort, strength
@@ -121,13 +120,16 @@ class SyntheticEngine(CalibrationEngine):
         self.observations = observations
         self.loads: list[bool] = []
 
-    def _load(self, include_holdout: bool = False) -> list[Observation]:
+    def _raw(self, include_holdout: bool = False) -> list[Observation]:
         self.loads.append(include_holdout)
-        obs = [o for o in self.observations if include_holdout or o.split != "HOLDOUT"]
-        return with_regimes(obs)
+        return [o for o in self.observations if include_holdout or o.split != "HOLDOUT"]
 
     def holdout_index(self) -> list[tuple[str, datetime]]:
-        return [(o.key, o.at) for o in self.observations if o.split == "HOLDOUT"]
+        return [
+            (o.key, o.at)
+            for o in self.observations
+            if o.split == "HOLDOUT" and self._keeps(o.origin, o.at)
+        ]
 
 
 def full_dataset() -> list[Observation]:
@@ -164,11 +166,8 @@ def test_calibration_never_reads_holdout(engine: SyntheticEngine) -> None:
     assert engine.loads and not any(engine.loads)  # every load excluded HOLDOUT
 
     class Leaky(SyntheticEngine):
-        def _load(self, include_holdout: bool = False) -> list[Observation]:
-            obs = super()._load(True)
-            if not include_holdout and any(o.split == "HOLDOUT" for o in obs):
-                raise HoldoutSealedError("HOLDOUT observations reached a calibration step")
-            return obs
+        def _raw(self, include_holdout: bool = False) -> list[Observation]:
+            return super()._raw(True)  # a source that leaks HOLDOUT
 
     leaky = Leaky(engine.store, engine.observations)
     with pytest.raises(HoldoutSealedError):

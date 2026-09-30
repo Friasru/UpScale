@@ -31,7 +31,13 @@ from upscale.services.calibration.candidates import (
     generate,
     judge,
 )
-from upscale.services.calibration.config import HORIZONS, CalibrationConfig, Split
+from upscale.services.calibration.config import (
+    HORIZONS,
+    CalibrationConfig,
+    Origin,
+    Split,
+    TimeFilter,
+)
 from upscale.services.calibration.dataset import (
     HoldoutSealedError,
     Observation,
@@ -80,6 +86,8 @@ class CalibrationEngine:
         cfg: CalibrationConfig | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         triggered_by: Callable[[], str] = _default_trigger,
+        time_filter: TimeFilter | None = None,
+        origin: Origin | None = None,
     ):
         self.store = store
         self.live_db = live_db
@@ -87,19 +95,46 @@ class CalibrationEngine:
         self.cfg = cfg or CalibrationConfig()
         self.now = now
         self.triggered_by = triggered_by
+        self.time_filter = time_filter or TimeFilter()
+        self.origin = origin  # only this origin (None: every origin, kept apart)
+        self.filter_counts: dict[str, Any] = {}
 
     # --- data -------------------------------------------------------------------------------------
 
-    def _load(self, include_holdout: bool = False) -> list[Observation]:
+    def _raw(self, include_holdout: bool = False) -> list[Observation]:
+        """Every observation from the sources, before any filtering."""
         obs: list[Observation] = []
         if self.live_db:
             obs += load_live(self.live_db, self.cfg, include_holdout=include_holdout)
         if self.replay_db:
             obs += load_replay(self.replay_db, include_holdout=include_holdout)
             obs += load_shadow(self.replay_db)
+        return obs
+
+    def _load(self, include_holdout: bool = False) -> list[Observation]:
+        obs = self._raw(include_holdout)
         if not include_holdout and any(o.split == "HOLDOUT" for o in obs):
             raise HoldoutSealedError("HOLDOUT observations reached a calibration step")
-        return with_regimes(obs)
+        # The time / origin filter comes first: regimes, splits, correlation controls,
+        # counts, findings, candidates and validation only ever see the filtered cohort.
+        kept = [o for o in obs if self._keeps(o.origin, o.at)]
+        self.filter_counts = {
+            "raw_before_time_filter": dict(Counter(o.origin for o in obs)),
+            "raw_after_time_filter": dict(Counter(o.origin for o in kept)),
+        }
+        return with_regimes(kept)
+
+    def _keeps(self, origin: str, at: datetime) -> bool:
+        if self.origin is not None and origin != self.origin:
+            return False
+        return self.time_filter.keeps(origin, at)
+
+    def _filter_report(self) -> dict[str, Any]:
+        return {
+            "time_filter": self.time_filter.describe() | {"active": self.time_filter.active},
+            "origin": self.origin,
+            **self.filter_counts,
+        }
 
     def split(self, split: Split, observations: Sequence[Observation]) -> list[Observation]:
         chosen = [
@@ -111,6 +146,7 @@ class CalibrationEngine:
         raw = self._load()
         cal, val = self.split("CALIBRATION", raw), self.split("VALIDATION", raw)
         report = {
+            **self._filter_report(),
             "fingerprint": fingerprint([*cal, *val]),
             "raw": {
                 f"{o}/{s}": n
@@ -224,7 +260,9 @@ class CalibrationEngine:
         cal, _, report = self.dataset()
         made, tested = generate(cal, horizon, self.cfg)
         run_id = self._run_id("create_candidates", {"horizon": horizon})
-        parent = {**self.versions(), "evaluation_horizon": horizon}
+        parent: dict[str, Any] = {**self.versions(), "evaluation_horizon": horizon}
+        if self.time_filter.active or self.origin is not None:  # unfiltered ids stay as before
+            parent["cohort"] = {"time_filter": self.time_filter.describe(), "origin": self.origin}
         findings = [f["finding_id"] for f in self.store.findings()]
         self.store.add_run(run_id, "create_candidates", {"horizon": horizon}, self.cfg.model_dump(),
                            self.versions(), report, {"candidates": made, "variants_tested": tested}, tested)  # fmt: skip
@@ -245,6 +283,15 @@ class CalibrationEngine:
             ids.append(cid)
         return run_id, ids
 
+    def _adopt_cohort(self, c: dict[str, Any]) -> None:
+        """Without an explicit filter, a candidate is evaluated on the cohort it was created
+        from (its recorded time filter / origin), so validation matches calibration."""
+        cohort_ = c["parent_version"].get("cohort")
+        if cohort_ is None or self.time_filter.active or self.origin is not None:
+            return
+        self.time_filter = TimeFilter.model_validate(cohort_["time_filter"])
+        self.origin = cohort_.get("origin")
+
     def _candidate(self, cid: str) -> dict[str, Any]:
         c = self.store.candidate(cid)
         if c is None:
@@ -258,6 +305,7 @@ class CalibrationEngine:
                 f"{cid} is {c['status']}: only CALIBRATED candidates are validated"
             )
         horizon = c["parent_version"]["evaluation_horizon"]
+        self._adopt_cohort(c)
         _, val, report = self.dataset()
         m = evaluate(c["changes"], val, horizon, self.cfg)
         base = evaluate([], val, horizon, self.cfg)
@@ -281,6 +329,7 @@ class CalibrationEngine:
     def compare(self, cid: str) -> dict[str, Any]:
         c = self._candidate(cid)
         horizon = c["parent_version"]["evaluation_horizon"]
+        self._adopt_cohort(c)
         cal, val, report = self.dataset()
         out: dict[str, Any] = {"candidate": c, "label": NOT_A_PROFIT_CLAIM, "dataset": report}
         for name, obs in (("CALIBRATION", cal), ("VALIDATION", val)):
@@ -338,7 +387,9 @@ class CalibrationEngine:
                         out.append((f"replay:{key}", datetime.fromtimestamp(at, UTC)))
             finally:
                 conn.close()
-        return sorted(set(out), key=lambda x: (x[1], x[0]))
+        origin_of = {"live": "LIVE_FORWARD", "replay": "HISTORICAL_REPLAY"}
+        kept = [(k, t) for k, t in out if self._keeps(origin_of.get(k.split(":", 1)[0], ""), t)]
+        return sorted(set(kept), key=lambda x: (x[1], x[0]))
 
     def final_evaluate(self, cid: str, confirm: bool) -> dict[str, Any]:
         if not confirm:
@@ -350,6 +401,7 @@ class CalibrationEngine:
             raise CalibrationError(
                 f"{cid} is {c['status']}: only VALIDATED candidates are finally evaluated"
             )
+        self._adopt_cohort(c)
         if c["status"] == "VALIDATED":
             self.store.set_status(cid, "FROZEN_FOR_FINAL_TEST")  # frozen before HOLDOUT is read
         index = self.holdout_index()
@@ -409,6 +461,7 @@ class CalibrationEngine:
         holdout = self.holdout_index()
         return {
             "label": "Factual data coverage for calibration. Not a statement of readiness to trade.",
+            **self._filter_report(),
             "origins": {
                 origin: {
                     "observations": sum(1 for o in raw if o.origin == origin),

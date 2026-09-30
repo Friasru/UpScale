@@ -15,18 +15,41 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 
 from upscale.services.calibration.config import (
     HORIZONS,
+    ORIGINS,
+    TimeFilter,
     default_calibration_db,
     default_live_db,
     default_replay_db,
+    parse_timestamp,
 )
 from upscale.services.calibration.dataset import HoldoutSealedError
 from upscale.services.calibration.engine import CalibrationEngine, CalibrationError
 from upscale.services.calibration.store import CalibrationStore, CalibrationStoreError
 from upscale.services.evidence_archive import hooks as evidence_hooks
+
+
+def _timestamp(raw: str) -> datetime:
+    try:
+        return parse_timestamp(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _cohort(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--since", type=_timestamp, default=None,
+                   help="only observations at or after this ISO-8601 time (LIVE_FORWARD by default)")  # fmt: skip
+    p.add_argument(
+        "--until", type=_timestamp, default=None, help="only observations before this time"
+    )
+    p.add_argument("--time-filter-all-origins", action="store_true",
+                   help="apply --since/--until to replay samples too")  # fmt: skip
+    p.add_argument("--origin", choices=("LIVE_FORWARD", "HISTORICAL_REPLAY"), default=None,
+                   help="analyze only this origin")  # fmt: skip
 
 
 def parser() -> argparse.ArgumentParser:
@@ -36,17 +59,21 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--replay-db", default=None, help="Replay Lab database, read-only")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
-    sub.add_parser("readiness")
+    _cohort(sub.add_parser("readiness"))
     a = sub.add_parser("analyze")
+    _cohort(a)
     a.add_argument("--horizon", default="1h", choices=HORIZONS)
     a.add_argument("--full", action="store_true", help="print the full results as JSON")
     f = sub.add_parser("findings")
     f.add_argument("--run", default=None)
     c = sub.add_parser("create-candidates")
     c.add_argument("--horizon", default="1h", choices=HORIZONS)
+    _cohort(c)
     sub.add_parser("candidates")
     for name in ("validate", "compare"):
-        sub.add_parser(name).add_argument("candidate_id")
+        v = sub.add_parser(name)
+        v.add_argument("candidate_id")
+        _cohort(v)
     fe = sub.add_parser(
         "final-evaluate", help="reads HOLDOUT: only with --confirm-final-evaluation"
     )
@@ -66,9 +93,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     evidence_hooks.install(None)  # a research process never archives production evidence
     store = CalibrationStore(args.db or default_calibration_db())
+    try:
+        time_filter = TimeFilter(
+            since=getattr(args, "since", None),
+            until=getattr(args, "until", None),
+            origins=ORIGINS
+            if getattr(args, "time_filter_all_origins", False)
+            else ("LIVE_FORWARD",),
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     engine = CalibrationEngine(
-        store, args.live_db or default_live_db(), args.replay_db or default_replay_db()
-    )
+        store, args.live_db or default_live_db(), args.replay_db or default_replay_db(),
+        time_filter=time_filter, origin=getattr(args, "origin", None),
+    )  # fmt: skip
     try:
         if args.command == "status":
             _print(engine.status())

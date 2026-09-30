@@ -61,7 +61,8 @@ def measure(
     reference = record.reference_price
     ref_snapshot = None
     if archive is not None and record.evidence == "RECORDED":
-        ref_snapshot = archive.snapshot_at(record.asset_id, record.pool_address, t)
+        market_t = record.market_observed_at or t
+        ref_snapshot = archive.snapshot_at(record.asset_id, record.pool_address, market_t)
     reference_market = observed_market(ref_snapshot) if ref_snapshot is not None else None
     out: list[ReplayHorizonOutcome] = []
     for spec in horizons:
@@ -175,7 +176,7 @@ def fidelity(
         raise LookaheadError("fidelity is checked after the decision is stored")
     if archive is None or record.evidence != "RECORDED":
         return ReplayFidelity(notes=["no live ranking to compare (candle-only sample)"])
-    t = record.decision_at
+    t = record.market_observed_at or record.decision_at  # the live run used the snapshot at T
     live = archive.stage_near(
         record.asset_id, t + FIDELITY_WINDOW / 2, FIDELITY_WINDOW.total_seconds() / 2, t
     )

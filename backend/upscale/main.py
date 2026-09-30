@@ -100,13 +100,17 @@ async def _scan() -> GrowthScoutResult:
     # runs the Analyze agents.
     global _last_activity, _scan_anchors
     _scan_anchors = None
-    try:
-        result = await services.growth_scout_service.scan(
-            services.scout_service, services.social_scout_service, limit=500
-        )
-    finally:
-        _last_activity = time.monotonic()
-    evidence.emit("scout", result)  # archive the ranking as computed (no request)
+    # Evidence emitted during the scan (market, social, on-chain safety) is collected, so the
+    # archived evaluation links exactly what it used.
+    with evidence.evaluation() as used:
+        try:
+            result = await services.growth_scout_service.scan(
+                services.scout_service, services.social_scout_service, limit=500
+            )
+        finally:
+            _last_activity = time.monotonic()
+    # Archive the ranking as final now (after every lookup it used); no request.
+    evidence.emit("scout", result, decision_at=datetime.now(UTC), scope=used)
     _start_enrichment(result)
     try:  # measurement only: a failure here never affects the ranking
         anchored = await record_scout_run(services.outcome_store, result, services.outcome_config)
@@ -214,7 +218,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     global _interactive, _last_activity, _last_analyze
     _interactive += 1
     try:
-        with evidence.component("analyze"):
+        with evidence.component("analyze"), evidence.evaluation() as used:
             response = await orchestrator.respond(request)
     finally:
         _interactive -= 1
@@ -229,7 +233,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
         logger.exception("could not record the decision observation")
     # Archive why this decision was made (queued; never delays or changes the reply).
     with evidence.component("analyze"):
-        evidence.emit("decision", response, request=request, observation=observation, at=now)
+        evidence.emit(
+            "decision", response, request=request, observation=observation, at=now, scope=used
+        )
     return response
 
 

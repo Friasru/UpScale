@@ -53,6 +53,9 @@ class PlannedSample(BaseModel):
     cohort_at: datetime  # T bucket: the candidates competing at the same moment
     plan_order: int
     snapshot_provider: str | None = None  # RECORDED: whose snapshot is the evidence
+    # Set when the sample reproduces an archived Scout decision: `decision_at` is then its
+    # decision time D (when it was final), this is the market observation time T <= D.
+    market_observed_at: datetime | None = None
 
 
 class AgentOutput(BaseModel):
@@ -99,6 +102,10 @@ class ReplayDecisionRecord(BaseModel):
     decision_at: datetime
     evidence: Evidence
     mode: Mode
+    # Market evidence time T; `decision_at` is the decision time D (>= T). Equal for samples
+    # without an archived decision to reproduce.
+    market_observed_at: datetime | None = None
+    decision_basis: str | None = None
     # The newest timestamp of any evidence used (always <= decision_at).
     evidence_latest_at: datetime
     reference_price: float | None

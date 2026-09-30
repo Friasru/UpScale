@@ -291,7 +291,7 @@ def test_scout_market_social_and_ranking_are_archived(
     full = asyncio.run(scout._persist(candidate))
     growth = GrowthScoutService(scout.store, GrowthConfig(), now=lambda: T0)
     result = asyncio.run(growth.rank([full]))
-    hooks.emit("scout", result)
+    hooks.emit("scout", result, decision_at=T0 + timedelta(seconds=10))
     hooks.emit("social", momentum(mint(0), "ACCELERATING", computed_at=T0))
     recorder.flush()
     [m] = rows(store, "market")
@@ -302,7 +302,8 @@ def test_scout_market_social_and_ranking_are_archived(
     assert (
         s.payload["candidate"]["stage"] == result.candidates[0].stage if result.candidates else True
     )
-    assert s.payload["capabilities"] and s.observed_at == T0
+    assert s.payload["capabilities"] and s.observed_at == T0 + timedelta(seconds=10)
+    assert s.payload["timing"]["market_observed_at"] == T0.isoformat()
     assert "scout_momentum" in s.payload["candidate"]
     [soc] = rows(store, "social")
     assert soc.payload["momentum"]["state"] == "ACCELERATING" and "text" not in json.dumps(
@@ -424,7 +425,7 @@ def test_replay_uses_archived_safety_at_or_before_t(tmp_path: Path) -> None:
     onchain = with_safety.agents["onchain_safety"]
     assert onchain.status == "ok" and onchain.findings["snapshot"]["mint"] == mint(0)
     assert with_safety.availability["onchain_safety"].startswith(
-        "AVAILABLE: archived 5 min before T"
+        "AVAILABLE: latest archived, observed 5 min before T"
     )
     assert "onchain_safety" not in with_safety.agents_unavailable
     assert with_safety.scout.safety_status == "SAFETY_CHECKS_COMPLETE"

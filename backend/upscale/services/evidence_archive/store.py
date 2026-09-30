@@ -117,6 +117,39 @@ class PendingRecord:
     reason: str | None = None
     links: dict[str, Any] = field(default_factory=dict)
     versions: dict[str, str] = field(default_factory=dict)
+    # Set by `prepare` (redacted payload text and its identities).
+    text: str | None = None
+    payload_hash: str | None = None
+    fingerprint: str | None = None
+    record_id: str | None = None
+
+
+def prepare(r: PendingRecord) -> PendingRecord:
+    """Redact the payload and compute the record's identities (once)."""
+    if r.text is None:
+        r.text = log_safety.redact(json.dumps(r.payload, sort_keys=True, default=str))
+        r.payload_hash = hashlib.sha256(r.text.encode()).hexdigest()
+        r.fingerprint = fingerprint(r.kind, json.loads(r.text), r.availability)
+        observed = r.observed_at.timestamp()
+        r.record_id = hashlib.sha256(
+            f"{r.kind}|{r.asset_id}|{r.pool_address}|{r.provider}|{observed:.6f}|{r.payload_hash}".encode()
+        ).hexdigest()[:32]
+    return r
+
+
+def link_of(r: PendingRecord) -> dict[str, Any]:
+    """How a decision record refers to one piece of evidence it used."""
+    prepare(r)
+    return {
+        "kind": r.kind,
+        "asset_id": r.asset_id,
+        "pool_address": r.pool_address,
+        "provider": r.provider,
+        "observed_at": r.observed_at.isoformat(),
+        "availability": r.availability,
+        "fingerprint": r.fingerprint,
+        "record_id": r.record_id,
+    }
 
 
 @dataclass(frozen=True)
@@ -224,13 +257,10 @@ class EvidenceStore:
         fingerprint within `dedupe_seconds`, or the identical observation). True if stored."""
         if self.read_only:
             raise EvidenceStoreError("this evidence store is opened read-only")
-        text = log_safety.redact(json.dumps(r.payload, sort_keys=True, default=str))
-        payload_hash = hashlib.sha256(text.encode()).hexdigest()
-        fp = fingerprint(r.kind, json.loads(text), r.availability)
+        prepare(r)
+        text, payload_hash, fp, record_id = r.text, r.payload_hash, r.fingerprint, r.record_id
+        assert text is not None and payload_hash and fp and record_id
         observed = r.observed_at.timestamp()
-        record_id = hashlib.sha256(
-            f"{r.kind}|{r.asset_id}|{r.pool_address}|{r.provider}|{observed:.6f}|{payload_hash}".encode()
-        ).hexdigest()[:32]
         with self._lock:
             db = self._db()
             last = db.execute(
@@ -297,6 +327,50 @@ class EvidenceStore:
             raise FutureEvidenceError(f"{kind} evidence observed after {until.isoformat()}")
         return record
 
+    def resolve(self, link: dict[str, Any]) -> EvidenceRecord | None:
+        """The archived record a decision linked: the exact row, or, when that repeat was
+        de-duplicated, the identical earlier state (same fingerprint, observed no later)."""
+        observed = datetime.fromisoformat(link["observed_at"]).timestamp()
+        with self._lock:
+            db = self._db()
+            row = db.execute(
+                f"SELECT {_COLUMNS} FROM evidence_records WHERE record_id = ?",
+                (link.get("record_id"),),
+            ).fetchone()
+            if row is None:
+                row = db.execute(
+                    f"""
+                    SELECT {_COLUMNS} FROM evidence_records
+                    WHERE kind = ? AND asset_id = ? AND fingerprint = ? AND observed_at <= ?
+                    ORDER BY observed_at DESC, id DESC LIMIT 1
+                    """,
+                    (link["kind"], link["asset_id"], link.get("fingerprint"), observed),
+                ).fetchone()
+        record = _record(row) if row else None
+        if record is not None and record.observed_at.timestamp() > observed + 1e-6:
+            raise FutureEvidenceError("a linked record resolved to later evidence")
+        return record
+
+    def decisions(
+        self, kind: Kind, since: datetime | None = None, until: datetime | None = None
+    ) -> list[tuple[str, float, dict[str, Any]]]:
+        """(asset_id, observed_at, links) of Scout / Analyze decision records (no payloads)."""
+        with self._lock:
+            rows = (
+                self._db()
+                .execute(
+                    "SELECT asset_id, observed_at, links_json FROM evidence_records "
+                    "WHERE kind = ? AND observed_at >= ? AND observed_at <= ? ORDER BY observed_at",
+                    (
+                        kind,
+                        since.timestamp() if since else 0.0,
+                        until.timestamp() if until else 1e12,
+                    ),
+                )
+                .fetchall()
+            )
+        return [(r[0], r[1], json.loads(r[2])) for r in rows]
+
     def latest_any(self, kind: Kind, until: datetime) -> EvidenceRecord | None:
         """The latest record of `kind` for any asset with observed_at <= `until`."""
         with self._lock:
@@ -350,21 +424,21 @@ class EvidenceStore:
 
     def index(
         self, since: datetime | None = None
-    ) -> list[tuple[str, str, float, str, str | None, str]]:
-        """(kind, asset_id, observed_at, availability, provider, reason) for coverage metrics
-        (no payloads)."""
+    ) -> list[tuple[str, str, float, str, str | None, str, dict[str, Any]]]:
+        """(kind, asset_id, observed_at, availability, provider, reason, links) for coverage
+        metrics (no payloads)."""
         with self._lock:
             rows = (
                 self._db()
                 .execute(
                     "SELECT kind, asset_id, observed_at, availability, provider, "
-                    "COALESCE(reason, '') FROM evidence_records WHERE observed_at >= ? "
-                    "ORDER BY observed_at",
+                    "COALESCE(reason, ''), links_json FROM evidence_records "
+                    "WHERE observed_at >= ? ORDER BY observed_at",
                     (since.timestamp() if since else 0.0,),
                 )
                 .fetchall()
             )
-        return [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows]
+        return [(r[0], r[1], r[2], r[3], r[4], r[5], json.loads(r[6])) for r in rows]
 
     def totals(self) -> dict[str, Any]:
         with self._lock:

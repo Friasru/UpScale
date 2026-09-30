@@ -104,11 +104,15 @@ async def evaluate_scout(
     scout_config: ScoutConfig,
     growth_config: GrowthConfig,
     safety: OnchainSafetySnapshot | None = None,
+    stages_until: datetime | None = None,
+    rank_now: datetime | None = None,
 ) -> tuple[ScoutReplay, GrowthCandidate | None, list[str]]:
     """Production Growth Scout for this pool at T. Returns the replay record, the full
     candidate, and notes on what was unavailable."""
     clock.check_decision_phase("Scout evaluation")
     t = clock.decision_at
+    # The live ranking's own "now" (the run's start), never after the decision time.
+    ranked_at = min(rank_now or t, t)
     notes: list[str] = []
     cid = snapshot.canonical_id
     listing = Listing(provider=snapshot.provider, kind="lookup", name=REPLAY_LISTING, fetched_at=t)
@@ -131,9 +135,12 @@ async def evaluate_scout(
         for s in history:
             clock.check_time(s.observed_at, "Scout history snapshot")
             await store.save_snapshot(s, 0.0)
-        stages = archive.stages_before(cid, t - timedelta(hours=HISTORY_HOURS), t)
+        # Stages stored by earlier runs only: the reproduced run's own stage (stored once
+        # it finished) is its output, never its input.
+        cutoff = min(stages_until or t, t)
+        stages = archive.stages_before(cid, t - timedelta(hours=HISTORY_HOURS), cutoff)
         for at, stage, rank, score in stages:
-            if at >= t:
+            if at >= cutoff:
                 raise LookaheadError("a Scout stage from the decision time or later")
             ranks = {cid: (rank, score)} if score is not None else None
             await store.record_stages(at, {cid: stage}, ranks)
@@ -146,7 +153,7 @@ async def evaluate_scout(
         if social is not None:
             clock.check_time(social.computed_at, "social momentum")
         growth = GrowthScoutService(
-            store, growth_config, social_store=None, safety=None, now=lambda: t
+            store, growth_config, social_store=None, safety=None, now=lambda: ranked_at
         )
         if safety is not None:
             clock.check_time(safety.fetched_at, "archived on-chain safety")

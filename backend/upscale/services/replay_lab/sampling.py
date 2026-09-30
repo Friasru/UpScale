@@ -28,6 +28,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from upscale.services.evidence_archive.payloads import TIMING_VERSION
+from upscale.services.evidence_archive.store import EvidenceStore
 from upscale.services.replay_lab.archive import ScoutArchive
 from upscale.services.replay_lab.config import Evidence, ReplayJobConfig, Split
 from upscale.services.replay_lab.models import PlannedSample
@@ -47,6 +49,7 @@ class Candidate:
     evidence: Evidence
     universe_basis: str
     snapshot_provider: str | None = None
+    market_at: datetime | None = None  # T, when `at` is an archived decision's time D
 
 
 @dataclass
@@ -61,6 +64,7 @@ class PlanReport:
     sticky_holdout: int = 0
     purged: int = 0
     user_selected: bool = False
+    archived_decisions: int = 0  # samples placed at an archived Scout decision's time
     notes: list[str] | None = None
 
     def as_dict(self) -> dict[str, object]:
@@ -76,8 +80,28 @@ def _hash(seed: int, *parts: object) -> str:
     return hashlib.sha256("|".join(str(p) for p in (seed, *parts)).encode()).hexdigest()
 
 
+def archived_decision_times(
+    evidence: EvidenceStore | None, config: ReplayJobConfig
+) -> dict[tuple[str, float], datetime]:
+    """(asset, market observation time T) -> decision time D of the archived Scout
+    evaluation that used that observation (causally valid, decision-timed records only)."""
+    if evidence is None:
+        return {}
+    out: dict[tuple[str, float], datetime] = {}
+    horizon = config.end + timedelta(hours=6)  # a run finishes shortly after its snapshots
+    for asset, at, links in evidence.decisions("scout", config.start, horizon):
+        if links.get("version") != TIMING_VERSION or links.get("causal_valid") is not True:
+            continue
+        market = links.get("market_observed_at")
+        if market:
+            t = datetime.fromisoformat(market).timestamp()
+            if at >= t:
+                out.setdefault((asset, round(t, 3)), datetime.fromtimestamp(at, UTC))
+    return out
+
+
 def candidates(
-    config: ReplayJobConfig, archive: ScoutArchive | None
+    config: ReplayJobConfig, archive: ScoutArchive | None, evidence: EvidenceStore | None = None
 ) -> tuple[list[Candidate], list[str]]:
     notes: list[str] = []
     out: list[Candidate] = []
@@ -85,17 +109,23 @@ def candidates(
     if config.evidence == "RECORDED":
         if archive is None:
             return [], ["RECORDED samples need the Scout archive"]
+        decided = archived_decision_times(evidence, config)
         for s in archive.snapshot_times(config.start, config.end, config.chains):
             spec = wanted.get(s.canonical_id)
             if wanted and (spec is None or (spec.pool and spec.pool != s.pool_address)):
                 continue
+            d = decided.get((s.canonical_id, round(s.observed_at.timestamp(), 3)))
             out.append(
                 Candidate(
                     asset_id=s.canonical_id, chain=s.chain, token=s.address, pool=s.pool_address,
-                    symbol=s.symbol, at=s.observed_at,
+                    symbol=s.symbol, at=d or s.observed_at,
                     evidence="RECORDED",
-                    universe_basis="scout_archive: Scout tracked the token at T",
+                    universe_basis=(
+                        "scout_archive + archived Scout decision at D (market observed at T)"
+                        if d else "scout_archive: Scout tracked the token at T"
+                    ),
                     snapshot_provider=s.provider,
+                    market_at=s.observed_at if d else None,
                 )
             )  # fmt: skip
         return out, notes
@@ -253,6 +283,7 @@ def assign_splits(
                 cohort_at=cohort,
                 plan_order=i,
                 snapshot_provider=c.snapshot_provider,
+                market_observed_at=c.market_at,
             )
         )
     return planned
@@ -263,10 +294,12 @@ def plan(
     archive: ScoutArchive | None,
     now: datetime,
     holdout_windows: Sequence[tuple[datetime, datetime]] = (),
+    evidence: EvidenceStore | None = None,
 ) -> tuple[list[PlannedSample], PlanReport]:
     report = PlanReport()
-    pool, notes = candidates(config, archive)
+    pool, notes = candidates(config, archive, evidence)
     report.notes = notes
     report.user_selected = any(c.universe_basis.startswith("USER_SELECTED") for c in pool)
     chosen = select(pool, config, now, report)
+    report.archived_decisions = sum(1 for c in chosen if c.market_at is not None)
     return assign_splits(chosen, config, holdout_windows, report), report

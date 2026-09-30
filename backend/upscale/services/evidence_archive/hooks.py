@@ -51,11 +51,36 @@ def current_component(default: str = "unknown") -> str:
     return _COMPONENT.get() or default
 
 
+# Evidence emitted while one Scout run / Analyze is in progress: the decision record it
+# ends with links exactly this evidence (never later evidence of the same asset).
+_SCOPE: ContextVar[list[dict[str, Any]] | None] = ContextVar("upscale_evidence_scope", default=None)
+DECISION_KINDS = frozenset({"scout", "decision"})
+
+
+@contextmanager
+def evaluation() -> Iterator[list[dict[str, Any]]]:
+    """Collect the evidence emitted inside this block (and tasks it starts) for the decision
+    it produces. Yields the collection, to pass to the decision's `emit(..., scope=...)`."""
+    scope: list[dict[str, Any]] = []
+    token = _SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _SCOPE.reset(token)
+
+
 def emit(kind: str, obj: Any, **extra: Any) -> None:
     sink = _sink
     if sink is None:
         return
     try:
+        scope = _SCOPE.get()
+        if kind in DECISION_KINDS:
+            extra.setdefault("scope", list(scope) if scope is not None else None)
+        elif scope is not None:
+            entry: dict[str, Any] = {"kind": kind, "links": []}
+            scope.append(entry)
+            extra["scope_entry"] = entry  # the recorder fills in the archived identities
         sink.submit(kind, obj, current_component(), extra)
     except Exception:  # archiving must never affect production
         logger.exception("evidence archive: could not queue %s evidence", kind)

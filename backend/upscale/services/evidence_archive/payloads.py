@@ -173,7 +173,41 @@ def social(m: SocialMomentum) -> list[PendingRecord]:
     ]
 
 
-def scout(result: GrowthScoutResult, capabilities: list[str]) -> list[PendingRecord]:
+TIMING_VERSION = 2  # records before it: observed_at was the ranking run's start (legacy)
+
+
+def causal_check(decision_at: datetime, links: list[dict[str, Any]]) -> dict[str, Any]:
+    """The invariant: a decision is final no earlier than every piece of evidence it used.
+    A violation is reported, never repaired (evidence timestamps are facts)."""
+    late = [
+        f"{x['kind']} observed {x['observed_at']} after the decision at {decision_at.isoformat()}"
+        for x in links
+        if datetime.fromisoformat(x["observed_at"]) > decision_at
+    ]
+    return {"valid": not late, "violations": late}
+
+
+def _scope_links(scope: list[dict[str, Any]] | None) -> dict[str, list[dict[str, Any]]]:
+    by_asset: dict[str, list[dict[str, Any]]] = {}
+    for entry in scope or []:
+        for link in entry.get("links") or []:
+            by_asset.setdefault(link["asset_id"], []).append(link)
+    return by_asset
+
+
+def _latest(links: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return max(links, key=lambda x: x["observed_at"]) if links else None
+
+
+def scout(
+    result: GrowthScoutResult,
+    capabilities: list[str],
+    decision_at: datetime,
+    scope: list[dict[str, Any]] | None,
+) -> list[PendingRecord]:
+    """One record per evaluated candidate, observed at the run's decision time: when the
+    ranking (including on-chain safety fetched during it) was final. Market, social and
+    safety evidence keep their own observed times and are linked individually."""
     run = {
         "computed_at": result.computed_at.isoformat(),
         "mode": result.mode,
@@ -181,8 +215,33 @@ def scout(result: GrowthScoutResult, capabilities: list[str]) -> list[PendingRec
         "eligible": result.eligible,
         "notes": result.notes,
     }
+    scoped = _scope_links(scope)
     out = []
     for g in [*result.candidates, *result.unranked]:
+        mine = scoped.get(g.canonical_id, [])
+        used: list[dict[str, Any]] = []
+        market = [x for x in mine if x["kind"] == "market"
+                  and datetime.fromisoformat(x["observed_at"]) == g.observed_at]  # fmt: skip
+        if market:
+            used.append(market[-1])
+        if g.quality.safety_status != "INSUFFICIENT_SAFETY_DATA":  # production used safety
+            safety_link = _latest(
+                [x for x in mine if x["kind"] == "safety" and x["availability"] == "AVAILABLE"]
+            )
+            if safety_link is not None:
+                used.append(safety_link)
+        if g.momentum.social_state is not None:
+            social_link = _latest([x for x in mine if x["kind"] == "social"])
+            if social_link is not None:
+                used.append(social_link)
+        market_time = {"kind": "market_observation", "observed_at": g.observed_at.isoformat()}
+        check = causal_check(decision_at, [*used, market_time])
+        timing = {
+            "version": TIMING_VERSION,
+            "market_observed_at": g.observed_at.isoformat(),
+            "evaluation_started_at": result.computed_at.isoformat(),
+            "decision_at": decision_at.isoformat(),
+        }
         out.append(
             PendingRecord(
                 kind="scout",
@@ -192,7 +251,7 @@ def scout(result: GrowthScoutResult, capabilities: list[str]) -> list[PendingRec
                 pool_address=g.market.selected_pool.address,
                 dex=g.market.selected_pool.dex,
                 provider=g.market.market_provider,
-                observed_at=result.computed_at,
+                observed_at=decision_at,
                 provider_at=g.observed_at,  # when its market evidence was fetched
                 payload={
                     "candidate": g.model_dump(mode="json"),
@@ -203,8 +262,16 @@ def scout(result: GrowthScoutResult, capabilities: list[str]) -> list[PendingRec
                         "safety": g.quality.safety_status,
                         "data_status": g.data_status,
                     },
+                    "timing": timing,
+                    "evidence": used,
+                    "causal": check,
                 },
-                links={"run": run["computed_at"]},
+                links={
+                    "run": run["computed_at"],
+                    **timing,
+                    "causal_valid": check["valid"],
+                    "evidence": used,
+                },
             )
         )
     return out
@@ -224,6 +291,7 @@ def decision(
     observation: DecisionObservation | None,
     at: datetime,
     capabilities: list[str],
+    scope: list[dict[str, Any]] | None = None,
 ) -> list[PendingRecord]:
     analysis = response.analysis
     if analysis is None or not analysis.agent_results:
@@ -255,6 +323,10 @@ def decision(
         for name, r in results.items()
     }
     latest = request.messages[-1]
+    # Exactly the evidence this Analyze produced / used (its own scope), never later
+    # evidence of the same asset.
+    used = [x for x in _scope_links(scope).get(asset_id, [])]
+    check = causal_check(at, used)
     return [
         PendingRecord(
             kind="decision",
@@ -280,8 +352,17 @@ def decision(
                 "uncertainty": analysis.uncertainty.model_dump(mode="json"),
                 "decision": observation.model_dump(mode="json") if observation else None,
                 "capabilities": capabilities,
+                "timing": {"version": TIMING_VERSION, "decision_at": at.isoformat()},
+                "evidence": used,
+                "causal": check,
             },
-            links={"decision_observation_id": observation.id if observation else None},
+            links={
+                "decision_observation_id": observation.id if observation else None,
+                "version": TIMING_VERSION,
+                "decision_at": at.isoformat(),
+                "causal_valid": check["valid"],
+                "evidence": used,
+            },
         )
     ]
 

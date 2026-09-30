@@ -4,6 +4,11 @@ strategy works or that UpScale is ready to trade.
 Coverage is measured over Growth Scout observations (one per token per ranking run): the
 moments Replay Lab can sample. For each, is there archived evidence at or before it?
 
+Each observation is judged at its decision time (when the evaluation was final, after every
+lookup it used); evidence the evaluation linked counts directly. Records written before
+decision timing existed are judged at their run's start time (conservative); evaluations
+violating the causal invariant (evidence observed after the decision) never count.
+
 * market: a market / DEX record of the token within `market_window` before it;
 * safety: an AVAILABLE on-chain safety record within `safety_max_age` before it;
 * social: an AVAILABLE social record within `social_max_age` before it;
@@ -18,6 +23,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from upscale.services.evidence_archive.payloads import TIMING_VERSION
 from upscale.services.evidence_archive.store import EvidenceStore
 
 NOT_A_READINESS_CLAIM = (
@@ -49,7 +55,10 @@ def status(
     by_kind: dict[str, dict[str, list[float]]] = {}
     missing: Counter[str] = Counter()
     failures: Counter[str] = Counter()
-    for kind, asset, at, availability, provider, reason in rows:
+    scout_rows: dict[tuple[str, float], dict[str, Any]] = {}
+    for kind, asset, at, availability, provider, reason, links in rows:
+        if kind == "scout":
+            scout_rows[(asset, at)] = links
         if availability == "AVAILABLE":
             k = "market" if kind == "dex_market" else kind
             by_kind.setdefault(k, {}).setdefault(asset, []).append(at)
@@ -64,16 +73,29 @@ def status(
     def has(kind: str, asset: str, at: float, window: timedelta) -> bool:
         return _within(by_kind.get(kind, {}).get(asset, []), at, window)
 
-    observations = sorted(
-        {(asset, at) for asset, times in by_kind.get("scout", {}).items() for at in times},
-        key=lambda x: x[1],
-    )
+    observations = sorted(scout_rows.items(), key=lambda x: x[0][1])
     counts = Counter[str]()
     settled = (now - OUTCOME_SETTLE).timestamp()
-    for asset, at in observations:
-        market = has("market", asset, at, MARKET_WINDOW)
-        safety = has("safety", asset, at, SAFETY_MAX_AGE)
-        social = has("social", asset, at, SOCIAL_MAX_AGE)
+    for (asset, at), links in observations:
+        # `at` is the evaluation's decision time (when it was final, after every lookup it
+        # used). Legacy records (before decision timing) only have the run's start time:
+        # evidence fetched during the run can't be shown to precede it, so they're judged
+        # at that earlier time (conservative, never lookahead).
+        timed = links.get("version") == TIMING_VERSION
+        counts["legacy_timing" if not timed else "decision_timed"] += 1
+        if timed and links.get("causal_valid") is False:
+            counts["causal_violations"] += 1
+            continue  # never decision-grade: its linkage is invalid
+        linked = {
+            x["kind"]
+            for x in (links.get("evidence") or [] if timed else [])
+            if x.get("availability") == "AVAILABLE"
+            and datetime.fromisoformat(x["observed_at"]).timestamp() <= at
+        }
+        counts["linked_safety"] += "safety" in linked
+        market = "market" in linked or has("market", asset, at, MARKET_WINDOW)
+        safety = "safety" in linked or has("safety", asset, at, SAFETY_MAX_AGE)
+        social = "social" in linked or has("social", asset, at, SOCIAL_MAX_AGE)
         counts["market"] += market
         counts["safety"] += safety
         counts["social"] += social
@@ -117,6 +139,10 @@ def status(
             "with_onchain_safety": counts["safety"],
             "with_social_evidence": counts["social"],
             "full_opportunity_evaluation_possible": counts["decision_grade"],
+            "with_linked_onchain_safety": counts["linked_safety"],
+            "decision_timed_evaluations": counts["decision_timed"],
+            "legacy_timing_evaluations": counts["legacy_timing"],
+            "causal_violations": counts["causal_violations"],
             "outcome_horizons_elapsed": counts["outcomes_elapsed"],
             "replay_usable": usable,
             "projected_split_if_all_replayed": {k: usable * v // 100 for k, v in SPLIT_PCT.items()},

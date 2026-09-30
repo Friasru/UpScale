@@ -29,7 +29,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from upscale.services.asset_profile import integrated_capabilities
-from upscale.services.evidence_archive.store import EvidenceStore, FutureEvidenceError
+from upscale.services.evidence_archive.store import (
+    EvidenceRecord,
+    EvidenceStore,
+    FutureEvidenceError,
+)
 from upscale.services.market_data import MarketDataError, Timeframe
 from upscale.services.outcomes.config import CollapseConfig, CollectorConfig
 from upscale.services.replay_lab.analyze import analyze_at
@@ -143,7 +147,7 @@ class ReplayRunner:
     def create_job(self, config: ReplayJobConfig, job_id: str | None = None) -> str:
         job_id = job_id or f"replay-{self.wall_clock():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
         samples, report = plan(
-            config, self.archive, self.wall_clock(), self.store.holdout_windows()
+            config, self.archive, self.wall_clock(), self.store.holdout_windows(), self.evidence
         )
         planning = report.as_dict() | {"versions": self.versions}
         self.store.create_job(job_id, config, samples, planning)
@@ -293,7 +297,10 @@ class ReplayRunner:
         candles: PointInTimeCandles,
     ) -> ReplayDecisionRecord:
         p = sample.plan
-        t = p.decision_at
+        t = p.decision_at  # D: the decision time (== T without an archived decision)
+        market_t = p.market_observed_at or t
+        links: dict[str, Any] = {}
+        started_at: datetime | None = None
         technical = DEFAULT_STRATEGY.technical
         tf = technical.default_timeframe
         # The live request: the latest `candles_to_fetch` (+1 in progress) before T.
@@ -320,7 +327,15 @@ class ReplayRunner:
         if p.evidence == "RECORDED":
             if self.archive is None:
                 raise ArchiveUnavailableError("RECORDED samples need the Scout archive")
-            snapshot = self.archive.snapshot_at(p.asset_id, p.pool_address, t)
+            # T (market evidence) and D (decision) differ when reproducing an archived Scout
+            # decision; everything visible is capped at D by the clock.
+            archived = self._archived_decision(p.asset_id, t) if p.market_observed_at else None
+            links = archived.links if archived is not None else {}
+            if p.market_observed_at is not None and archived is None:
+                warnings.append("the archived Scout decision for this sample was not found")
+            started = links.get("evaluation_started_at")
+            started_at = datetime.fromisoformat(started) if started else None
+            snapshot = self.archive.snapshot_at(p.asset_id, p.pool_address, market_t)
             if snapshot is None or snapshot.metrics.price_usd is None:
                 raise SampleSkipped("the recorded snapshot at T is missing or has no price")
             evidence_times.append(snapshot.observed_at)
@@ -338,8 +353,10 @@ class ReplayRunner:
             availability["pool_metadata"] = "IMMUTABLE_METADATA"
             momentum = None
             if config.mode == "MARKET_PLUS_SOCIAL":
-                momentum = self._social_at(p.asset_id, t) or self.archive.social_momentum(
-                    p.asset_id, t
+                momentum = (
+                    self._linked_social(clock, links)
+                    or self._social_at(p.asset_id, t)
+                    or self.archive.social_momentum(p.asset_id, t)
                 )
                 if momentum is not None:
                     clock.check_time(momentum.computed_at, "social momentum")
@@ -359,7 +376,7 @@ class ReplayRunner:
                 social_info |= {"status": "SOCIAL_UNAVAILABLE", "reason": "MARKET_ONLY mode"}
             dex_pool = pool_at(snapshot, meta, p.chain, p.token_address, symbol, name)
             safety_snap, safety_failure, safety_provider = self._safety_at(
-                clock, p.asset_id, t, availability, evidence_times
+                clock, p.asset_id, t, availability, evidence_times, _linked(links, "safety")
             )
             capabilities = self._capabilities_at(
                 t, safety_snap is not None or safety_failure is not None, warnings
@@ -367,6 +384,7 @@ class ReplayRunner:
             scout, growth, notes = await evaluate_scout(
                 clock, self.archive, dex_pool, snapshot, first_seen, momentum,
                 self.scout_config, self.growth_config, safety=safety_snap,
+                stages_until=started_at, rank_now=started_at,
             )  # fmt: skip
             warnings += notes
             reference: float | None = snapshot.metrics.price_usd
@@ -458,6 +476,10 @@ class ReplayRunner:
             decision_at=t,
             evidence=p.evidence,
             mode=config.mode,
+            market_observed_at=market_t,
+            decision_basis="archived_scout_decision"
+            if archived_links_used(links)
+            else "market_observation",
             evidence_latest_at=latest,
             reference_price=reference,
             reference_basis=basis,
@@ -485,14 +507,20 @@ class ReplayRunner:
         t: datetime,
         availability: dict[str, str],
         evidence_times: list[datetime],
+        link: dict[str, Any] | None = None,
     ) -> tuple[OnchainSafetySnapshot | None, str | None, str]:
-        """The latest archived on-chain safety at or before T (within `safety_max_age`),
-        or a failure production archived then. Never current chain state."""
+        """The on-chain safety a reproduced decision linked (exactly that record), else the
+        latest archived at or before T (within `safety_max_age`), or a failure production
+        archived then. Never later evidence, never current chain state."""
         minutes = self.safety_max_age.total_seconds() / 60
         if self.evidence is None:
             availability["onchain_safety"] = "NOT_COLLECTED: no evidence archive configured"
             return None, None, "archive"
-        rec = self.evidence.latest("safety", asset_id, until=t, since=t - self.safety_max_age)
+        rec = self.evidence.resolve(link) if link is not None else None
+        basis = "linked to the archived decision"
+        if rec is None:
+            rec = self.evidence.latest("safety", asset_id, until=t, since=t - self.safety_max_age)
+            basis = "latest archived"
         if rec is None:
             availability["onchain_safety"] = (
                 f"NOT_COLLECTED: no archived on-chain safety within {minutes:g} min before T"
@@ -509,8 +537,29 @@ class ReplayRunner:
             return None, rec.reason or rec.availability, provider
         snap = OnchainSafetySnapshot.model_validate(rec.payload["snapshot"])
         clock.check_time(snap.fetched_at, "archived on-chain safety")
-        availability["onchain_safety"] = f"AVAILABLE: archived {age:.0f} min before T ({provider})"
+        availability["onchain_safety"] = (
+            f"AVAILABLE: {basis}, observed {age:.0f} min before T ({provider})"
+        )
         return snap, None, provider
+
+    def _archived_decision(self, asset_id: str, d: datetime) -> EvidenceRecord | None:
+        """The archived Scout evaluation final exactly at D (causally valid only)."""
+        if self.evidence is None:
+            return None
+        rec = self.evidence.latest("scout", asset_id, until=d, since=d)
+        if rec is None or rec.links.get("causal_valid") is not True:
+            return None
+        return rec
+
+    def _linked_social(
+        self, clock: HistoricalClock, links: dict[str, Any]
+    ) -> SocialMomentum | None:
+        link = _linked(links, "social")
+        rec = self.evidence.resolve(link) if link is not None and self.evidence else None
+        if rec is None or rec.availability != "AVAILABLE":
+            return None
+        clock.check_time(rec.observed_at, "linked social evidence")
+        return SocialMomentum.model_validate(rec.payload["momentum"])
 
     def _capabilities_at(self, t: datetime, safety: bool, warnings: list[str]) -> list[str] | None:
         """The data capabilities production had at T (archived with each Scout run)."""
@@ -569,6 +618,16 @@ class ReplayRunner:
             end = t + timedelta(minutes=minutes) + interval_of(timeframe)
             clock.check_request(end, f"{timeframe} outcome candles")
             await self._load(candles, timeframe, t, end)
+
+
+def archived_links_used(links: dict[str, Any]) -> bool:
+    return bool(links.get("decision_at"))
+
+
+def _linked(links: dict[str, Any], kind: str) -> dict[str, Any] | None:
+    """The evidence of `kind` an archived decision linked (the latest, if several)."""
+    found = [x for x in links.get("evidence") or [] if x.get("kind") == kind]
+    return max(found, key=lambda x: x["observed_at"]) if found else None
 
 
 def _finding(output: AgentOutput | None, key: str) -> str | None:

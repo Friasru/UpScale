@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS replay_samples (
     cohort_at REAL NOT NULL,
     plan_order INTEGER NOT NULL,
     snapshot_provider TEXT,
+    market_observed_at REAL,
     status TEXT NOT NULL CHECK (status IN ('PLANNED','DECIDED','COMPLETE','SKIPPED','FAILED')),
     skip_reason TEXT,
     error TEXT,
@@ -320,6 +321,9 @@ class ReplayStore:
                     f"v{SCHEMA_VERSION}"
                 )
             conn.executescript(_SCHEMA)
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(replay_samples)")}
+            if "market_observed_at" not in columns:  # stores created before decision timing
+                conn.execute("ALTER TABLE replay_samples ADD COLUMN market_observed_at REAL")
             with conn:
                 conn.execute(
                     "INSERT OR IGNORE INTO replay_meta (key, value) VALUES ('origin', ?)",
@@ -366,8 +370,9 @@ class ReplayStore:
                 """
                 INSERT INTO replay_samples (job_id, origin, sample_key, asset_id, chain,
                     token_address, pool_address, symbol, decision_at, evidence, universe_basis,
-                    split, purged, cohort_at, plan_order, snapshot_provider, status, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PLANNED', ?)
+                    split, purged, cohort_at, plan_order, snapshot_provider, market_observed_at,
+                    status, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PLANNED', ?)
                 """,
                 [
                     (
@@ -387,6 +392,7 @@ class ReplayStore:
                         s.cohort_at.timestamp(),
                         s.plan_order,
                         s.snapshot_provider,
+                        s.market_observed_at.timestamp() if s.market_observed_at else None,
                         now,
                     )
                     for s in samples
@@ -511,7 +517,7 @@ class ReplayStore:
         sql = f"""
             SELECT id, status, attempts, skip_reason, error, sample_key, asset_id, chain,
                 token_address, pool_address, symbol, decision_at, evidence, universe_basis,
-                split, purged, cohort_at, plan_order, snapshot_provider
+                split, purged, cohort_at, plan_order, snapshot_provider, market_observed_at
             FROM replay_samples WHERE job_id = ?
             {"AND status IN (" + ",".join("?" * len(statuses)) + ")" if statuses else ""}
             ORDER BY plan_order
@@ -702,7 +708,7 @@ class ReplayStore:
                 SELECT s.id, s.status, s.attempts, s.skip_reason, s.error, s.sample_key,
                     s.asset_id, s.chain, s.token_address, s.pool_address, s.symbol,
                     s.decision_at, s.evidence, s.universe_basis, s.split, s.purged,
-                    s.cohort_at, s.plan_order, s.snapshot_provider,
+                    s.cohort_at, s.plan_order, s.snapshot_provider, s.market_observed_at,
                     d.record_json, d.record_hash, o.record_json, s.job_id
                 FROM replay_samples s
                 JOIN replay_decisions d ON d.sample_id = s.id
@@ -716,14 +722,14 @@ class ReplayStore:
         )
         out = []
         for r in rows:
-            if record_hash(r[19]) != r[20]:
+            if record_hash(r[20]) != r[21]:
                 raise DecisionIntegrityError(f"decision of sample {r[0]} fails its hash check")
             out.append(
                 AnalysisRow(
-                    sample=_stored(r[:19]).plan,
-                    decision=ReplayDecisionRecord.model_validate_json(r[19]),
-                    outcome=ReplayHorizonOutcome.model_validate_json(r[21]) if r[21] else None,
-                    job_id=r[22],
+                    sample=_stored(r[:20]).plan,
+                    decision=ReplayDecisionRecord.model_validate_json(r[20]),
+                    outcome=ReplayHorizonOutcome.model_validate_json(r[22]) if r[22] else None,
+                    job_id=r[23],
                 )
             )
         return out
@@ -882,6 +888,7 @@ def _stored(r: Sequence[Any]) -> StoredSample:
             cohort_at=utc(r[16]),
             plan_order=r[17],
             snapshot_provider=r[18],
+            market_observed_at=utc(r[19]) if len(r) > 19 and r[19] is not None else None,
         ),
     )
 

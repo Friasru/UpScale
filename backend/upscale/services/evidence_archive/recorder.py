@@ -22,7 +22,13 @@ from typing import Any
 
 from upscale.services.clock import frozen_time
 from upscale.services.evidence_archive import payloads
-from upscale.services.evidence_archive.store import EvidenceStore, Kind, PendingRecord
+from upscale.services.evidence_archive.store import (
+    EvidenceStore,
+    Kind,
+    PendingRecord,
+    link_of,
+    prepare,
+)
 
 logger = logging.getLogger("upscale.evidence")
 
@@ -44,6 +50,7 @@ class RecorderStats:
     dropped: int = 0
     refused_replay: int = 0
     errors: int = 0
+    causal_violations: int = 0
     last_error: str | None = None
     last_write_at: datetime | None = None
     by_kind: dict[str, int] = field(default_factory=dict)
@@ -56,6 +63,7 @@ class RecorderStats:
             "dropped_queue_full": self.dropped,
             "refused_during_replay": self.refused_replay,
             "write_errors": self.errors,
+            "causal_violations": self.causal_violations,
             "last_error": self.last_error,
             "last_successful_write": self.last_write_at.isoformat() if self.last_write_at else None,
             "written_by_kind": dict(self.by_kind),
@@ -91,9 +99,19 @@ class EvidenceRecorder:
         if not records:
             return
         versions = self.versions()
+        entry = extra.get("scope_entry")
         for r in records:
             r.component = component
             r.versions = versions
+            prepare(r)  # identities now, so the decision that used it can link them
+            if isinstance(entry, dict):
+                entry["links"].append(link_of(r))
+            if r.kind in ("scout", "decision") and r.links.get("causal_valid") is False:
+                self.stats.causal_violations += 1
+                logger.warning(
+                    "evidence archive: %s decision for %s used evidence observed after it: %s",
+                    r.kind, r.asset_id, r.payload.get("causal", {}).get("violations"),
+                )  # fmt: skip
             try:
                 self._queue.put_nowait(r)
                 self.stats.queued += 1
@@ -124,11 +142,12 @@ class EvidenceRecorder:
         if kind == "social":
             return payloads.social(obj)
         if kind == "scout":
-            return payloads.scout(obj, self._capabilities())
+            decision_at = extra.get("decision_at") or self._now()
+            return payloads.scout(obj, self._capabilities(), decision_at, extra.get("scope"))
         if kind == "decision":
             return payloads.decision(
                 extra["request"], obj, extra.get("observation"), extra.get("at") or self._now(),
-                self._capabilities(),
+                self._capabilities(), extra.get("scope"),
             )  # fmt: skip
         raise ValueError(f"unknown evidence kind {kind!r}")
 

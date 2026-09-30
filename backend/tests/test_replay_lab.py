@@ -835,10 +835,8 @@ def test_historical_candles_are_cached_and_reused(tmp_path: Path) -> None:
         .execute("SELECT DISTINCT provider, chain, token_address, pool_address FROM candle_cache")
         .fetchall()
     )
-    # Technical input (pool base, as live Analyze) and outcomes (the exact token) are cached
-    # apart, never mixed.
-    assert sorted(rows) == [("GeckoTerminal", "solana", mint(0), pool_address(0)),
-                            ("GeckoTerminal:token-priced", "solana", mint(0), pool_address(0))]  # fmt: skip
+    # Every replay use (Technical input, outcomes) is priced for the exact token.
+    assert rows == [("GeckoTerminal:token-priced", "solana", mint(0), pool_address(0))]
     assert chunk_bounds("1m", T0, T0 + timedelta(minutes=1))[0][1] - chunk_bounds(
         "1m", T0, T0 + timedelta(minutes=1)
     )[0][0] == timedelta(minutes=1000)

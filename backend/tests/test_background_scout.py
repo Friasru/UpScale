@@ -347,7 +347,11 @@ def test_provider_429s_are_recorded_on_the_shared_quota() -> None:
     assert not shared.rate_limited_within(60)
     candles = DexCandleService(Limited(), limiter=shared)  # type: ignore[arg-type]
     with pytest.raises(ProviderRateLimitedError):
-        run(candles.get_candles("solana", "pool", "1m", 10, symbol="X", canonical_id=None))
+        run(
+            candles.get_candles(
+                "solana", "pool", "1m", 10, symbol="X", canonical_id=None, token="T"
+            )
+        )
     assert shared.rate_limited_within(60)
 
 

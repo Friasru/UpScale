@@ -303,7 +303,7 @@ def test_providers_are_chosen_by_capability_and_chain() -> None:
         lambda: provider_registry.derivatives("BTC"),
         lambda: provider_registry.social("BTC"),
         lambda: provider_registry.pool_candles(
-            "bitcoin", "x", "5m", 10, symbol="X", canonical_id=None
+            "bitcoin", "x", "5m", 10, symbol="X", canonical_id=None, token="x"
         ),
         lambda: provider_registry.dex_market("bitcoin", "x"),
     ],
@@ -346,10 +346,11 @@ def test_pool_candles_request_and_normalization(fake_geckoterminal: FakeGeckoTer
     fake_geckoterminal.candles[POOL] = gt_rows(120)
     series = asyncio.run(
         provider_registry.pool_candles(
-            "solana", POOL, "5m", 100, symbol="NEWT", canonical_id=f"solana:{MINT}"
+            "solana", POOL, "5m", 100, symbol="NEWT", canonical_id=f"solana:{MINT}", token=MINT
         )
     )
     req = fake_geckoterminal.requests[0]
+    assert req.url.params["token"] == MINT  # priced for the exact mint, never the pool "base"
     assert req.url.path == f"/api/v2/networks/solana/pools/{POOL}/ohlcv/minute"
     assert req.url.params["aggregate"] == "5" and req.url.params["currency"] == "usd"
     assert len(series.candles) == 100 and series.provider == "GeckoTerminal"
@@ -357,7 +358,9 @@ def test_pool_candles_request_and_normalization(fake_geckoterminal: FakeGeckoTer
     assert series.as_of == NOW
     # Cached: a second read makes no request.
     asyncio.run(
-        provider_registry.pool_candles("solana", POOL, "5m", 100, symbol="NEWT", canonical_id=None)
+        provider_registry.pool_candles(
+            "solana", POOL, "5m", 100, symbol="NEWT", canonical_id=None, token=MINT
+        )
     )
     assert len(fake_geckoterminal.requests) == 1
 
@@ -379,7 +382,9 @@ def test_pool_candle_failures(fake_geckoterminal, status, error) -> None:
     fake_geckoterminal.handler = lambda r: httpx2.Response(status)
     with pytest.raises(error):
         asyncio.run(
-            provider_registry.pool_candles("solana", POOL, "5m", 10, symbol="X", canonical_id=None)
+            provider_registry.pool_candles(
+                "solana", POOL, "5m", 10, symbol="X", canonical_id=None, token=MINT
+            )
         )
 
 

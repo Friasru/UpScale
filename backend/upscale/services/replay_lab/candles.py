@@ -28,7 +28,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from upscale.services.chains import GECKOTERMINAL_NETWORKS, chain_label
+from upscale.services.chains import GECKOTERMINAL_NETWORKS, chain_label, normalize_address
 from upscale.services.geckoterminal import GT_TIMEFRAMES, GeckoTerminalProvider, parse_pool_candles
 from upscale.services.market_data import (
     TIMEFRAME_SECONDS,
@@ -114,9 +114,10 @@ class HistoricalCandleFetcher:
         """Every candle of this exact pool opened in [start, end), oldest first (gaps stay
         gaps). May raise `ReplayDeferred` (try later) or `PoolHistoryUnavailableError`.
 
-        `token_priced`: priced in USD for this exact token (outcomes, reference prices);
-        otherwise for the provider's pool base token, as live Analyze requests them (the
-        production-faithful Technical input). Cached separately."""
+        `token_priced`: priced in USD for this exact token, as every replay use requests
+        them (Technical input, reference prices, outcomes, like live Technical and outcome
+        collection). Without it: the provider's own pool base (kept only for candles cached
+        before exact-token pricing; never mixed: cached under another key)."""
         if chain not in GECKOTERMINAL_NETWORKS or timeframe not in GT_TIMEFRAMES:
             raise PoolHistoryUnavailableError(f"{PROVIDER} has no {timeframe} candles for {chain}")
         out: dict[datetime, Candle] = {}
@@ -264,12 +265,18 @@ class PointInTimeCandleSource:
         *,
         symbol: str,
         canonical_id: str | None,
+        token: str,
     ) -> CandleSeries:
         self.requests.append((pool, timeframe, limit))
         if chain != self.candles.chain or pool != self.candles.pool:
             raise MarketDataUnavailableError(
                 "historical replay only has candles for the sample's own pool (other pools' "
                 "history at the decision time is unknown)"
+            )
+        own = normalize_address(chain, self.candles.token) or self.candles.token
+        if (normalize_address(chain, token) or token) != own:
+            raise MarketDataUnavailableError(
+                "historical replay only has candles priced for the sample's exact token"
             )
         if not self.candles.loaded(timeframe):
             raise MarketDataUnavailableError(f"{timeframe} candles were not loaded for replay")
@@ -300,11 +307,12 @@ class PointInTimeRegistry:
         *,
         symbol: str,
         canonical_id: str | None,
+        token: str,
     ) -> CandleSeries:
         if not self._source.covers(chain):
             raise MarketDataUnavailableError(f"no pool-candle provider covers {chain}")
         return await self._source.get_candles(
-            chain, pool, timeframe, limit, symbol=symbol, canonical_id=canonical_id
+            chain, pool, timeframe, limit, symbol=symbol, canonical_id=canonical_id, token=token
         )
 
 

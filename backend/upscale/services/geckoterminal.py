@@ -255,6 +255,8 @@ class DexCandleService:
         self._shared = limiter is not None
         self.limiter = limiter or LaneLimiter(max_calls_per_minute, 60.0, clock=clock)
         self.lane = lane
+        # Keyed by chain, pool, exact token, timeframe (and window) and count: the same pool
+        # priced for its other token is another series, never shared.
         self._cache: dict[tuple[str, str, str, int], tuple[float, CandleSeries]] = {}
         self._locks: dict[tuple[str, str, str, int], asyncio.Lock] = {}
 
@@ -286,8 +288,11 @@ class DexCandleService:
         *,
         symbol: str,
         canonical_id: str | None,
+        token: str,
     ) -> CandleSeries:
-        key = (chain, pool, timeframe, limit)
+        """The latest closed candles of this exact pool, priced for the exact `token`
+        (never the provider's default pool base, which can be the other token)."""
+        key = (chain, pool, f"{timeframe}|{token}", limit)
         if (hit := self._cached(key)) is not None:
             return hit.model_copy(update={"symbol": symbol})
         async with self._locks.setdefault(key, asyncio.Lock()):
@@ -307,6 +312,7 @@ class DexCandleService:
                     symbol=symbol,
                     canonical_id=canonical_id,
                     now=self.now(),
+                    token=token,
                 )
             except ProviderRateLimitedError:
                 self.limiter.note_rate_limited()  # the provider pushed back: shared

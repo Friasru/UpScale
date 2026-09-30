@@ -47,7 +47,9 @@ class CapabilityUnavailableError(MarketDataError):
 
 
 class PoolCandleSource(Protocol):
-    """Candles for one exact DEX pool (chain + pool address), from one provider."""
+    """Candles for one exact DEX pool (chain + pool address), from one provider, priced in
+    USD for one exact token of that pool (`token`: its contract / mint). A provider's own
+    pool orientation is never assumed: its "base" can be the other token."""
 
     @property
     def provider_name(self) -> str: ...
@@ -66,6 +68,7 @@ class PoolCandleSource(Protocol):
         *,
         symbol: str,
         canonical_id: str | None,
+        token: str,
     ) -> CandleSeries: ...
 
 
@@ -108,10 +111,13 @@ class ProviderRegistry:
         *,
         symbol: str,
         canonical_id: str | None,
+        token: str,
     ) -> CandleSeries:
-        """Candles for this exact pool, from the first pool-candle source that can serve
-        them. Every source gets the same chain, pool and canonical id: a failing provider
-        is replaced by another provider of the same pool, never by another token's pool.
+        """Candles for this exact pool, priced for the exact `token` (contract / mint),
+        from the first pool-candle source that can serve them. Every source gets the same
+        chain, pool, token and canonical id: a failing provider is replaced by another
+        provider of the same pool and token, never by another token's pool or the pool's
+        other token.
         When every source was rate-limited the error says so (a temporary provider limit,
         not missing market history)."""
         sources: list[PoolCandleSource] = [self.dex_candles, *self.pool_candle_fallbacks]
@@ -122,8 +128,9 @@ class ProviderRegistry:
         for source in able:
             try:
                 return await source.get_candles(
-                    chain, pool, timeframe, limit, symbol=symbol, canonical_id=canonical_id
-                )
+                    chain, pool, timeframe, limit, symbol=symbol, canonical_id=canonical_id,
+                    token=token,
+                )  # fmt: skip
             except MarketDataError as exc:
                 errors.append(exc)
         if all(isinstance(e, ProviderRateLimitedError) for e in errors):

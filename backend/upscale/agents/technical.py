@@ -6,7 +6,7 @@ from upscale.formatting import usd, usd_zone
 from upscale.schemas import AgentResult, Risk, Scenario
 from upscale.services import technical_analysis_service
 from upscale.services.capabilities import PoolCandleSource
-from upscale.services.chains import same_address
+from upscale.services.chains import normalize_address, same_address
 from upscale.services.market_data import (
     TIMEFRAMES,
     CandleSeries,
@@ -44,6 +44,7 @@ class PoolCandleRegistry(Protocol):
         *,
         symbol: str,
         canonical_id: str | None,
+        token: str,
     ) -> CandleSeries: ...
 
 
@@ -146,6 +147,7 @@ class TechnicalAnalysisAgent(Agent):
         explicit = bool(market and (market.requested_dex or market.requested_pool))
 
         rate_limited: list[str] = []
+        token = normalize_address(pool.chain, pool.mint) or pool.mint
 
         async def analyze_pool(address: str) -> tuple[TechnicalAnalysis | None, str | None]:
             try:
@@ -156,6 +158,9 @@ class TechnicalAnalysisAgent(Agent):
                     cfg.candles_to_fetch,
                     symbol=symbol,
                     canonical_id=pool.canonical_id,  # every candidate pool is this token's
+                    # Priced for this exact token: a provider may orient the pool the other
+                    # way round (e.g. "DOGE / GOAT"), and its "base" would be the other token.
+                    token=token,
                 )
                 return analyze_series(series, cfg), None
             except ProviderRateLimitedError as exc:

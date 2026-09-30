@@ -160,7 +160,8 @@ def test_repeated_analyze_never_exceeds_the_real_limit(
     outcomes = []
     for pool in pools:  # different pools: nothing comes from the cache
         try:
-            run(candles.get_candles("solana", pool, "5m", 100, symbol="X", canonical_id=None))
+            run(candles.get_candles("solana", pool, "5m", 100, symbol="X", canonical_id=None,
+                                    token=MINT))  # fmt: skip
             outcomes.append("ok")
         except ProviderRateLimitedError:
             outcomes.append("limited")
@@ -254,14 +255,14 @@ class ExactSource:
     supported_timeframes = frozenset({"5m"})
 
     def __init__(self) -> None:
-        self.asked: list[tuple[str, str, str | None]] = []
+        self.asked: list[tuple[str, str, str | None, str]] = []
 
     def covers(self, chain: str) -> bool:
         return chain == "solana"
 
     async def get_candles(self, chain: str, pool: str, timeframe: Any, limit: int, *,
-                          symbol: str, canonical_id: str | None) -> CandleSeries:  # fmt: skip
-        self.asked.append((chain, pool, canonical_id))
+                          symbol: str, canonical_id: str | None, token: str) -> CandleSeries:  # fmt: skip
+        self.asked.append((chain, pool, canonical_id, token))
         raise ProviderRateLimitedError("OtherExact rate limit reached")
 
 
@@ -280,8 +281,9 @@ def test_fallback_is_another_provider_of_the_same_exact_pool() -> None:
     registry, _ = registry_with(other)
     with pytest.raises(ProviderRateLimitedError) as err:
         run(registry.pool_candles("solana", POOL, "5m", 100, symbol="PEPE",
-                                  canonical_id=f"solana:{MINT}"))  # fmt: skip
-    assert other.asked == [("solana", POOL, f"solana:{MINT}")]  # same pool, same token
+                                  canonical_id=f"solana:{MINT}", token=MINT))  # fmt: skip
+    # Same pool, same token, priced for the same exact token.
+    assert other.asked == [("solana", POOL, f"solana:{MINT}", MINT)]
     assert "GeckoTerminal rate limit reached" in str(err.value)
     assert "OtherExact rate limit reached" in str(err.value)
 
@@ -290,6 +292,7 @@ def test_a_real_candle_problem_is_not_reported_as_a_rate_limit() -> None:
     other = ExactSource()
     registry, _ = registry_with(other, limited=False)  # GeckoTerminal: unknown pool (404)
     with pytest.raises(Exception) as err:
-        run(registry.pool_candles("solana", POOL, "5m", 100, symbol="PEPE", canonical_id=None))
+        run(registry.pool_candles("solana", POOL, "5m", 100, symbol="PEPE", canonical_id=None,
+                                  token=MINT))  # fmt: skip
     assert not isinstance(err.value, ProviderRateLimitedError)
     assert "doesn't know this pool" in str(err.value)

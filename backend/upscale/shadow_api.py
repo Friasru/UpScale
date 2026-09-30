@@ -167,3 +167,30 @@ async def shadow_rejections(
         ),
         [],
     )
+
+
+@router.get("/funnel")
+async def shadow_funnel(
+    run: str | None = None,
+    strategy: Annotated[list[str] | None, Query()] = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> dict[str, Any]:
+    """Sequential entry funnel and conditional counts (exact aggregate counters)."""
+    empty: dict[str, Any] = {"label": NOT_REAL_PROFIT, "strategies": []}
+    result = await asyncio.to_thread(
+        _read,
+        lambda e: e.funnel(_run(e, run), strategy, _time(since), _time(until)),
+        empty,
+    )
+    assert isinstance(result, dict)
+    return result
+
+
+@router.get("/storage")
+async def shadow_storage() -> dict[str, Any]:
+    """Shadow database size, rows per table and diagnostics storage settings."""
+    empty: dict[str, Any] = {"label": NOT_REAL_PROFIT, "shadow_db": None}
+    result = await asyncio.to_thread(_read, lambda e: e.storage(), empty)
+    assert isinstance(result, dict)
+    return result

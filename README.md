@@ -221,7 +221,8 @@ slippage) and are not real profit.
 * CLI: `python -m upscale.services.shadow init | strategies | run | status | positions
   [--open|--closed] | trades | decisions | metrics` (filters `--run --strategy --asset --since
   --until`). API (read-only): `GET /shadow/status`, `/strategies`, `/positions`, `/trades`,
-  `/decisions`, `/metrics`, `/diagnostics`, `/rejections`, `/shadow/background/status`.
+  `/decisions`, `/metrics`, `/diagnostics`, `/rejections`, `/funnel`, `/storage`,
+  `/shadow/background/status`.
 * Rejection diagnostics: every Scout evaluation a strategy does not enter on is stored in
   the append-only `shadow_rejections` table with every failed rule as a stable code
   (`TECHNICAL_NOT_AVAILABLE`, `SCORE_BELOW_MIN`, `SAFETY_NOT_AVAILABLE`...), the observed
@@ -229,6 +230,19 @@ slippage) and are not real profit.
   blocked by position / risk control). `python -m upscale.services.shadow diagnostics --run
   <run> [--strategy ...]` summarizes them; `rejections --reason <code>` lists rows. Runs
   processed before diagnostics report `diagnostics_available_from` (never reconstructed).
+* Entry funnel: `python -m upscale.services.shadow funnel --run <run> [--strategy ...]
+  [--since --until] [--json]` shows where candidates drop out, gate by gate in one fixed
+  diagnostic order (each rejected evaluation counts only at the FIRST gate it fails, so
+  several reasons never double-count), plus conditional counts ("among candidates passing
+  the Scout rules: Technical available X/Y, trend up X/Y..."). Counts come from exact
+  per-hour aggregate counters (`shadow_funnel_counts`), never from sampled rows.
+* Diagnostics storage: `UPSCALE_SHADOW_DIAGNOSTICS_DETAIL=sampled` (default; at most
+  `UPSCALE_SHADOW_REJECTION_SAMPLE_PER_REASON`=20 rejection rows per strategy, primary
+  reason and UTC day), `full` (research: `run --diagnostics-detail full`) or `aggregate`
+  (counters only). `UPSCALE_SHADOW_REJECTION_RETENTION_DAYS` (disabled by default) expires
+  sampled rejection rows only: never trades, decisions, positions, equity, strategies, runs,
+  counters, or rows stored before a run's counters began. `python -m upscale.services.shadow
+  storage` reports the database size, rows per table and the estimated daily growth.
 * Calibration reads closed shadow trades as the SHADOW origin, kept apart from LIVE_FORWARD
   and HISTORICAL_REPLAY: `python -m upscale.services.calibration origins --horizon 1h`.
 

@@ -26,6 +26,7 @@ from upscale.services.shadow.book import Book
 from upscale.services.shadow.cli import main as cli_main
 from upscale.services.shadow.config import (
     CLEAN_DATA_CUTOFF,
+    DiagnosticsSettings,
     EntryRules,
     ExitRules,
     RiskRules,
@@ -88,6 +89,9 @@ class Harness:
         self.archive_override: float | None = None  # when set: archived at this time
         self._observed = T0.timestamp()
         self.now: datetime | None = None  # None: one minute after the latest evidence
+        # Row-level diagnostics tests read every rejection: full detail unless a test
+        # asks for the production default (sampled) or another mode.
+        self.diagnostics = DiagnosticsSettings(detail="full")
         self.ev_path = tmp_path / "evidence.sqlite3"
         self.shadow_path = tmp_path / "shadow.sqlite3"
         # Archived one second after being observed, unless a test delays it.
@@ -100,7 +104,9 @@ class Harness:
     def open(self) -> None:
         self.store = ShadowStore(self.shadow_path)
         self.reader = EvidenceStore(self.ev_path, read_only=True)
-        self.engine = ShadowEngine(self.store, self.reader, now=self.clock, settle_seconds=0)
+        self.engine = ShadowEngine(
+            self.store, self.reader, now=self.clock, settle_seconds=0, diagnostics=self.diagnostics
+        )
 
     def clock(self) -> datetime:
         if self.now is not None:

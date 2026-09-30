@@ -316,6 +316,78 @@ class ShadowSettings(BaseModel):
     retry_minutes: float = 5.0
 
 
+# --- rejection diagnostics storage --------------------------------------------------------------
+
+DiagnosticsDetail = Literal["full", "sampled", "aggregate"]
+DETAIL_MODES: tuple[DiagnosticsDetail, ...] = ("full", "sampled", "aggregate")
+DEFAULT_DETAIL: DiagnosticsDetail = "sampled"
+# ~1.2 KB per stored rejection row: 20 per strategy, primary reason and UTC day is at most a
+# few hundred rows (well under 1 MB) a day for the four baselines, against ~25 MB a day
+# for one full row per rejected evaluation.
+DEFAULT_SAMPLE_PER_REASON = 20
+
+
+class DiagnosticsSettings(BaseModel):
+    """How much rejection detail a processing step stores. The aggregate counters (and so
+    every funnel / diagnostics count) are exact in every mode; only the per-candidate
+    ``shadow_rejections`` rows differ:
+
+    * ``full``: one row per rejected evaluation (one-off research runs);
+    * ``sampled`` (default): at most `sample_per_reason` rows per strategy, primary reason
+      and UTC day, spread over the day (a per-hour quota of ceil(N / 24));
+    * ``aggregate``: no rows, counters only.
+
+    `retention_days` (None: disabled, the default) deletes sampled rows whose decision
+    time is older than that many days before the processed time. It never touches rows
+    stored before aggregate counters existed for a run, rows of a ``full`` step's run, or
+    any other table."""
+
+    model_config = _frozen()
+
+    detail: DiagnosticsDetail = DEFAULT_DETAIL
+    sample_per_reason: int = Field(default=DEFAULT_SAMPLE_PER_REASON, ge=1)
+    retention_days: float | None = Field(default=None, gt=0)
+
+    @property
+    def hourly_quota(self) -> int:
+        return max(1, math.ceil(self.sample_per_reason / 24))
+
+
+def load_diagnostics_settings(
+    detail: str | None = None,
+    sample_per_reason: str | None = None,
+    retention_days: str | None = None,
+) -> DiagnosticsSettings:
+    """From ``UPSCALE_SHADOW_DIAGNOSTICS_DETAIL`` (full / sampled / aggregate; default
+    sampled), ``UPSCALE_SHADOW_REJECTION_SAMPLE_PER_REASON`` (default 20) and
+    ``UPSCALE_SHADOW_REJECTION_RETENTION_DAYS`` (unset or 0: retention disabled). Arguments
+    override the environment; invalid values fall back to the safe defaults."""
+    raw_detail = (detail or os.getenv("UPSCALE_SHADOW_DIAGNOSTICS_DETAIL") or "").strip().lower()
+    mode: DiagnosticsDetail = DEFAULT_DETAIL
+    for m in DETAIL_MODES:
+        if raw_detail == m:
+            mode = m
+    n = DEFAULT_SAMPLE_PER_REASON
+    raw_n = sample_per_reason or os.getenv("UPSCALE_SHADOW_REJECTION_SAMPLE_PER_REASON")
+    if raw_n and raw_n.strip():
+        try:
+            n = int(raw_n)
+        except ValueError:
+            n = DEFAULT_SAMPLE_PER_REASON
+        if n < 1:
+            n = DEFAULT_SAMPLE_PER_REASON
+    days: float | None = None
+    raw_days = retention_days or os.getenv("UPSCALE_SHADOW_REJECTION_RETENTION_DAYS")
+    if raw_days and raw_days.strip():
+        try:
+            days = float(raw_days)
+        except ValueError:
+            days = None
+        if days is not None and (not math.isfinite(days) or days <= 0):
+            days = None
+    return DiagnosticsSettings(detail=mode, sample_per_reason=n, retention_days=days)
+
+
 def parse_timestamp(raw: str) -> datetime:
     """An ISO-8601 timestamp with a timezone (``Z`` or an offset)."""
     try:

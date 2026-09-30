@@ -408,12 +408,15 @@ def test_runs_from_before_diagnostics_are_not_reconstructed(h: Harness) -> None:
     h.scan(T0, h.cand(score=40.0))
     h.run(THRESHOLD)
     # Make the file look like one written by the previous version (schema v1, no
-    # rejection table, no diagnostics marker, the old first-reason counter).
+    # rejection table or aggregate counters, no markers, the old first-reason counter).
     h.store.close()
     raw = sqlite3.connect(h.shadow_path)
     raw.executescript("""
         DROP TABLE shadow_rejections;
+        DROP TABLE shadow_funnel_counts;
+        DROP TABLE shadow_retention_window;
         DELETE FROM shadow_meta WHERE key LIKE 'diagnostics_from:%';
+        DELETE FROM shadow_meta WHERE key LIKE 'aggregates_from:%';
         UPDATE shadow_meta SET value = '1' WHERE key = 'schema_version';
         PRAGMA user_version = 1;
     """)
@@ -430,7 +433,9 @@ def test_runs_from_before_diagnostics_are_not_reconstructed(h: Harness) -> None:
 
     ro = ShadowStore(h.shadow_path, read_only=True)
     old = ShadowEngine(ro, None).diagnostics("t")
+    (never,) = ShadowEngine(ro, None).funnel("t")["strategies"]
     ro.close()
+    assert never["evaluated"] == 0  # a funnel is never built from decisions alone
     assert old["diagnostics_available_from"] is None and "not reconstructed" in old["note"]
     (s,) = old["strategies"]
     assert s["rejected"] == 0 and s["before_diagnostics_first_reason_only"] == {"SCORE": 1}

@@ -5,6 +5,10 @@ Evidence Archive and writes the shadow database), and it is still the lowest-pri
 background work: a step is deferred while Analyze is active or a Scout scan (manual or
 background) is running, so it never competes with them for CPU or disk. A failing step is
 logged and retried at the next slot; nothing it does can raise into Scout or Analyze.
+
+Diagnostics storage follows ``UPSCALE_SHADOW_DIAGNOSTICS_DETAIL`` (default ``sampled``:
+exact aggregate counters plus a bounded sample of rejection rows, never one row per
+rejected candidate) and the opt-in ``UPSCALE_SHADOW_REJECTION_RETENTION_DAYS``.
 """
 
 import asyncio
@@ -116,6 +120,9 @@ class BackgroundShadow:
             "events": report.get("events"),
             "actions": report.get("actions"),
             "fills": report.get("fills"),
+            "diagnostics_detail": report.get("diagnostics_detail"),
+            "rejection_rows_stored": report.get("rejection_rows_stored"),
+            "rejection_rows_expired": report.get("rejection_rows_expired"),
             "processed_until": str(report.get("until")),
         }
         logger.info("background Shadow completed: %s", summary)

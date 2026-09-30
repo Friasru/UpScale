@@ -15,12 +15,21 @@ Anti-lookahead, by construction:
 
 A run is resumable: the cursor and every book's state are checkpointed in the same
 transaction as the rows they produced, so a restart continues exactly where it stopped.
+
+Diagnostics storage (`DiagnosticsSettings`): every Scout evaluation's outcome is counted in
+exact per-hour aggregate counters (written with the checkpoint); the detailed rejection
+rows are kept in full, as a deterministic bounded sample (default) or not at all, and
+sampled rows may expire when retention is explicitly enabled. None of it feeds back into a
+strategy: decisions, trades, positions and equity are identical in every mode.
 """
 
+import math
+import shutil
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from upscale.services.evidence_archive.store import EvidenceStore
@@ -30,11 +39,21 @@ from upscale.services.shadow.config import (
     DEFAULT_RUN_ID,
     NOT_REAL_PROFIT,
     SETTLE_SECONDS,
+    DiagnosticsSettings,
     StrategyConfig,
+    load_diagnostics_settings,
 )
 from upscale.services.shadow.evidence import PRICE_KINDS, AnalyzeView, EvidenceTimeline
+from upscale.services.shadow.funnel import (
+    GATES,
+    Combo,
+    funnel,
+    parse_reasons_key,
+    primary_reason,
+    reasons_key,
+)
 from upscale.services.shadow.metrics import strategy_metrics
-from upscale.services.shadow.store import ShadowStore, ShadowStoreError
+from upscale.services.shadow.store import BUCKET_SECONDS, ShadowStore, ShadowStoreError
 from upscale.services.shadow.strategies import BASELINES
 
 
@@ -50,6 +69,19 @@ def _dt(ts: float | None) -> datetime | None:
     return datetime.fromtimestamp(ts, UTC) if ts is not None else None
 
 
+def _bucket(t: datetime) -> float:
+    return math.floor(t.timestamp() / BUCKET_SECONDS) * float(BUCKET_SECONDS)
+
+
+def _hour_floor(t: datetime) -> datetime:
+    return datetime.fromtimestamp(_bucket(t), UTC)
+
+
+def _hour_ceil(t: datetime) -> datetime:
+    ts = math.ceil(t.timestamp() / BUCKET_SECONDS) * float(BUCKET_SECONDS)
+    return datetime.fromtimestamp(ts, UTC)
+
+
 class ShadowEngine:
     def __init__(
         self,
@@ -58,12 +90,15 @@ class ShadowEngine:
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         settle_seconds: float = SETTLE_SECONDS,
         commit_every: int = 5000,
+        diagnostics: DiagnosticsSettings | None = None,
     ):
         self.store = store
         self.evidence = evidence
         self.now = now
         self.settle = timedelta(seconds=settle_seconds)
         self.commit_every = commit_every
+        # None: from the environment (default: sampled detail, retention disabled).
+        self.diagnostics_settings = diagnostics or load_diagnostics_settings()
 
     # --- strategies and runs -------------------------------------------------------------------
 
@@ -168,11 +203,17 @@ class ShadowEngine:
         if limit.timestamp() <= cursor[0]:
             report["note"] = "nothing new to process yet"
             return self._finish(report, books)
-        # Rejection diagnostics exist from here on for this run (never reconstructed for
-        # evaluations an older version already processed).
-        self.store.mark_diagnostics(
-            run_id, max(_dt(cursor[0]) or limit, _dt(run["since_ts"]) or limit)
-        )
+        # Rejection diagnostics and aggregate counters exist from here on for this run
+        # (never reconstructed for evaluations an older version already processed).
+        start = max(_dt(cursor[0]) or limit, _dt(run["since_ts"]) or limit)
+        self.store.mark_diagnostics(run_id, start)
+        self.store.mark_aggregates(run_id, start, legacy=cursor[0] >= run["since_ts"])
+        detail = self.diagnostics_settings.detail
+        modes = stats.setdefault("diagnostics_detail_modes", [])
+        if detail not in modes:
+            modes.append(detail)
+        stats["diagnostics_detail"] = detail
+        report["diagnostics_detail"] = detail
         timeline = EvidenceTimeline(self.evidence)
         clock = _dt(cursor[0]) or limit
         group_at: datetime | None = None
@@ -234,7 +275,44 @@ class ShadowEngine:
         self.store.record_metrics(
             run_id, [self._metrics(run_id, b.cfg) for b in books.values()], limit.timestamp()
         )
+        d = self.diagnostics_settings
+        if d.retention_days is not None and d.detail != "full":
+            marker = self.store.aggregates_from(run_id)
+            assert marker is not None
+            cutoff = limit - timedelta(days=d.retention_days)
+            report["rejection_rows_expired"] = self.store.prune_rejections(
+                run_id, cutoff, float(marker["recorded_from"])
+            )
         return self._finish(report, books)
+
+    def _sample(
+        self, book: Book, rejections: list[dict[str, Any]], stats: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """The detailed rejection rows to store. ``sampled``: per strategy, primary reason
+        (the code of the first funnel gate the evaluation fails) and UTC day at most N rows,
+        at most ceil(N / 24) of them per UTC hour, first come first kept in the replay
+        order. Deterministic (the order is) and resumable (the quotas are checkpointed)."""
+        d = self.diagnostics_settings
+        if d.detail == "full":
+            return rejections
+        if d.detail == "aggregate":
+            return []
+        q = stats.setdefault("rejection_sampling", {}).setdefault(book.cfg.key, {})
+        kept = []
+        for x in rejections:
+            at = x["decision_at"].astimezone(UTC)
+            day, hour = at.strftime("%Y-%m-%d"), at.strftime("%Y-%m-%dT%H")
+            if q.get("day") != day:
+                q["day"], q["day_counts"] = day, {}
+            if q.get("hour") != hour:
+                q["hour"], q["hour_counts"] = hour, {}
+            code = primary_reason(x["reasons"])
+            if (q["day_counts"].get(code, 0) < d.sample_per_reason
+                    and q["hour_counts"].get(code, 0) < d.hourly_quota):  # fmt: skip
+                q["day_counts"][code] = q["day_counts"].get(code, 0) + 1
+                q["hour_counts"][code] = q["hour_counts"].get(code, 0) + 1
+                kept.append(x)
+        return kept
 
     def _commit(
         self,
@@ -249,12 +327,18 @@ class ShadowEngine:
     ) -> None:
         decisions, trades, equity, rejections = [], [], [], []
         opened, marked, closed = [], [], []
+        counters: Counter[tuple[str, int, float, str, str]] = Counter()
         for key, book in books.items():
             out = pending[key]
             decisions += out.decisions
             trades += out.trades
             equity += out.equity
-            rejections += out.rejections
+            kept = self._sample(book, out.rejections, stats)
+            rejections += kept
+            report["rejection_rows_stored"] = report.get("rejection_rows_stored", 0) + len(kept)
+            for at, outcome, reasons in out.evaluations:
+                counters[(book.cfg.strategy_id, book.cfg.version, _bucket(at), outcome,
+                          reasons_key(reasons))] += 1  # fmt: skip
             opened += [(book.cfg.strategy_id, book.cfg.version, p) for p in out.opened]
             closed += out.closed
             marked += [book.positions[pid] for pid in sorted(book.touched) if pid in book.positions]
@@ -269,7 +353,9 @@ class ShadowEngine:
         stats["last_commit_at"] = time.time()
         self.store.commit(
             run_id, decisions=decisions, opened=opened, marked=marked, closed=closed,
-            trades=trades, equity=equity, rejections=rejections, cursor=cursor, processed_until=through,
+            trades=trades, equity=equity, rejections=rejections,
+            counters=[(*k, n) for k, n in sorted(counters.items())],
+            cursor=cursor, processed_until=through,
             books={k: {"strategy_id": b.cfg.strategy_id, "strategy_version": b.cfg.version,
                        "state": b.state()} for k, b in books.items()},
             stats=stats,
@@ -348,18 +434,73 @@ class ShadowEngine:
             "strategies": [self._metrics(run_id, s, asset_id, since, until) for s in strategies],
         }
 
-    def diagnostics(
+    # --- evaluation outcomes (aggregate counters + legacy rows) ---------------------------
+
+    def _outcomes(
         self,
-        run_id: str,
-        strategy_ids: Sequence[str] | None = None,
+        run: dict[str, Any],
+        strategies: Sequence[StrategyConfig],
+        since: datetime | None,
+        until: datetime | None,
         asset_id: str | None = None,
-        since: datetime | None = None,
-        until: datetime | None = None,
-    ) -> dict[str, Any]:
-        """Why each strategy entered or not, from stored rows only (no evidence re-read, no
-        provider request). Counts start when diagnostics began for the run: evaluated =
-        entered + blocked (qualified, stopped by position / risk control) + rejected
-        (entry rules failed). One rejection can carry several reasons."""
+    ) -> tuple[dict[tuple[str, int], list[Combo]], dict[str, Any]]:
+        """Per (strategy, version): exact evaluation outcomes in the window, widened to whole
+        UTC hours (the counters' resolution) and starting no earlier than diagnostics.
+
+        Sources: the aggregate counters for everything processed since they began; the
+        stored rows for what a run processed before that (a diagnostics-era run stored
+        every rejection then). With an asset filter only rows can answer (counters have no
+        asset): exact only if every rejection of the window was stored."""
+        run_id = run["run_id"]
+        marker = self.store.diagnostics_from(run_id)
+        agg = self.store.aggregates_from(run_id)
+        start = datetime.fromisoformat(marker["at"]) if marker else None
+        lo = _hour_floor(since) if since else None
+        hi = _hour_ceil(until) if until else None
+        lo = max(lo, start) if lo and start else lo or start
+        combos: dict[tuple[str, int], list[Combo]] = {}
+
+        def add(sid: str, version: int, outcome: str, reasons: tuple[str, ...], n: int) -> None:
+            combos.setdefault((sid, version), []).append((outcome, reasons, n))
+
+        exact = True
+        if asset_id is not None:
+            for row in self.store.row_outcomes(run_id, lo, hi, asset_id):
+                add(*row)
+            modes = self.store.checkpoint(run_id)["stats"].get("diagnostics_detail_modes", [])
+            exact = agg is None or set(modes) <= {"full"}
+        else:
+            if agg is not None:
+                bucket_lo = _hour_floor(lo) if lo else None
+                for sid, version, outcome, key, n in self.store.funnel_counts(
+                    run_id, bucket_lo, hi
+                ):
+                    add(sid, version, outcome, parse_reasons_key(key), n)
+            if agg is None or agg.get("legacy_rows"):
+                # Pre-counter rows: recorded before the counters began AND decided no
+                # later than the cursor then (both bounds, so no row is counted twice).
+                before = float(agg["recorded_from"]) if agg else None
+                upto = datetime.fromisoformat(agg["at"]).timestamp() if agg else None
+                for row in self.store.row_outcomes(run_id, lo, hi, None, before, upto):
+                    add(*row)
+        keys = {(s.strategy_id, s.version) for s in strategies}
+        meta = {
+            "diagnostics_available_from": marker["at"] if marker else None,
+            "aggregates_available_from": agg["at"] if agg else None,
+            "window": {
+                "since": lo.isoformat() if lo else None,
+                "until": hi.isoformat() if hi else None,
+                "requested_since": since.isoformat() if since else None,
+                "requested_until": until.isoformat() if until else None,
+                "asset": asset_id,
+            },
+            "exact": exact,
+        }
+        return {k: v for k, v in combos.items() if k in keys}, meta
+
+    def _select(
+        self, run_id: str, strategy_ids: Sequence[str] | None
+    ) -> tuple[dict[str, Any], list[StrategyConfig]]:
         run = self.store.run(run_id)
         if run is None:
             raise ShadowError(f"unknown run {run_id}")
@@ -369,52 +510,202 @@ class ShadowEngine:
             if unknown:
                 raise ShadowError(f"run {run_id} has no strategy {', '.join(unknown)}")
             strategies = [s for s in strategies if s.strategy_id in strategy_ids]
-        marker = self.store.diagnostics_from(run_id)
-        start = datetime.fromisoformat(marker["at"]) if marker else None
-        window = max(since, start) if since and start else since or start
-        rejected = self.store.rejection_summary(run_id, None, asset_id, window, until)
-        decided = self.store.decision_counts(run_id, None, asset_id, window, until)
+        return run, strategies
+
+    def funnel(
+        self,
+        run_id: str,
+        strategy_ids: Sequence[str] | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Where each strategy's evaluations drop out, gate by gate in the documented
+        diagnostic order (`funnel.GATES`), plus conditional counts per rule group. Exact:
+        counted from the aggregate counters (and a pre-counter run's full rows), never from
+        sampled rows. No evidence re-read, no provider request."""
+        run, strategies = self._select(run_id, strategy_ids)
+        combos, meta = self._outcomes(run, strategies, since, until)
+        if meta["diagnostics_available_from"] is None:
+            combos = {}  # a pre-diagnostics run: rejections were never recorded
+        out = [{"strategy": cfg.key, "name": cfg.name,
+                **funnel(cfg, combos.get((cfg.strategy_id, cfg.version), []))}
+               for cfg in strategies]  # fmt: skip
+        widened = (since is not None and since != _hour_floor(since)) or (
+            until is not None and until != _hour_ceil(until)
+        )
+        return {
+            "label": NOT_REAL_PROFIT,
+            "run_id": run_id,
+            **meta,
+            "gate_order": [g.name for g in GATES],
+            "note": (
+                "Sequential funnel in a fixed diagnostic order: each rejected evaluation "
+                "counts as failing only the FIRST gate one of its reasons belongs to (the "
+                "strategy itself checks every rule). pct_of_previous = passed / input; "
+                "pct_of_evaluated = passed / TOTAL_EVALUATED. Conditional checks count each "
+                "gate on its own among evaluations passing every earlier rule group."
+                + (
+                    " The window was widened to whole UTC hours (counter resolution)."
+                    if widened
+                    else ""
+                )
+                + (
+                    ""
+                    if meta["diagnostics_available_from"]
+                    else " No diagnostics yet for this run (earlier evaluations are not "
+                    "reconstructed)."
+                )
+            ),  # fmt: skip
+            "strategies": out,
+        }
+
+    def diagnostics(
+        self,
+        run_id: str,
+        strategy_ids: Sequence[str] | None = None,
+        asset_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Why each strategy entered or not (exact counts, as `funnel`). Counts start when
+        diagnostics began for the run: evaluated = entered + blocked (qualified, stopped by
+        position / risk control) + rejected (entry rules failed). One rejection can carry
+        several reasons."""
+        run, strategies = self._select(run_id, strategy_ids)
+        combos, meta = self._outcomes(run, strategies, since, until, asset_id)
         books = self.store.checkpoint(run_id)["books"]
         out = []
         for cfg in strategies:
-            key = (cfg.strategy_id, cfg.version)
-            d = decided.get(key, {})
-            r = rejected.get(key, {"rejected": 0, "reasons": {}})
-            n_rej = r["rejected"]
-            entered, blocked = d.get("ENTER", 0), d.get("NO_ACTION", 0)
-            reasons = sorted(r["reasons"].items(), key=lambda kv: (-kv[1], kv[0]))
+            f = funnel(cfg, combos.get((cfg.strategy_id, cfg.version), []))
+            n_rej = f["rejected"]
             counts = (books.get(cfg.key) or {}).get("state", {}).get("counts", {})
             legacy = {k.removeprefix("no_entry:"): v for k, v in sorted(counts.items())
                       if k.startswith("no_entry:")}  # fmt: skip
             out.append({
                 "strategy": cfg.key, "name": cfg.name,
-                "evaluated": entered + blocked + n_rej, "entered": entered,
-                "blocked": blocked, "rejected": n_rej, "held": d.get("HOLD", 0),
+                "evaluated": f["evaluated"], "entered": f["entered"],
+                "blocked": f["blocked"], "rejected": n_rej, "held": f["held"],
                 "reasons": {code: {"count": n, "pct_of_rejected": round(100 * n / n_rej, 1)}
-                            for code, n in reasons},
+                            for code, n in f["reasons"].items()},
                 # Counted by the version before diagnostics: the FIRST failed rule only, with
                 # v1 codes, over the whole run (not filtered). Never reconstructed.
                 "before_diagnostics_first_reason_only": legacy or None,
             })  # fmt: skip
+        marker = meta["diagnostics_available_from"]
+        note = (
+            "evaluated = entered + blocked + rejected, counted from when diagnostics "
+            "began; one rejection may carry several reasons, so reason counts can exceed "
+            "rejected. Earlier evaluations are not reconstructed."
+            if marker
+            else "no rejection diagnostics yet: this run has not been processed by a "
+            "diagnostics-enabled version (earlier evaluations are not reconstructed)"
+        )
+        if not meta["exact"]:
+            note += (
+                " Asset filter: counted from stored rows, and this run stored only a "
+                "sample of its rejections since aggregate counters began: rejected counts "
+                "are a lower bound."
+            )
         return {
             "label": NOT_REAL_PROFIT,
             "run_id": run_id,
-            "diagnostics_available_from": marker["at"] if marker else None,
-            "diagnostics_version": marker["diagnostics_version"] if marker else None,
-            "window": {
-                "since": window.isoformat() if window else None,
-                "until": until.isoformat() if until else None,
-                "asset": asset_id,
-            },  # fmt: skip
-            "note": (
-                "evaluated = entered + blocked + rejected, counted from when diagnostics "
-                "began; one rejection may carry several reasons, so reason counts can exceed "
-                "rejected. Earlier evaluations are not reconstructed."
-                if marker
-                else "no rejection diagnostics yet: this run has not been processed by a "
-                "diagnostics-enabled version (earlier evaluations are not reconstructed)"
+            "diagnostics_version": (self.store.diagnostics_from(run_id) or {}).get(
+                "diagnostics_version"
             ),
+            **meta,
+            "note": note,
             "strategies": out,
+        }
+
+    def storage(self) -> dict[str, Any]:
+        """Shadow database size, rows per table, detailed vs aggregate diagnostics, the
+        latest day's growth and the diagnostics storage settings (read-only)."""
+        path = Path(self.store.path).expanduser()
+        files = {
+            name: p.stat().st_size
+            for name, p in (("db", path), ("wal", Path(f"{path}-wal")),
+                            ("shm", Path(f"{path}-shm")))
+            if p.exists()
+        }  # fmt: skip
+        st = self.store.storage()
+        tables = st["tables"]
+        growth: dict[str, Any] = {}
+        total_day = 0.0
+        known = True
+        for table, info in tables.items():
+            span = info.get("last_day_span_hours")
+            if not span or span < 1.0:
+                continue
+            rows_day = info["rows_last_day"] * 24.0 / span
+            size = info.get("bytes") or info.get("bytes_estimated")
+            per_row = size / info["rows"] if size and info["rows"] else None
+            est = rows_day * per_row if per_row is not None else None
+            growth[table] = {"rows_per_day": round(rows_day),
+                             "bytes_per_row": round(per_row) if per_row else None,
+                             "mb_per_day": round(est / 1e6, 3) if est is not None else None}  # fmt: skip
+            if est is None:
+                known = False
+            else:
+                total_day += est
+        try:
+            disk = shutil.disk_usage(path.parent)
+            volume: dict[str, Any] | None = {
+                "path": str(path.parent), "total_mb": round(disk.total / 1e6, 1),
+                "used_mb": round(disk.used / 1e6, 1), "free_mb": round(disk.free / 1e6, 1),
+            }  # fmt: skip
+        except OSError:
+            volume, disk = None, None
+        runs = []
+        for r in self.store.runs():
+            agg = self.store.aggregates_from(r["run_id"])
+            stats = self.store.checkpoint(r["run_id"])["stats"]
+            before = float(agg["recorded_from"]) if agg else None
+            runs.append({
+                "run_id": r["run_id"],
+                "rejection_rows": self.store.rejection_rows(r["run_id"]),
+                # Rows stored before the run's counters began: the only record of those
+                # evaluations, never expired by retention.
+                "rejection_rows_protected": self.store.rejection_rows(r["run_id"], before)
+                if agg is None or agg.get("legacy_rows") else 0,
+                "aggregates_available_from": agg["at"] if agg else None,
+                "diagnostics_detail_modes": stats.get("diagnostics_detail_modes", []),
+            })  # fmt: skip
+        d = self.diagnostics_settings
+        total_mb = sum(files.values()) / 1e6
+        return {
+            "label": NOT_REAL_PROFIT,
+            "shadow_db": str(path),
+            "files_bytes": files,
+            "size_mb": round(total_mb, 3),
+            "free_pages_mb": round(st["free_pages"] * st["page_size"] / 1e6, 3),
+            "volume": volume,
+            "rows": {t: i["rows"] for t, i in tables.items()},
+            "rejection_detail_rows": tables.get("shadow_rejections", {}).get("rows", 0),
+            "aggregate_counter_rows": tables.get("shadow_funnel_counts", {}).get("rows", 0),
+            "tables": tables,
+            "estimated_growth": {
+                "basis": "rows of each table's latest processed day (by data time), scaled "
+                "to 24h, times its average bytes per row",
+                "tables": growth,
+                "rejection_detail_mb_per_day": (growth.get("shadow_rejections") or {}).get(
+                    "mb_per_day"
+                ),
+                "aggregate_counters_mb_per_day": (growth.get("shadow_funnel_counts") or {}).get(
+                    "mb_per_day"
+                ),
+                "total_mb_per_day": round(total_day / 1e6, 3) if known and growth else None,
+                "days_until_volume_full": round(disk.free / total_day, 1)
+                if disk is not None and known and total_day > 0
+                else None,
+            },  # fmt: skip
+            "settings": {
+                "diagnostics_detail": d.detail,
+                "sample_per_reason_per_day": d.sample_per_reason,
+                "sample_per_reason_per_hour": d.hourly_quota,
+                "retention_enabled": d.retention_days is not None,
+                "retention_days": d.retention_days,
+            },
+            "runs": runs,
         }
 
     def status(self) -> dict[str, Any]:
@@ -448,6 +739,11 @@ class ShadowEngine:
             "strategies": [s.key for s in self.store.strategies()],
             "runs": runs,
             "rows": self.store.counts(),
+            "diagnostics_storage": {
+                "detail": self.diagnostics_settings.detail,
+                "sample_per_reason": self.diagnostics_settings.sample_per_reason,
+                "retention_days": self.diagnostics_settings.retention_days,
+            },
         }
 
 

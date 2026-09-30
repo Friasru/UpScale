@@ -107,9 +107,14 @@ class Output:
     trades: list[dict[str, Any]] = field(default_factory=list)
     equity: list[dict[str, Any]] = field(default_factory=list)
     rejections: list[dict[str, Any]] = field(default_factory=list)
+    # One (decision time, outcome, reasons) per Scout evaluation, for the exact aggregate
+    # counters: ENTERED, BLOCKED (reasons: the control), REJECTED (reasons: every failed
+    # rule) or HELD (asset already held: not evaluated).
+    evaluations: list[tuple[datetime, str, tuple[str, ...]]] = field(default_factory=list)
 
     def extend(self, other: "Output") -> None:
         self.rejections += other.rejections
+        self.evaluations += other.evaluations
         self.decisions += other.decisions
         self.opened += other.opened
         self.closed += other.closed
@@ -313,6 +318,7 @@ class Book:
         held = [p for p in self.positions.values() if p.asset_id == s.asset_id]
         risk = self.cfg.risk
         if held and not risk.allow_scaling:
+            out.evaluations.append((s.decision_at, "HELD", ()))
             for p in held:
                 self._count("decision:HOLD")
                 out.decisions.append(self._decision(
@@ -326,6 +332,7 @@ class Book:
             # the book (no sequence number, no state besides the counter).
             self._count(f"rejected:{reasons[0]}")
             out.rejections.append(self._rejection(s, reasons, detail))
+            out.evaluations.append((s.decision_at, "REJECTED", tuple(reasons)))
             return out
         assert price is not None  # _evaluate requires the exact-pool price
         blocked = self._risk_block(s, len(held))
@@ -336,12 +343,14 @@ class Book:
             # Qualified by the signal rules but stopped by position / duplicate / risk
             # control: recorded, so suppressed repeats stay visible.
             self._count(f"blocked:{blocked}")
+            out.evaluations.append((s.decision_at, "BLOCKED", (blocked,)))
             out.decisions.append(self._decision(
                 "NO_ACTION", s.decision_at, s.asset_id, f"qualified but blocked: {blocked}",
                 scout=s, analyze=self._analyze_for(s, analyze),
             ))  # fmt: skip
             return out
         self._enter(out, s, price, size, analyze)
+        out.evaluations.append((s.decision_at, "ENTERED", ()))
         return out
 
     # --- entries ----------------------------------------------------------------------------

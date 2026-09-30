@@ -10,6 +10,8 @@ python -m upscale.services.shadow decisions [--action ENTER]
 python -m upscale.services.shadow metrics
 python -m upscale.services.shadow diagnostics [--strategy scout_technical --strategy ...] [--json]
 python -m upscale.services.shadow rejections [--reason TECHNICAL_NOT_AVAILABLE]
+python -m upscale.services.shadow funnel [--run ...] [--strategy scout_technical ...] [--json]
+python -m upscale.services.shadow storage [--json]
 
 Filters: --run, --strategy, --asset, --since, --until.
 """
@@ -26,8 +28,10 @@ from upscale.services.evidence_archive.store import EvidenceStore, EvidenceStore
 from upscale.services.shadow.config import (
     CLEAN_DATA_CUTOFF,
     DEFAULT_RUN_ID,
+    DETAIL_MODES,
     default_evidence_db,
     default_shadow_db,
+    load_diagnostics_settings,
     parse_timestamp,
 )
 from upscale.services.shadow.engine import ShadowEngine, ShadowError, resolve_run
@@ -65,6 +69,10 @@ def parser() -> argparse.ArgumentParser:
                    help="strategy id (repeatable; default: every registered strategy)")  # fmt: skip
     r.add_argument("--allow-contaminated", action="store_true",
                    help="allow --since before the clean-data cutoff (labeled research run)")  # fmt: skip
+    r.add_argument("--diagnostics-detail", choices=DETAIL_MODES, default=None,
+                   help="rejection rows to store for this step: full (one-off research), "
+                        "sampled (default, UPSCALE_SHADOW_DIAGNOSTICS_DETAIL) or aggregate "
+                        "(counters only); counts are exact in every mode")  # fmt: skip
     sub.add_parser("status")
     pos = sub.add_parser("positions")
     _filters(pos)
@@ -88,7 +96,88 @@ def parser() -> argparse.ArgumentParser:
     _filters(rj)
     rj.add_argument("--reason", default=None, help="only rows with this reason code")
     rj.add_argument("--limit", type=int, default=200)
+    fn = sub.add_parser("funnel", help="sequential entry funnel and conditional counts")
+    fn.add_argument("--run", default=None, help=f"run id (default: {DEFAULT_RUN_ID})")
+    fn.add_argument("--strategy", action="append", default=None, help="repeatable")
+    fn.add_argument("--since", type=_timestamp, default=None,
+                    help="ISO-8601, inclusive (whole UTC hours)")  # fmt: skip
+    fn.add_argument("--until", type=_timestamp, default=None,
+                    help="ISO-8601, exclusive (whole UTC hours)")  # fmt: skip
+    fn.add_argument("--json", action="store_true", help="print JSON")
+    sg = sub.add_parser("storage", help="shadow database size and diagnostics storage")
+    sg.add_argument("--json", action="store_true", help="print JSON")
     return p
+
+
+def _num(v: float | None, suffix: str = "%", digits: int = 1) -> str:
+    return "-" if v is None else f"{v:.{digits}f}{suffix}"
+
+
+def _funnel_text(d: dict[str, Any]) -> str:
+    w = d["window"]
+    lines = [
+        f"run {d['run_id']}: diagnostics from {d['diagnostics_available_from'] or 'NOT AVAILABLE'}"
+        f", aggregate counters from {d['aggregates_available_from'] or 'not yet'}",
+        f"window: {w['since'] or 'start'} .. {w['until'] or 'now'}",
+        d["note"],
+    ]
+    for s in d["strategies"]:
+        lines += ["", f"{s['strategy']}  ({s['name']})",
+                  f"  {'gate':<34}{'input':>8}{'passed':>8}{'failed':>8}"
+                  f"{'% prev':>9}{'% total':>9}"]  # fmt: skip
+        for row in s["funnel"]:
+            lines.append(
+                f"  {row['gate']:<34}{row['input']:>8}{row['passed']:>8}{row['failed']:>8}"
+                f"{_num(row['pct_of_previous']):>9}{_num(row['pct_of_evaluated']):>9}"
+            )
+            for code, n in (row.get("failed_by_reason") or {}).items():
+                lines.append(f"    - {code}: {n}")
+        lines.append(f"  held (asset already open, not evaluated): {s['held']}")
+        for c in s["conditional"]:
+            if c["among"] == "all evaluated":
+                continue
+            lines.append(f"  among candidates {c['among']} ({c['base']}):")
+            for ch in c["checks"]:
+                given = f" (given {ch['given']})" if "given" in ch else ""
+                lines.append(f"    {ch['gate']}: {ch['passed']}/{ch['of']} "
+                             f"({_num(ch['pct'])}){given}")  # fmt: skip
+            a = c["all_group_rules"]
+            lines.append(f"    all {c['group']} rules: {a['passed']}/{a['of']} ({_num(a['pct'])})")
+    return "\n".join(lines)
+
+
+def _storage_text(d: dict[str, Any]) -> str:
+    g, st = d["estimated_growth"], d["settings"]
+    vol = d["volume"]
+    lines = [
+        f"shadow db: {d['shadow_db']}",
+        f"size: {d['size_mb']:.2f} MB (reusable free pages {d['free_pages_mb']:.2f} MB)",
+        f"volume: {vol['used_mb']:.0f} / {vol['total_mb']:.0f} MB used, "
+        f"{vol['free_mb']:.0f} MB free" if vol else "volume: unknown",
+        "rows by table:",
+        *[f"  {t}: {n}" for t, n in d["rows"].items()],
+        f"rejection detail rows: {d['rejection_detail_rows']}",
+        f"aggregate counter rows: {d['aggregate_counter_rows']}",
+        f"estimated growth ({g['basis']}):",
+        f"  rejection detail: {_num(g['rejection_detail_mb_per_day'], ' MB/day', 3)}",
+        f"  aggregate counters: {_num(g['aggregate_counters_mb_per_day'], ' MB/day', 3)}",
+        f"  all tables: {_num(g['total_mb_per_day'], ' MB/day', 3)}"
+        + (f", volume full in ~{g['days_until_volume_full']:.0f} days"
+           if g["days_until_volume_full"] is not None else ""),
+        f"diagnostics detail: {st['diagnostics_detail']} (sample {st['sample_per_reason_per_day']}"
+        f"/strategy/primary reason/UTC day, {st['sample_per_reason_per_hour']}/hour)",
+        "retention: " + (f"enabled, {st['retention_days']:g} days (sampled rows only)"
+                         if st["retention_enabled"] else "disabled"),
+        "runs:",
+    ]  # fmt: skip
+    for r in d["runs"]:
+        lines.append(
+            f"  {r['run_id']}: {r['rejection_rows']} rejection rows "
+            f"({r['rejection_rows_protected']} protected, pre-counter), counters from "
+            f"{r['aggregates_available_from'] or 'not yet'}, modes "
+            f"{','.join(r['diagnostics_detail_modes']) or '-'}"
+        )
+    return "\n".join(lines)
 
 
 def _diagnostics_text(d: dict[str, Any]) -> str:
@@ -122,7 +211,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     store = ShadowStore(args.db or default_shadow_db())
     evidence_path = args.evidence_db or default_evidence_db()
     evidence = EvidenceStore(evidence_path, read_only=True)
-    engine = ShadowEngine(store, evidence)
+    detail = getattr(args, "diagnostics_detail", None)
+    engine = ShadowEngine(store, evidence, diagnostics=load_diagnostics_settings(detail))
     try:
         if args.command == "init":
             for key, state in engine.init_baselines().items():
@@ -139,9 +229,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print(engine.run(args.run))
         elif args.command == "status":
             _print(engine.status())
+        elif args.command == "storage":
+            d = engine.storage()
+            print(json.dumps(d, indent=2, default=str) if args.json else _storage_text(d))
         else:
             run_id = resolve_run(store, args.run)
-            common = {"run_id": run_id, "strategy_id": args.strategy, "asset_id": args.asset,
+            common = {"run_id": run_id, "strategy_id": args.strategy, "asset_id": getattr(args, "asset", None),
                       "since": args.since, "until": args.until}  # fmt: skip
             if args.command == "positions":
                 status = "OPEN" if args.open else "CLOSED" if args.closed else None
@@ -153,6 +246,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.command == "diagnostics":
                 d = engine.diagnostics(run_id, args.strategy, args.asset, args.since, args.until)
                 print(json.dumps(d, indent=2, default=str) if args.json else _diagnostics_text(d))
+            elif args.command == "funnel":
+                d = engine.funnel(run_id, args.strategy, args.since, args.until)
+                print(json.dumps(d, indent=2, default=str) if args.json else _funnel_text(d))
             elif args.command == "rejections":
                 _print(readable(store.rejections(reason=args.reason, limit=args.limit, **common)))
             elif args.command == "metrics":

@@ -2,7 +2,7 @@
 database, on Railway ``/data/shadow.sqlite3``). Separate from Scout, outcome, evidence,
 replay and calibration databases: nothing here is read by production decisions.
 
-Tables (schema version 2; a version 1 file gains ``shadow_rejections`` in place):
+Tables (schema version 3; an older file gains the newer tables in place, no row changes):
 
 * ``shadow_strategies``: every registered (strategy_id, version), its rules and hash.
   Append-only: changed rules need a new version.
@@ -23,8 +23,18 @@ Tables (schema version 2; a version 1 file gains ``shadow_rejections`` in place)
   values the rules read, and the evidence fingerprints. Diagnostics only (never a
   decision). Append-only. Qualified entries stopped by position / risk control stay
   NO_ACTION decisions, as in v1.
+  From v3 these rows are optional detail (full, sampled or none: `DiagnosticsSettings`);
+  rows may only be deleted by explicitly enabled retention, and only sampled rows stored
+  since the run's aggregate counters began (a trigger enforces it). Never updated.
+* ``shadow_funnel_counts`` (v3): exact counters per run, strategy, UTC hour, outcome
+  (ENTERED / BLOCKED / REJECTED / HELD) and reason set. Every funnel and diagnostics count
+  comes from them; counters only ever grow and are written in the same transaction as the
+  checkpoint (a resume never double-counts). Never deleted.
+* ``shadow_retention_window`` (v3): empty except inside a retention transaction; it tells
+  the delete trigger which rejection rows that transaction may remove.
 * ``shadow_meta``: schema metadata, and per run the time from which rejection
-  diagnostics exist (``diagnostics_from:<run_id>``, written once).
+  diagnostics exist (``diagnostics_from:<run_id>``) and from which aggregate counters
+  exist (``aggregates_from:<run_id>``), each written once.
 
 Immutability is enforced by triggers, not only by the code.
 """
@@ -41,8 +51,10 @@ from typing import Any
 from upscale.services.shadow.book import Position
 from upscale.services.shadow.config import StrategyConfig
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DIAGNOSTICS_VERSION = 1
+AGGREGATES_VERSION = 1
+BUCKET_SECONDS = 3600  # aggregate counters are per UTC hour
 APPEND_ONLY = (
     "shadow_strategies", "shadow_runs", "shadow_decisions", "shadow_trades", "shadow_equity",
     "shadow_metrics", "shadow_rejections",
@@ -214,6 +226,21 @@ CREATE TABLE IF NOT EXISTS shadow_rejections (
 );
 CREATE INDEX IF NOT EXISTS shadow_rejections_by_run
     ON shadow_rejections (run_id, strategy_id, decision_at);
+CREATE TABLE IF NOT EXISTS shadow_funnel_counts (
+    run_id TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    strategy_version INTEGER NOT NULL,
+    bucket_at REAL NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('ENTERED', 'BLOCKED', 'REJECTED', 'HELD')),
+    reasons TEXT NOT NULL,
+    count INTEGER NOT NULL CHECK (count > 0),
+    PRIMARY KEY (run_id, strategy_id, strategy_version, bucket_at, outcome, reasons)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS shadow_retention_window (
+    run_id TEXT NOT NULL,
+    cutoff REAL NOT NULL,
+    recorded_from REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS shadow_checkpoints (
     run_id TEXT PRIMARY KEY REFERENCES shadow_runs(run_id),
     cursor_at REAL NOT NULL,
@@ -231,10 +258,33 @@ def _triggers() -> str:
     for table in APPEND_ONLY:
         out.append(
             f"CREATE TRIGGER IF NOT EXISTS {table}_no_update BEFORE UPDATE ON {table} "
-            f"BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END;\n"
-            f"CREATE TRIGGER IF NOT EXISTS {table}_no_delete BEFORE DELETE ON {table} "
             f"BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END;"
         )
+        if table != "shadow_rejections":
+            out.append(
+                f"CREATE TRIGGER IF NOT EXISTS {table}_no_delete BEFORE DELETE ON {table} "
+                f"BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END;"
+            )
+    # v3: a rejection row can only be deleted by retention, inside its transaction, and
+    # only within the window that transaction declared (replaces v2's blanket refusal).
+    out.append(
+        "DROP TRIGGER IF EXISTS shadow_rejections_no_delete;\n"
+        "CREATE TRIGGER IF NOT EXISTS shadow_rejections_retention_only BEFORE DELETE ON "
+        "shadow_rejections WHEN NOT EXISTS (SELECT 1 FROM shadow_retention_window w "
+        "WHERE w.run_id = OLD.run_id AND OLD.decision_at < w.cutoff "
+        "AND OLD.recorded_at >= w.recorded_from) BEGIN SELECT RAISE(ABORT, "
+        "'shadow_rejections is append-only (retention may only delete expired sampled rows)'); "
+        "END;"
+    )
+    key = ("run_id", "strategy_id", "strategy_version", "bucket_at", "outcome", "reasons")
+    moved = " OR ".join(f"NEW.{c} IS NOT OLD.{c}" for c in key)
+    out.append(
+        "CREATE TRIGGER IF NOT EXISTS shadow_funnel_counts_grow_only BEFORE UPDATE ON "
+        f"shadow_funnel_counts WHEN NEW.count < OLD.count OR {moved} "
+        "BEGIN SELECT RAISE(ABORT, 'shadow funnel counters only grow'); END;\n"
+        "CREATE TRIGGER IF NOT EXISTS shadow_funnel_counts_no_delete BEFORE DELETE ON "
+        "shadow_funnel_counts BEGIN SELECT RAISE(ABORT, 'shadow funnel counters are kept'); END;"
+    )
     changed = " OR ".join(f"NEW.{c} IS NOT OLD.{c}" for c in _POSITION_ENTRY)
     out.append(
         "CREATE TRIGGER IF NOT EXISTS shadow_positions_entry_frozen BEFORE UPDATE ON "
@@ -465,6 +515,7 @@ class ShadowStore:
         trades: Sequence[dict[str, Any]],
         equity: Sequence[dict[str, Any]],
         rejections: Sequence[dict[str, Any]] = (),
+        counters: Sequence[tuple[str, int, float, str, str, int]] = (),
         cursor: tuple[float, int],
         processed_until: float,
         books: dict[str, Any],
@@ -562,6 +613,14 @@ class ShadowStore:
                       json.dumps(x["fingerprints"], default=str), DIAGNOSTICS_VERSION, now)
                      for x in rejections],
                 )  # fmt: skip
+                # (strategy_id, version, bucket_at, outcome, reasons_key, count)
+                db.executemany(
+                    "INSERT INTO shadow_funnel_counts (run_id, strategy_id, strategy_version, "
+                    "bucket_at, outcome, reasons, count) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (run_id, strategy_id, strategy_version, bucket_at, outcome, "
+                    "reasons) DO UPDATE SET count = count + excluded.count",
+                    [(run_id, *c) for c in counters],
+                )
                 cur = db.execute(
                     "UPDATE shadow_checkpoints SET cursor_at = ?, cursor_id = ?, "
                     "processed_until = ?, books_json = ?, stats_json = ?, updated_at = ? "
@@ -742,54 +801,196 @@ class ShadowStore:
             r["observed"] = json.loads(r.pop("observed_json"))
         return rows
 
-    def rejection_summary(
-        self,
-        run_id: str,
-        strategy_id: str | None = None,
-        asset_id: str | None = None,
-        since: datetime | None = None,
-        until: datetime | None = None,
-    ) -> dict[tuple[str, int], dict[str, Any]]:
-        """Per (strategy, version): rejected evaluations and how often each reason occurs."""
-        if not self._has("shadow_rejections"):
-            return {}
-        where, params = self._where(run_id, strategy_id, asset_id, "decision_at", since, until)
-        out: dict[tuple[str, int], dict[str, Any]] = {}
+    # --- aggregate counters (exact funnel / diagnostics counts) --------------------------------
+
+    def mark_aggregates(self, run_id: str, at: datetime, legacy: bool) -> None:
+        """Record, once, that aggregate counters exist for `run_id` from `at` on. Rows
+        recorded before this moment (``recorded_at < recorded_from``) are the run's legacy
+        full rejection rows: counts before it come from them, never from the counters.
+        `legacy` says whether the run had processed anything before."""
+        self._write_guard()
+        body = json.dumps({"at": at.isoformat(), "recorded_from": time.time(),
+                           "legacy_rows": legacy, "aggregates_version": AGGREGATES_VERSION})  # fmt: skip
         with self._lock:
             db = self._db()
-            for sid, version, n in db.execute(
-                f"SELECT strategy_id, strategy_version, COUNT(*) FROM shadow_rejections "
-                f"WHERE {where} GROUP BY strategy_id, strategy_version",
-                params,
-            ):
-                out[(sid, version)] = {"rejected": n, "reasons": {}}
-            for sid, version, code, n in db.execute(
-                f"SELECT strategy_id, strategy_version, j.value, COUNT(*) FROM shadow_rejections, "
-                f"json_each(reasons_json) j WHERE {where} "
-                "GROUP BY strategy_id, strategy_version, j.value",
-                params,
-            ):
-                out[(sid, version)]["reasons"][code] = n
-        return out
+            with db:
+                db.execute(
+                    "INSERT OR IGNORE INTO shadow_meta (key, value) VALUES (?, ?)",
+                    (f"aggregates_from:{run_id}", body),
+                )
 
-    def decision_counts(
+    def aggregates_from(self, run_id: str) -> dict[str, Any] | None:
+        if not self._has("shadow_meta"):
+            return None
+        with self._lock:
+            row = (
+                self._db()
+                .execute(
+                    "SELECT value FROM shadow_meta WHERE key = ?", (f"aggregates_from:{run_id}",)
+                )
+                .fetchone()
+            )
+        return json.loads(row[0]) if row else None
+
+    def funnel_counts(
+        self, run_id: str, since: datetime | None = None, until: datetime | None = None
+    ) -> list[tuple[str, int, str, str, int]]:
+        """(strategy_id, version, outcome, reasons_key, count) summed over the whole-hour
+        buckets in [since, until)."""
+        if not self._has("shadow_funnel_counts"):
+            return []
+        where, params = self._where(run_id, None, None, "bucket_at", since, until)
+        with self._lock:
+            return [
+                (r[0], int(r[1]), r[2], r[3], int(r[4]))
+                for r in self._db().execute(
+                    "SELECT strategy_id, strategy_version, outcome, reasons, SUM(count) "
+                    f"FROM shadow_funnel_counts WHERE {where} "
+                    "GROUP BY strategy_id, strategy_version, outcome, reasons",
+                    params,
+                )
+            ]
+
+    def row_outcomes(
         self,
         run_id: str,
-        strategy_id: str | None = None,
-        asset_id: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
-    ) -> dict[tuple[str, int], dict[str, int]]:
-        where, params = self._where(run_id, strategy_id, asset_id, "decision_at", since, until)
-        out: dict[tuple[str, int], dict[str, int]] = {}
+        asset_id: str | None = None,
+        recorded_before: float | None = None,
+        decided_until: float | None = None,
+    ) -> list[tuple[str, int, str, tuple[str, ...], int]]:
+        """Evaluation outcomes rebuilt from stored rows (rejections and ENTER / NO_ACTION /
+        HOLD decisions): exact for the period a run stored every rejection (before its
+        aggregate counters began), a sample after that."""
+        where, params = self._where(run_id, None, asset_id, "decision_at", since, until)
+        if recorded_before is not None:
+            where += " AND recorded_at < ?"
+            params.append(recorded_before)
+        if decided_until is not None:
+            where += " AND decision_at <= ?"
+            params.append(decided_until)
+        out: dict[tuple[str, int, str, tuple[str, ...]], int] = {}
         with self._lock:
-            for sid, version, action, n in self._db().execute(
-                f"SELECT strategy_id, strategy_version, action, COUNT(*) FROM shadow_decisions "
-                f"WHERE {where} GROUP BY strategy_id, strategy_version, action",
+            db = self._db()
+            if self._table_exists(db, "shadow_rejections"):
+                for sid, version, reasons, n in db.execute(
+                    "SELECT strategy_id, strategy_version, reasons_json, COUNT(*) "
+                    f"FROM shadow_rejections WHERE {where} "
+                    "GROUP BY strategy_id, strategy_version, reasons_json",
+                    params,
+                ):
+                    key = (sid, int(version), "REJECTED", tuple(sorted(set(json.loads(reasons)))))
+                    out[key] = out.get(key, 0) + int(n)
+            for sid, version, action, reason, n in db.execute(
+                "SELECT strategy_id, strategy_version, action, reason, COUNT(*) "
+                f"FROM shadow_decisions WHERE {where} AND action IN ('ENTER', 'NO_ACTION', "
+                "'HOLD') GROUP BY strategy_id, strategy_version, action, reason",
                 params,
             ):
-                out.setdefault((sid, version), {})[action] = n
-        return out
+                if action == "ENTER":
+                    key = (sid, int(version), "ENTERED", ())
+                elif action == "HOLD":
+                    key = (sid, int(version), "HELD", ())
+                else:
+                    key = (sid, int(version), "BLOCKED",
+                           (str(reason).removeprefix("qualified but blocked: "),))  # fmt: skip
+                out[key] = out.get(key, 0) + int(n)
+        return [(*k, n) for k, n in sorted(out.items())]
+
+    def rejection_rows(self, run_id: str, recorded_before: float | None = None) -> int:
+        if not self._has("shadow_rejections"):
+            return 0
+        with self._lock:
+            return int(
+                self._db()
+                .execute(
+                    "SELECT COUNT(*) FROM shadow_rejections WHERE run_id = ? "
+                    "AND (? IS NULL OR recorded_at < ?)",
+                    (run_id, recorded_before, recorded_before),
+                )
+                .fetchone()[0]
+            )
+
+    # --- retention (detailed rejection rows only) -------------------------------------------
+
+    def prune_rejections(self, run_id: str, cutoff: datetime, recorded_from: float) -> int:
+        """Delete `run_id`'s rejection rows decided before `cutoff` and recorded since
+        `recorded_from` (the run's aggregate counters began). Nothing else is ever
+        deleted: the trigger refuses any other row, and no other table has a path here."""
+        self._write_guard()
+        with self._lock:
+            db = self._db()
+            with db:
+                db.execute(
+                    "INSERT INTO shadow_retention_window (run_id, cutoff, recorded_from) "
+                    "VALUES (?, ?, ?)",
+                    (run_id, cutoff.timestamp(), recorded_from),
+                )
+                n = db.execute(
+                    "DELETE FROM shadow_rejections WHERE run_id = ? AND decision_at < ? "
+                    "AND recorded_at >= ?",
+                    (run_id, cutoff.timestamp(), recorded_from),
+                ).rowcount
+                db.execute("DELETE FROM shadow_retention_window")
+        return int(n)
+
+    # --- storage ----------------------------------------------------------------------------
+
+    @staticmethod
+    def _table_exists(db: sqlite3.Connection, table: str) -> bool:
+        return (
+            db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+            ).fetchone()
+            is not None
+        )
+
+    def storage(self) -> dict[str, Any]:
+        """Database size and, per table, rows, bytes (when SQLite has ``dbstat``) and the
+        rows of the latest processed day (by the table's data time)."""
+        with self._lock:
+            db = self._db()
+            page = int(db.execute("PRAGMA page_size").fetchone()[0])
+            pages = int(db.execute("PRAGMA page_count").fetchone()[0])
+            free = int(db.execute("PRAGMA freelist_count").fetchone()[0])
+            sizes: dict[str, int] | None = None
+            try:
+                owner = {n: t for n, t in db.execute(
+                    "SELECT name, tbl_name FROM sqlite_master WHERE type IN ('table', 'index')")}  # fmt: skip
+                sizes = {}
+                for name, size in db.execute("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name"):
+                    table = owner.get(name, name)
+                    sizes[table] = sizes.get(table, 0) + int(size)
+            except sqlite3.Error:
+                sizes = None  # this SQLite build has no dbstat
+            tables: dict[str, dict[str, Any]] = {}
+            for table, col in STORAGE_TABLES.items():
+                if not self._table_exists(db, table):
+                    continue
+                rows = int(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                info: dict[str, Any] = {"rows": rows,
+                                        "bytes": sizes.get(table) if sizes is not None else None}  # fmt: skip
+                if col is not None and rows:
+                    lo, hi = db.execute(f"SELECT MIN({col}), MAX({col}) FROM {table}").fetchone()
+                    span = min(86400.0, float(hi) - float(lo))
+                    recent = int(db.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE {col} > ?", (float(hi) - span,)
+                    ).fetchone()[0])  # fmt: skip
+                    info |= {"oldest": _utc(lo), "newest": _utc(hi),
+                             "rows_last_day": recent, "last_day_span_hours": round(span / 3600, 2)}  # fmt: skip
+                tables[table] = info
+            if "shadow_rejections" in tables and tables["shadow_rejections"]["bytes"] is None:
+                # Without dbstat: the stored text plus a fixed per-row overhead.
+                est = db.execute(
+                    "SELECT SUM(length(rejection_id) + length(run_id) + length(strategy_id) + "
+                    "length(asset_id) + ifnull(length(pool), 0) + length(scout_record_id) + "
+                    "length(reasons_json) + length(observed_json) + length(fingerprints_json) + "
+                    "120) FROM shadow_rejections"
+                ).fetchone()[0]
+                tables["shadow_rejections"]["bytes_estimated"] = int(est or 0)
+        return {"page_size": page, "pages": pages, "free_pages": free, "tables": tables,
+                "dbstat": sizes is not None}  # fmt: skip
 
     def counts(self) -> dict[str, int]:
         with self._lock:
@@ -798,10 +999,18 @@ class ShadowStore:
                 t: int(db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (t,)).fetchone()
                 else 0
-                for t in ("shadow_strategies", "shadow_runs", "shadow_decisions",
-                          "shadow_positions", "shadow_trades", "shadow_equity", "shadow_metrics",
-                          "shadow_rejections")
+                for t in STORAGE_TABLES
+                if t != "shadow_checkpoints"
             }  # fmt: skip
+
+
+# Every table and the column its "latest day" growth is measured on (None: not time-based).
+STORAGE_TABLES: dict[str, str | None] = {
+    "shadow_strategies": None, "shadow_runs": None, "shadow_decisions": "decision_at",
+    "shadow_positions": "entry_at", "shadow_trades": "exit_at", "shadow_equity": "at",
+    "shadow_metrics": "computed_at", "shadow_rejections": "decision_at",
+    "shadow_funnel_counts": "bucket_at", "shadow_checkpoints": None,
+}  # fmt: skip
 
 
 TIME_COLUMNS = frozenset(

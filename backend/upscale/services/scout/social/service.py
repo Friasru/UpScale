@@ -29,6 +29,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 
+from upscale.services.evidence_archive import hooks as evidence
 from upscale.services.market_data import MarketDataError
 from upscale.services.scout.gate import RateLimitReachedError
 from upscale.services.scout.models import WINDOW_MINUTES, ScoutCandidate, ScoutGrowthFeatures
@@ -397,6 +398,7 @@ class SocialScoutService:
             sources=sources,
         )
         await self.store.add_momentum(momentum)
+        evidence.emit("social", momentum)  # archive (metrics only; never raises)
         return momentum
 
     def _combined(

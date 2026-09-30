@@ -46,6 +46,7 @@ import httpx2
 from pydantic import BaseModel, Field
 
 from upscale.services.chains import is_solana_address
+from upscale.services.evidence_archive import hooks as evidence
 from upscale.services.market_data import (
     AssetNotFoundError,
     InvalidRequestError,
@@ -735,7 +736,19 @@ class SolanaSafetyService:
     async def get_snapshot(
         self, mint: str, pools: Sequence[KnownPool] = ()
     ) -> OnchainSafetySnapshot:
-        return analyze(await self.get_chain_data(mint), pools, self.analysis)
+        try:
+            data = await self.get_chain_data(mint)
+        except MarketDataError as exc:
+            evidence.emit("safety_failed", exc, address=mint.strip(), provider=self.provider.name)
+            raise
+        snapshot = analyze(data, pools, self.analysis)
+        # Archive exactly what production uses (no extra request; never raises).
+        evidence.emit("safety", snapshot, pools=list(pools))
+        return snapshot
+
+    def available_calls(self) -> int:
+        """Chain-data fetches that could start now under this service's rate limit."""
+        return self._limiter.available()
 
     async def get_chain_data(self, mint: str) -> ChainData:
         mint = mint.strip()

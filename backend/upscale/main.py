@@ -27,6 +27,7 @@ from upscale.config import (
     CORS_ORIGINS,
     OUTCOMES_COLLECTOR,
 )
+from upscale.evidence_api import router as evidence_router
 from upscale.orchestrator import Orchestrator
 from upscale.outcomes_api import router as outcomes_router
 from upscale.schemas import ChatRequest, ChatResponse
@@ -38,6 +39,7 @@ from upscale.scout_api import (
     ScoutView,
     StageFilter,
 )
+from upscale.services.evidence_archive import hooks as evidence
 from upscale.services.outcomes import record_decision, record_scout_run
 from upscale.services.outcomes.models import SurfacingHistory
 from upscale.services.scout.growth.models import GrowthScoutResult
@@ -72,6 +74,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await background_scout.stop()
+        if _enrichment_task is not None and not _enrichment_task.done():
+            _enrichment_task.cancel()
         stop.set()
         if task is not None:
             await task
@@ -86,6 +90,7 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 app.include_router(outcomes_router)
+app.include_router(evidence_router)
 
 orchestrator = Orchestrator()
 
@@ -101,6 +106,8 @@ async def _scan() -> GrowthScoutResult:
         )
     finally:
         _last_activity = time.monotonic()
+    evidence.emit("scout", result)  # archive the ranking as computed (no request)
+    _start_enrichment(result)
     try:  # measurement only: a failure here never affects the ranking
         anchored = await record_scout_run(services.outcome_store, result, services.outcome_config)
         _scan_anchors = len(anchored)
@@ -120,6 +127,38 @@ async def _surfacing(canonical_ids: list[str]) -> dict[str, SurfacingHistory]:
 
 
 scout_feed = ScoutFeed(_scan, history=_surfacing)
+_enrichment_task: asyncio.Task[object] | None = None
+
+
+def _enrichment_defer_reason() -> str | None:
+    """Safety enrichment is below every other production workload: Analyze, due outcome
+    work, manual and background Scout."""
+    cc = services.outcome_config.collector
+    quiet = cc.quiet_after_seconds
+    if _interactive > 0 or time.monotonic() - _last_analyze < quiet:
+        return "Analyze is active"
+    backlog = outcome_backlog(
+        services.outcome_collector.last_cycle,
+        datetime.now(UTC),
+        timedelta(seconds=2 * cc.max_sleep_seconds),
+    )
+    if backlog is not None:
+        return backlog
+    if scout_feed.refreshing or background_scout.running:
+        return "a Scout scan is running"
+    return None
+
+
+def _start_enrichment(result: GrowthScoutResult) -> None:
+    """Optional on-chain safety enrichment after a scan (lowest priority, bounded)."""
+    global _enrichment_task
+    enrichment = services.safety_enrichment
+    if not enrichment.settings.enabled or enrichment.running:
+        return
+    if _enrichment_task is not None and not _enrichment_task.done():
+        return
+    enrichment.busy = _enrichment_defer_reason
+    _enrichment_task = asyncio.create_task(enrichment.after_scan(result))
 
 
 def _background_defer_reason() -> str | None:
@@ -144,7 +183,9 @@ def _background_defer_reason() -> str | None:
 async def _background_scan() -> ScanSummary:
     """Exactly the scan a manual refresh runs (shared single-flight feed, same persistence
     and outcome-anchor policy); the view's last good results stay if it fails."""
-    if not await scout_feed.refresh():
+    with evidence.component("scout_background"):
+        ran = await scout_feed.refresh()
+    if not ran:
         raise ScanDeferred("a Scout scan finished moments ago")
     result = scout_feed.result
     if scout_feed.error is not None or result is None:
@@ -173,16 +214,22 @@ async def chat(request: ChatRequest) -> ChatResponse:
     global _interactive, _last_activity, _last_analyze
     _interactive += 1
     try:
-        response = await orchestrator.respond(request)
+        with evidence.component("analyze"):
+            response = await orchestrator.respond(request)
     finally:
         _interactive -= 1
         _last_activity = _last_analyze = time.monotonic()
+    now = datetime.now(UTC)
+    observation = None
     try:  # measurement only: the reply is never delayed by more than a local write
-        await record_decision(
-            services.outcome_store, request, response, datetime.now(UTC), services.outcome_config
+        observation = await record_decision(
+            services.outcome_store, request, response, now, services.outcome_config
         )
     except Exception:
         logger.exception("could not record the decision observation")
+    # Archive why this decision was made (queued; never delays or changes the reply).
+    with evidence.component("analyze"):
+        evidence.emit("decision", response, request=request, observation=observation, at=now)
     return response
 
 
@@ -215,7 +262,8 @@ async def scout_refresh(
 ) -> ScoutView:
     """Re-run Scout (shared with a scan already running; skipped if one just finished)."""
     filters = _filters(limit, chain, stage, min_liquidity)
-    await scout_feed.refresh()
+    with evidence.component("scout_manual"):
+        await scout_feed.refresh()
     return await scout_feed.view(limit, filters)
 
 

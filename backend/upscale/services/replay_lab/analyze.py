@@ -20,11 +20,19 @@ The live `respond` also prefetches current DEX / on-chain data from the global r
 replay deliberately doesn't (current provider state must never reach a historical run).
 """
 
+from collections.abc import Iterable, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from upscale.agents import DexMarketAgent, OpportunityAgent, RiskAgent, TechnicalAnalysisAgent
+from upscale.agents import (
+    DexMarketAgent,
+    OnchainSafetyAgent,
+    OpportunityAgent,
+    RiskAgent,
+    TechnicalAnalysisAgent,
+)
 from upscale.agents.base import AgentContext
 from upscale.orchestrator import (
     Orchestrator,
@@ -36,7 +44,7 @@ from upscale.orchestrator import (
 )
 from upscale.routing import route
 from upscale.schemas import AgentResult, AssetRef, ChatMessage, ChatRequest, ChatResponse
-from upscale.services.asset_profile import build_profile
+from upscale.services.asset_profile import build_profile, capabilities_as_of
 from upscale.services.asset_resolver import AssetResolver
 from upscale.services.chains import chain_label, same_address
 from upscale.services.clock import frozen_now
@@ -50,16 +58,76 @@ from upscale.services.replay_lab.candles import (
 )
 from upscale.services.replay_lab.clock import HistoricalClock
 from upscale.services.replay_lab.models import AgentOutput
+from upscale.services.solana_chain import (
+    AccountRecord,
+    KnownPool,
+    MintInfo,
+    OnchainSafetySnapshot,
+    SolanaSafetyService,
+    TokenAccountBalance,
+    TokenAccountScan,
+)
 from upscale.services.solana_dex import DexMarketService, DexPool
 from upscale.services.trade_context import build_trade_context, requested_venue, trader_context
 
 UNAVAILABLE_AGENTS = {
-    "onchain_safety": "token authorities and holder concentration at T have no historical source",
+    "onchain_safety": "no archived on-chain safety evidence at or before T",
     "news_sentiment": "news available at T can't be reconstructed reliably",
     "market": "exchange market data (CoinGecko) isn't used for DEX tokens",
     "vision": "no screenshot in a historical replay",
     "education": "not part of a decision",
 }
+
+
+class _NoChainProvider:
+    """Replay never reads current chain state: every call is refused."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def _refuse(self) -> MarketDataUnavailableError:
+        return MarketDataUnavailableError("historical replay never reads current chain state")
+
+    async def fetch_mint(self, mint: str) -> MintInfo:
+        raise self._refuse()
+
+    async def fetch_largest_accounts(self, mint: str) -> list[TokenAccountBalance]:
+        raise self._refuse()
+
+    async def fetch_accounts(self, addresses: Sequence[str]) -> dict[str, AccountRecord | None]:
+        raise self._refuse()
+
+    async def scan_token_accounts(self, mint: str) -> TokenAccountScan | None:
+        raise self._refuse()
+
+    async def fetch_supply(self, mint: str) -> tuple[int, int]:
+        raise self._refuse()
+
+
+class PointInTimeSafetyService(SolanaSafetyService):
+    """The on-chain safety snapshot production archived at or before T (or the failure it
+    archived), served to the production `OnchainSafetyAgent` unchanged."""
+
+    def __init__(
+        self,
+        clock: HistoricalClock,
+        snapshot: OnchainSafetySnapshot | None,
+        failure: str | None,
+        provider: str,
+    ):
+        super().__init__(_NoChainProvider(provider))
+        self._clock = clock
+        self._snapshot = snapshot
+        self._failure = failure
+
+    async def get_snapshot(
+        self, mint: str, pools: Sequence[KnownPool] = ()
+    ) -> OnchainSafetySnapshot:
+        self._clock.check_decision_phase("archived on-chain safety")
+        if self._snapshot is not None and self._snapshot.mint == mint.strip():
+            self._clock.check_time(self._snapshot.fetched_at, "archived on-chain safety")
+            return self._snapshot
+        raise MarketDataUnavailableError(self._failure or "no archived on-chain safety at T")
 
 
 class PointInTimePoolProvider:
@@ -108,6 +176,10 @@ async def analyze_at(
     pool: DexPool | None,
     market_provider: str,
     candles: PointInTimeCandles,
+    safety: OnchainSafetySnapshot | None = None,
+    safety_failure: str | None = None,
+    safety_provider: str = "archive",
+    capabilities: Iterable[str] | None = None,
 ) -> AnalyzeAtResult:
     clock.check_decision_phase("Analyze")
     t: datetime = clock.decision_at
@@ -136,9 +208,16 @@ async def analyze_at(
         RiskAgent(),
         OpportunityAgent(),
     ]
+    if safety is not None or safety_failure is not None:
+        agents.append(
+            OnchainSafetyAgent(
+                service=PointInTimeSafetyService(clock, safety, safety_failure, safety_provider)
+            )
+        )
     resolver = AssetResolver(search=None)
     orchestrator = Orchestrator(agents=agents, resolver=resolver)
-    with frozen_now(t):
+    as_of = capabilities_as_of(capabilities) if capabilities is not None else nullcontext()
+    with frozen_now(t), as_of:
         # Orchestrator.respond, the `request.asset` path (no network prefetch).
         resolution = resolver.exact(chain, token, query)
         decision = route(query, False, resolution)

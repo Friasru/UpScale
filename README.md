@@ -152,6 +152,29 @@ python -m upscale.services.replay_lab summary --horizon 1h --group-by stage [--b
 python -m upscale.services.replay_lab resume <job_id>
 ```
 
+### Point-in-Time Evidence Archive
+
+`services/evidence_archive/` records, append-only, the evidence production UpScale already
+obtained, and when it was true (`observed_at`): Scout market observations, Analyze's DEX
+snapshots, on-chain safety snapshots (authorities, token program, supply, holder
+concentration, excluded pools, and failures with their reason), social momentum (metrics
+only, never posts), every Growth Scout evaluation and every Analyze reply linked to its
+decision observation. Each record carries provenance (provider, production component,
+availability) and version fingerprints (`services/versions.py`). It adds no provider
+requests: production hands over objects it already has (`hooks.emit`), a background thread
+writes them, and it never raises into or slows production.
+
+* Storage: `UPSCALE_EVIDENCE_DB` (default `evidence.sqlite3` next to `UPSCALE_SCOUT_DB`),
+  append-only (triggers), payloads redacted with the log-safety rules and compressed.
+* Replay Lab reads it read-only: archived on-chain safety observed within 60 minutes
+  before T (`--safety-max-age-minutes`) is served to the production OnchainSafety agent and
+  Growth Scout; later evidence is invisible; current chain state is never used.
+* Optional enrichment (`UPSCALE_EVIDENCE_SAFETY_ENRICHMENT=1`): after a scan, at most
+  `UPSCALE_EVIDENCE_SAFETY_MAX_PER_REFRESH` ranked Solana candidates without recent safety
+  evidence get a lookup, below every other production workload.
+* Status: `GET /evidence/status`, `python -m upscale.services.evidence_archive status`
+  (also `readiness`, and `show --asset solana:<mint> --kind safety --at <time>`).
+
 ## Prerequisites
 
 - Node.js ≥ 20.19 (22 LTS recommended)

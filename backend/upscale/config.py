@@ -94,6 +94,24 @@ OUTCOMES_COLLECTOR = (os.getenv("UPSCALE_OUTCOMES") or "1").strip().lower() not 
 BACKGROUND_SCOUT = os.getenv("UPSCALE_BACKGROUND_SCOUT") or None
 BACKGROUND_SCOUT_INTERVAL_MINUTES = os.getenv("UPSCALE_BACKGROUND_SCOUT_INTERVAL_MINUTES") or None
 
+# Point-in-Time Evidence Archive: an append-only record of the evidence production already
+# fetched (market, DEX, on-chain safety, social, Growth Scout, Analyze), for Replay Lab.
+# Archiving adds no provider requests. On by default; UPSCALE_EVIDENCE_ARCHIVE=0 disables
+# it. Stored next to the Scout database by default (on Railway: the same /data volume).
+EVIDENCE_ARCHIVE = (os.getenv("UPSCALE_EVIDENCE_ARCHIVE") or "1").strip().lower() not in (
+    "0",
+    "false",
+    "off",
+    "no",
+)
+EVIDENCE_DB_PATH = os.getenv("UPSCALE_EVIDENCE_DB") or str(
+    Path(SCOUT_DB_PATH).expanduser().parent / "evidence.sqlite3"
+)
+# Optional bounded on-chain safety enrichment of Scout candidates (NEW Solana RPC / Helius
+# requests, lowest production priority). Off by default; at most this many tokens per scan.
+EVIDENCE_SAFETY_ENRICHMENT = os.getenv("UPSCALE_EVIDENCE_SAFETY_ENRICHMENT") or None
+EVIDENCE_SAFETY_MAX_PER_REFRESH = os.getenv("UPSCALE_EVIDENCE_SAFETY_MAX_PER_REFRESH") or None
+
 # Secret-safe logging for the whole process (every logger and level): the credentials above
 # and any credential-looking query parameter or header are masked in log output.
 log_safety.install()

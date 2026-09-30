@@ -34,6 +34,13 @@ def default_replay_db() -> str:
     return os.getenv("UPSCALE_REPLAY_DB") or str(Path.home() / ".upscale" / "replay.sqlite3")
 
 
+def default_evidence_db() -> str:
+    """The Point-in-Time Evidence Archive (read-only here), next to the Scout database."""
+    return os.getenv("UPSCALE_EVIDENCE_DB") or str(
+        Path(default_archive_db()).expanduser().parent / "evidence.sqlite3"
+    )
+
+
 def default_archive_db() -> str:
     """The live Scout database, opened read-only as a historical archive."""
     return os.getenv("UPSCALE_SCOUT_DB") or str(Path.home() / ".upscale" / "scout.sqlite3")

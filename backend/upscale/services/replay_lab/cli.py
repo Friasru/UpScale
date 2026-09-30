@@ -16,11 +16,13 @@ import asyncio
 import json
 import sys
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
 
 from upscale.config import GROWTH_CONFIG, OUTCOME_CONFIG, SCOUT_CONFIG
+from upscale.services.evidence_archive import hooks as evidence_hooks
+from upscale.services.evidence_archive.store import EvidenceStore
 from upscale.services.outcomes.config import load_outcome_config
 from upscale.services.replay_lab.analytics import GROUP_BY, as_table, summarize
 from upscale.services.replay_lab.archive import ArchiveUnavailableError, ScoutArchive
@@ -34,6 +36,7 @@ from upscale.services.replay_lab.config import (
     Split,
     SplitConfig,
     default_archive_db,
+    default_evidence_db,
     default_replay_db,
 )
 from upscale.services.replay_lab.engine import JobLockedError, ReplayRunner
@@ -118,6 +121,11 @@ def _runner_flags(p: argparse.ArgumentParser) -> None:
                    help="replay pauses while an UpScale backend answers here (it has priority)")  # fmt: skip
     p.add_argument("--exit-on-pause", action="store_true",
                    help="stop (job stays PAUSED) instead of sleeping when production needs the provider")  # fmt: skip
+    p.add_argument("--evidence-db", default=None,
+                   help="Point-in-Time Evidence Archive to read (default: UPSCALE_EVIDENCE_DB or "
+                        "evidence.sqlite3 next to the Scout database)")  # fmt: skip
+    p.add_argument("--safety-max-age-minutes", type=float, default=60.0,
+                   help="archived on-chain safety older than this before T is not used")  # fmt: skip
 
 
 def _store(args: argparse.Namespace) -> ReplayStore:
@@ -128,6 +136,11 @@ def _store(args: argparse.Namespace) -> ReplayStore:
 def _archive(args: argparse.Namespace) -> ScoutArchive | None:
     path = Path(args.archive or default_archive_db()).expanduser()
     return ScoutArchive(path) if path.exists() else None
+
+
+def _evidence(args: argparse.Namespace) -> EvidenceStore | None:
+    path = Path(args.evidence_db or default_evidence_db()).expanduser()
+    return EvidenceStore(path, read_only=True) if path.exists() else None
 
 
 def _runner(args: argparse.Namespace, store: ReplayStore) -> ReplayRunner:
@@ -145,6 +158,8 @@ def _runner(args: argparse.Namespace, store: ReplayStore) -> ReplayRunner:
         collapse=outcome_config.collapse,
         collector=outcome_config.collector,
         log=lambda line: print(line, flush=True),
+        evidence=_evidence(args),
+        safety_max_age=timedelta(minutes=args.safety_max_age_minutes),
     )
 
 
@@ -182,6 +197,8 @@ async def _run(runner: ReplayRunner, store: ReplayStore, job_id: str, exit_on_pa
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    # A replay process never archives "evidence": it only reads the past.
+    evidence_hooks.install(None)
     store = _store(args)
     try:
         if args.command == "run":

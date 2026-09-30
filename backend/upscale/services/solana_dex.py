@@ -44,6 +44,7 @@ from upscale.services.chains import (
     quote_kind,
     same_address,
 )
+from upscale.services.evidence_archive import hooks as evidence
 from upscale.services.market_data import (
     AssetNotFoundError,
     InvalidRequestError,
@@ -458,9 +459,11 @@ class DexMarketService:
         if chain not in DEX_CHAINS or not is_valid_address(chain, mint):
             raise InvalidRequestError(f"{mint!r} is not a valid {chain_label(chain)} token address")
         pools = await self._pools(mint, chain)
-        return build_snapshot(
+        snapshot = build_snapshot(
             mint, pools, self.provider.name, self.now(), self.selection, chain, dex, pool
         )
+        evidence.emit("dex_market", snapshot)  # archive (no request; never raises)
+        return snapshot
 
     async def _pools(self, mint: str, chain: str) -> list[DexPool]:
         key = f"{chain}:{normalize_address(chain, mint)}"

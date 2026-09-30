@@ -22,18 +22,18 @@ import hashlib
 import json
 import math
 import os
-import subprocess
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any, Literal
 
+from upscale.services.asset_profile import integrated_capabilities
+from upscale.services.evidence_archive.store import EvidenceStore, FutureEvidenceError
 from upscale.services.market_data import MarketDataError, Timeframe
 from upscale.services.outcomes.config import CollapseConfig, CollectorConfig
 from upscale.services.replay_lab.analyze import analyze_at
-from upscale.services.replay_lab.archive import ArchiveUnavailableError, ScoutArchive
+from upscale.services.replay_lab.archive import ArchiveUnavailableError, PoolMetadata, ScoutArchive
 from upscale.services.replay_lab.candles import (
     HistoricalCandleFetcher,
     PointInTimeCandles,
@@ -67,8 +67,11 @@ from upscale.services.scout.config import ScoutConfig
 from upscale.services.scout.growth.config import GrowthConfig
 from upscale.services.scout.growth.models import GrowthCandidate
 from upscale.services.scout.models import ScoutSnapshot
+from upscale.services.scout.social.models import SocialMomentum
+from upscale.services.solana_chain import OnchainSafetySnapshot
 from upscale.services.strategy import DEFAULT_STRATEGY
 from upscale.services.technical_analysis import InvalidCandleDataError, analyze_series
+from upscale.services.versions import fingerprints
 
 MAX_ATTEMPTS = 3
 ReferenceBasis = Literal["recorded_snapshot_price", "last_closed_candle"]
@@ -98,18 +101,6 @@ def _hash_json(data: Any) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
-def code_version() -> str:
-    try:
-        root = Path(__file__).resolve().parents[4]
-        out = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )  # fmt: skip
-        return out.stdout.strip() or "unknown"
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-
-
 class ReplayRunner:
     def __init__(
         self,
@@ -124,6 +115,8 @@ class ReplayRunner:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         log: Callable[[str], None] = lambda _: None,
         max_pause_seconds: float = 900.0,
+        evidence: EvidenceStore | None = None,
+        safety_max_age: timedelta = timedelta(minutes=60),
     ):
         self.store = store
         self.archive = archive
@@ -136,12 +129,13 @@ class ReplayRunner:
         self.sleep = sleep
         self.log = log
         self.max_pause_seconds = max_pause_seconds
+        self.evidence = evidence
+        self.safety_max_age = safety_max_age
         self.versions = {
             "record": "1",
-            "code": code_version(),
-            "scout_config": _hash_json(scout_config.model_dump(mode="json")),
-            "growth_config": _hash_json(growth_config.model_dump(mode="json")),
-            "technical_config": _hash_json(repr(DEFAULT_STRATEGY.technical)),
+            **fingerprints(),
+            "replay_scout_config": _hash_json(scout_config.model_dump(mode="json")),
+            "replay_growth_config": _hash_json(growth_config.model_dump(mode="json")),
         }
 
     # --- jobs -------------------------------------------------------------------------------
@@ -200,7 +194,12 @@ class ReplayRunner:
                     s.id, "FAILED", error=s.error or "gave up after repeated failures"
                 )
             self.store.set_job_status(job_id, "COMPLETE")
-        except (LookaheadError, DecisionIntegrityError, ArchiveUnavailableError) as exc:
+        except (
+            LookaheadError,
+            FutureEvidenceError,
+            DecisionIntegrityError,
+            ArchiveUnavailableError,
+        ) as exc:
             self.store.set_job_status(job_id, "FAILED", f"{type(exc).__name__}: {exc}")
             raise
         except (asyncio.CancelledError, KeyboardInterrupt):
@@ -313,6 +312,10 @@ class ReplayRunner:
         dex_pool = None
         market_provider = p.snapshot_provider or "historical"
         evidence_times: list[datetime] = []
+        safety_snap: OnchainSafetySnapshot | None = None
+        safety_failure: str | None = None
+        safety_provider = "archive"
+        capabilities: list[str] | None = None
 
         if p.evidence == "RECORDED":
             if self.archive is None:
@@ -327,13 +330,17 @@ class ReplayRunner:
             first_seen = token.first_seen_at if token and token.first_seen_at <= t else None
             meta = self.archive.pool_metadata(p.asset_id, p.pool_address, t)
             if meta is None:
+                meta = self._pool_metadata(p.asset_id, p.pool_address, t)
+            if meta is None:
                 raise SampleSkipped(
                     "the pool's quote token / DEX (immutable pool metadata) was not recorded"
                 )
             availability["pool_metadata"] = "IMMUTABLE_METADATA"
             momentum = None
             if config.mode == "MARKET_PLUS_SOCIAL":
-                momentum = self.archive.social_momentum(p.asset_id, t)
+                momentum = self._social_at(p.asset_id, t) or self.archive.social_momentum(
+                    p.asset_id, t
+                )
                 if momentum is not None:
                     clock.check_time(momentum.computed_at, "social momentum")
                     evidence_times.append(momentum.computed_at)
@@ -351,16 +358,21 @@ class ReplayRunner:
             else:
                 social_info |= {"status": "SOCIAL_UNAVAILABLE", "reason": "MARKET_ONLY mode"}
             dex_pool = pool_at(snapshot, meta, p.chain, p.token_address, symbol, name)
+            safety_snap, safety_failure, safety_provider = self._safety_at(
+                clock, p.asset_id, t, availability, evidence_times
+            )
+            capabilities = self._capabilities_at(
+                t, safety_snap is not None or safety_failure is not None, warnings
+            )
             scout, growth, notes = await evaluate_scout(
                 clock, self.archive, dex_pool, snapshot, first_seen, momentum,
-                self.scout_config, self.growth_config,
+                self.scout_config, self.growth_config, safety=safety_snap,
             )  # fmt: skip
             warnings += notes
             reference: float | None = snapshot.metrics.price_usd
             basis: ReferenceBasis = "recorded_snapshot_price"
             availability |= {
                 "other_pools": "UNAVAILABLE: other pools of the token at T were not recorded",
-                "onchain_safety": "UNAVAILABLE: holders / authorities at T have no historical source",
                 "discovery_listing": "UNAVAILABLE: which listing surfaced the token at T",
             }
         else:
@@ -394,6 +406,8 @@ class ReplayRunner:
         analysis = await analyze_at(
             clock, chain=p.chain, token=p.token_address, symbol=symbol, name=name,
             pool=dex_pool, market_provider=market_provider, candles=candles,
+            safety=safety_snap, safety_failure=safety_failure, safety_provider=safety_provider,
+            capabilities=capabilities,
         )  # fmt: skip
         missing_tf = {tf_ for _, tf_, _ in analysis.candle_requests if not candles.loaded(tf_)}
         if missing_tf:
@@ -461,6 +475,82 @@ class ReplayRunner:
             warnings=warnings,
             versions=self.versions,
         )
+
+    # --- the evidence archive (point-in-time: observed_at <= T only) ------------------------
+
+    def _safety_at(
+        self,
+        clock: HistoricalClock,
+        asset_id: str,
+        t: datetime,
+        availability: dict[str, str],
+        evidence_times: list[datetime],
+    ) -> tuple[OnchainSafetySnapshot | None, str | None, str]:
+        """The latest archived on-chain safety at or before T (within `safety_max_age`),
+        or a failure production archived then. Never current chain state."""
+        minutes = self.safety_max_age.total_seconds() / 60
+        if self.evidence is None:
+            availability["onchain_safety"] = "NOT_COLLECTED: no evidence archive configured"
+            return None, None, "archive"
+        rec = self.evidence.latest("safety", asset_id, until=t, since=t - self.safety_max_age)
+        if rec is None:
+            availability["onchain_safety"] = (
+                f"NOT_COLLECTED: no archived on-chain safety within {minutes:g} min before T"
+            )
+            return None, None, "archive"
+        clock.check_time(rec.observed_at, "archived on-chain safety")
+        evidence_times.append(rec.observed_at)
+        age = (t - rec.observed_at).total_seconds() / 60
+        provider = rec.provider or "archive"
+        if rec.availability != "AVAILABLE":
+            availability["onchain_safety"] = (
+                f"{rec.availability}: {rec.reason} (archived {age:.0f} min before T)"
+            )
+            return None, rec.reason or rec.availability, provider
+        snap = OnchainSafetySnapshot.model_validate(rec.payload["snapshot"])
+        clock.check_time(snap.fetched_at, "archived on-chain safety")
+        availability["onchain_safety"] = f"AVAILABLE: archived {age:.0f} min before T ({provider})"
+        return snap, None, provider
+
+    def _capabilities_at(self, t: datetime, safety: bool, warnings: list[str]) -> list[str] | None:
+        """The data capabilities production had at T (archived with each Scout run)."""
+        rec = self.evidence.latest_any("scout", t) if self.evidence is not None else None
+        caps = rec.payload.get("capabilities") if rec is not None else None
+        if isinstance(caps, list):
+            return sorted({str(c) for c in caps} | ({"onchain"} if safety else set()))
+        if safety:
+            warnings.append(
+                "production capabilities at T were not archived: on-chain data is known to have "
+                "been available (archived safety evidence), the rest from this process"
+            )
+            return sorted(set(integrated_capabilities()) | {"onchain"})
+        return None
+
+    def _social_at(self, asset_id: str, t: datetime) -> SocialMomentum | None:
+        if self.evidence is None:
+            return None
+        rec = self.evidence.latest("social", asset_id, until=t)
+        if rec is None or rec.availability != "AVAILABLE":
+            return None
+        return SocialMomentum.model_validate(rec.payload["momentum"])
+
+    def _pool_metadata(self, asset_id: str, pool: str, t: datetime) -> PoolMetadata | None:
+        """Immutable pool facts from archived market evidence of this pool at or before T."""
+        if self.evidence is None:
+            return None
+        rec = self.evidence.latest("market", asset_id, until=t, pool=pool)
+        if rec is None:
+            return None
+        p = (rec.payload.get("candidate") or {}).get("pool") or {}
+        if p.get("address") != pool or not p.get("quote_address"):
+            return None
+        created = datetime.fromisoformat(p["created_at"]) if p.get("created_at") else None
+        if created is not None and created > t:
+            raise LookaheadError(f"pool {pool} was created after the decision time")
+        return PoolMetadata(
+            pool_address=pool, dex=p.get("dex") or "unknown", quote_address=p["quote_address"],
+            quote_symbol=p.get("quote_symbol"), created_at=created, url=p.get("url"),
+        )  # fmt: skip
 
     async def _acquire_outcome_candles(
         self,

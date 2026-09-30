@@ -33,6 +33,7 @@ from upscale.services.scout.models import ScoutSnapshot
 from upscale.services.scout.normalize import Listing, build_candidates
 from upscale.services.scout.social.models import SocialMomentum
 from upscale.services.scout.store import ScoutSnapshotStore
+from upscale.services.solana_chain import OnchainSafetySnapshot
 from upscale.services.solana_dex import DexPool, TokenRef, WindowStats
 
 REPLAY_LISTING = "historical_replay"
@@ -102,6 +103,7 @@ async def evaluate_scout(
     social: SocialMomentum | None,
     scout_config: ScoutConfig,
     growth_config: GrowthConfig,
+    safety: OnchainSafetySnapshot | None = None,
 ) -> tuple[ScoutReplay, GrowthCandidate | None, list[str]]:
     """Production Growth Scout for this pool at T. Returns the replay record, the full
     candidate, and notes on what was unavailable."""
@@ -146,8 +148,13 @@ async def evaluate_scout(
         growth = GrowthScoutService(
             store, growth_config, social_store=None, safety=None, now=lambda: t
         )
+        if safety is not None:
+            clock.check_time(safety.fetched_at, "archived on-chain safety")
         result = await growth.rank(
-            [candidate], social={cid: social} if social is not None else None, limit=1
+            [candidate],
+            social={cid: social} if social is not None else None,
+            safety={cid: safety} if safety is not None else None,
+            limit=1,
         )
     finally:
         store.close()

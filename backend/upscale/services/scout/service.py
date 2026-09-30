@@ -27,6 +27,7 @@ from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from upscale.services.evidence_archive import hooks as evidence
 from upscale.services.market_data import MarketDataError
 from upscale.services.scout.config import ScoutConfig
 from upscale.services.scout.features import compute_features
@@ -434,6 +435,7 @@ class ScoutService:
         )
         full = candidate.model_copy(update={"first_seen_at": first_seen, "features": features})
         await self.store.save_latest(full)  # the last good observation, for a short grace
+        evidence.emit("market", full)  # archive what was observed (no request, never raises)
         return full
 
 

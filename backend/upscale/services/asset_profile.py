@@ -31,7 +31,9 @@ adaptive behavior in Risk and Opportunity.
 """
 
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from types import MappingProxyType
@@ -127,8 +129,29 @@ def set_capability_enabled(capability: DataCapability, enabled: bool) -> None:
         _ENABLED_OPTIONAL.discard(capability)
 
 
+# Historical replay only: the capabilities production had at the decision time T.
+_AS_OF: ContextVar[frozenset[DataCapability] | None] = ContextVar(
+    "upscale_capabilities_as_of", default=None
+)
+
+
 def integrated_capabilities() -> frozenset[DataCapability]:
+    as_of = _AS_OF.get()
+    if as_of is not None:
+        return as_of
     return INTEGRATED_CAPABILITIES | frozenset(_ENABLED_OPTIONAL)
+
+
+@contextmanager
+def capabilities_as_of(capabilities: Iterable[str]) -> Iterator[None]:
+    """Inside this block (and tasks started in it), the integrated capabilities are the
+    given ones (replay: what production had at T), not this process's configuration."""
+    known = frozenset(c for c in CAPABILITIES if c in set(capabilities))
+    token = _AS_OF.set(known)
+    try:
+        yield
+    finally:
+        _AS_OF.reset(token)
 
 
 CAPABILITY_LABELS: dict[DataCapability, str] = {

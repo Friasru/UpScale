@@ -2,6 +2,10 @@
 
 from upscale.config import (
     COINGECKO_API_KEY,
+    EVIDENCE_ARCHIVE,
+    EVIDENCE_DB_PATH,
+    EVIDENCE_SAFETY_ENRICHMENT,
+    EVIDENCE_SAFETY_MAX_PER_REFRESH,
     EXPLAINER_MODEL,
     GROWTH_CONFIG,
     HELIUS_API_KEY,
@@ -22,11 +26,16 @@ from upscale.config import (
     VISION_MODEL,
     X_BEARER_TOKEN,
 )
-from upscale.services.asset_profile import set_capability_enabled
+from upscale.services.asset_profile import integrated_capabilities, set_capability_enabled
 from upscale.services.asset_resolver import AssetResolver
 from upscale.services.capabilities import ProviderRegistry
 from upscale.services.coingecko import CoinGeckoProvider
 from upscale.services.dexscreener import DexScreenerProvider
+from upscale.services.evidence_archive import hooks as evidence_hooks
+from upscale.services.evidence_archive.enrichment import SafetyEnrichment
+from upscale.services.evidence_archive.enrichment import load_settings as load_enrichment_settings
+from upscale.services.evidence_archive.recorder import EvidenceRecorder
+from upscale.services.evidence_archive.store import EvidenceStore
 from upscale.services.explainer import ClaudeExplainerModel
 from upscale.services.geckoterminal import DexCandleService, GeckoTerminalProvider
 from upscale.services.kraken import KrakenProvider
@@ -71,6 +80,7 @@ from upscale.services.solana_chain import (
 )
 from upscale.services.solana_dex import SolanaDexService
 from upscale.services.technical_analysis import TechnicalAnalysisService
+from upscale.services.versions import fingerprints
 from upscale.services.vision import ClaudeVisionModel, VisionService
 
 # Shared across requests so the cache and rate limiter actually apply. CoinGecko serves
@@ -200,4 +210,25 @@ outcome_collector = OutcomeCollector(
         DexScreenerPools(_dexscreener_discovery, outcome_config.collector.min_free_calls),
         GeckoTerminalPools(_geckoterminal_discovery, outcome_config.collector.min_free_calls),
     ],
+)
+
+# Point-in-Time Evidence Archive: every hook archives evidence production already has (no
+# extra requests), written by a background thread; opened on first write. Replay processes
+# uninstall it (and nothing is recorded while a replay clock is frozen).
+evidence_store = EvidenceStore(EVIDENCE_DB_PATH) if EVIDENCE_ARCHIVE else None
+evidence_recorder = (
+    EvidenceRecorder(
+        evidence_store,
+        versions=fingerprints,
+        capabilities=lambda: sorted(integrated_capabilities()),
+    )
+    if evidence_store is not None
+    else None
+)
+evidence_hooks.install(evidence_recorder)
+# Optional bounded on-chain safety enrichment of Scout candidates (off by default).
+safety_enrichment = SafetyEnrichment(
+    load_enrichment_settings(EVIDENCE_SAFETY_ENRICHMENT, EVIDENCE_SAFETY_MAX_PER_REFRESH),
+    solana_safety_service,
+    evidence_store,
 )

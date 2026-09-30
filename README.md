@@ -117,6 +117,41 @@ and it reports no win rates, expected returns or simulated trades.
   read-only historical replay from stored snapshots (not a backtest; also
   `python -m upscale.services.outcomes.replay`).
 
+### Replay Lab (calibration research, no lookahead)
+
+`services/replay_lab/` replays historical decision times T through the **production**
+Scout, Technical, Risk and Opportunity code, stores the frozen decision, and only then reveals
+the known 5m / 15m / 1h / 4h / 24h outcomes (live outcome definitions). It is research
+evidence, not a backtest: no fills, fees, slippage, size or latency are assumed, and replay
+alone never shows a setup is profitable. It never trades, never touches keys or wallets, and
+never changes production configuration.
+
+* **Separate data**: `UPSCALE_REPLAY_DB` (default `~/.upscale/replay.sqlite3`), every row
+  `HISTORICAL_REPLAY`. The live Scout database is only read (`mode=ro`) as an archive of what
+  Scout recorded; the replay store refuses to open a live database.
+* **No lookahead**: a `HistoricalClock` per sample. While deciding, only evidence at or
+  before T is readable (candles must have *closed* by T); future data needs the receipt of
+  the committed decision. Decisions are immutable (SQLite triggers + SHA-256). Domain code
+  that ages things against "now" uses `services/clock.py`, frozen at T during replay.
+* **Evidence**: `RECORDED` samples are Scout's stored snapshots (full market evidence);
+  `CANDLES` samples have pool candles only (Scout can't be reconstructed: no historical
+  trade counts, liquidity or market cap). On-chain safety and news have no historical source
+  and are reported unavailable (production Opportunity then treats them as missing).
+* **Splits**: time-based CALIBRATION / VALIDATION / HOLDOUT (70/15/15), persisted; HOLDOUT
+  windows are sticky across jobs and only readable with `--include-holdout
+  --final-evaluation` (logged). Findings are EXPERIMENTAL, CALIBRATION-only, stored in the
+  replay database.
+* **Lowest provider priority**: its own `replay` lane on the production GeckoTerminal quota
+  (no reservation), pausing while a local UpScale backend runs or after a provider 429.
+
+```bash
+python -m upscale.services.replay_lab run --start 2026-09-28 --end 2026-09-29 \
+  --chains solana --max-samples 20 --min-spacing-minutes 60 --mode MARKET_ONLY
+python -m upscale.services.replay_lab status
+python -m upscale.services.replay_lab summary --horizon 1h --group-by stage [--baselines] [--findings]
+python -m upscale.services.replay_lab resume <job_id>
+```
+
 ## Prerequisites
 
 - Node.js ≥ 20.19 (22 LTS recommended)

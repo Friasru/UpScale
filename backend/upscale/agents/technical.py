@@ -1,13 +1,15 @@
-from typing import Any
+from typing import Any, Protocol
 
 import upscale.services as services
 from upscale.agents.base import Agent, AgentContext
 from upscale.formatting import usd, usd_zone
 from upscale.schemas import AgentResult, Risk, Scenario
 from upscale.services import technical_analysis_service
+from upscale.services.capabilities import PoolCandleSource
 from upscale.services.chains import same_address
 from upscale.services.market_data import (
     TIMEFRAMES,
+    CandleSeries,
     MarketDataError,
     ProviderRateLimitedError,
     Timeframe,
@@ -26,6 +28,25 @@ from upscale.services.technical_pool import alternate_pools
 TIME_FORMAT = "%Y-%m-%d %H:%M UTC"
 
 
+class PoolCandleRegistry(Protocol):
+    """Where a DEX token's pool candles come from: `upscale.services.provider_registry`
+    live; historical replay passes a point-in-time source (candles closed by time T)."""
+
+    @property
+    def dex_candles(self) -> PoolCandleSource: ...
+
+    async def pool_candles(
+        self,
+        chain: str,
+        pool: str,
+        timeframe: Timeframe,
+        limit: int,
+        *,
+        symbol: str,
+        canonical_id: str | None,
+    ) -> CandleSeries: ...
+
+
 class TechnicalAnalysisAgent(Agent):
     """Deterministic technical read (moving averages, RSI, MACD, range, trend, levels).
 
@@ -41,8 +62,13 @@ class TechnicalAnalysisAgent(Agent):
     # Vision can name the asset; DEX data names the pool whose candles a token trades on.
     depends_on = ("vision", "dex_market")
 
-    def __init__(self, service: TechnicalAnalysisService | None = None):
+    def __init__(
+        self,
+        service: TechnicalAnalysisService | None = None,
+        registry: PoolCandleRegistry | None = None,
+    ):
         self.service = service or technical_analysis_service
+        self._registry = registry  # None: the live provider registry, looked up per call
 
     async def run(self, context: AgentContext) -> AgentResult:
         symbol = context.primary_asset
@@ -100,7 +126,7 @@ class TechnicalAnalysisAgent(Agent):
     async def _run_pool(
         self, context: AgentContext, symbol: str, pool: SolanaDexSnapshot, note: str | None
     ) -> AgentResult:
-        registry = services.provider_registry
+        registry: PoolCandleRegistry = self._registry or services.provider_registry
         strategy = strategy_for(context.trade.profile if context.trade else None)
         cfg = strategy.technical
         supported = [tf for tf in TIMEFRAMES if tf in registry.dex_candles.supported_timeframes]

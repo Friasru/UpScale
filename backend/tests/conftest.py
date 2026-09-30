@@ -1,10 +1,14 @@
 import os
 import tempfile
 
-# Before any `upscale` import: every store the app creates (Scout, social, outcomes)
-# defaults to a throwaway database, never the user's real ~/.upscale/scout.sqlite3.
+# Before any `upscale` import: every store the app creates (Scout, social, outcomes,
+# Replay Lab) defaults to a throwaway database, never the user's real
+# ~/.upscale/scout.sqlite3 or ~/.upscale/replay.sqlite3.
 os.environ["UPSCALE_SCOUT_DB"] = os.path.join(
     tempfile.mkdtemp(prefix="upscale-tests-"), "scout.sqlite3"
+)
+os.environ["UPSCALE_REPLAY_DB"] = os.path.join(
+    os.path.dirname(os.environ["UPSCALE_SCOUT_DB"]), "replay.sqlite3"
 )
 
 import asyncio

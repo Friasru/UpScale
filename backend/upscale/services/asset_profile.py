@@ -53,6 +53,7 @@ from upscale.services.chains import (
     normalize_address,
     same_address,
 )
+from upscale.services.clock import utcnow
 from upscale.services.market_data import MarketSnapshot
 from upscale.services.solana_chain import OnchainSafetySnapshot
 from upscale.services.solana_dex import SolanaDexSnapshot
@@ -646,7 +647,7 @@ def build_profile(
     if resolved is None:
         return None
     cfg = config or ProfileConfig()
-    now = now or datetime.now(UTC)
+    now = now or utcnow()  # the wall clock live; the decision time T in replay
     meta = resolved.metadata
     obs = _attributable_observations(observed or Observations(), resolved)
     if obs.dex is not None and meta.symbol == "?" and obs.dex.symbol:

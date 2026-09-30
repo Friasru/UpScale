@@ -2,7 +2,7 @@
 database, on Railway ``/data/shadow.sqlite3``). Separate from Scout, outcome, evidence,
 replay and calibration databases: nothing here is read by production decisions.
 
-Tables (schema version 1):
+Tables (schema version 2; a version 1 file gains ``shadow_rejections`` in place):
 
 * ``shadow_strategies``: every registered (strategy_id, version), its rules and hash.
   Append-only: changed rules need a new version.
@@ -18,7 +18,13 @@ Tables (schema version 1):
 * ``shadow_metrics``: metric snapshots per run and strategy. Append-only.
 * ``shadow_checkpoints``: per run, the resume cursor and each book's state, replaced in
   the same transaction as the rows it produced (derived state, not history).
-* ``shadow_meta``: schema metadata.
+* ``shadow_rejections`` (v2): one row per Scout evaluation a strategy did not enter on
+  because its entry rules failed: every failed rule as a stable reason code, the observed
+  values the rules read, and the evidence fingerprints. Diagnostics only (never a
+  decision). Append-only. Qualified entries stopped by position / risk control stay
+  NO_ACTION decisions, as in v1.
+* ``shadow_meta``: schema metadata, and per run the time from which rejection
+  diagnostics exist (``diagnostics_from:<run_id>``, written once).
 
 Immutability is enforced by triggers, not only by the code.
 """
@@ -35,10 +41,11 @@ from typing import Any
 from upscale.services.shadow.book import Position
 from upscale.services.shadow.config import StrategyConfig
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+DIAGNOSTICS_VERSION = 1
 APPEND_ONLY = (
     "shadow_strategies", "shadow_runs", "shadow_decisions", "shadow_trades", "shadow_equity",
-    "shadow_metrics",
+    "shadow_metrics", "shadow_rejections",
 )  # fmt: skip
 _POSITION_ENTRY = (
     "position_id", "run_id", "strategy_id", "strategy_version", "asset_id", "chain", "address",
@@ -189,6 +196,24 @@ CREATE TABLE IF NOT EXISTS shadow_metrics (
     through REAL,
     metrics_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS shadow_rejections (
+    id INTEGER PRIMARY KEY,
+    rejection_id TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL REFERENCES shadow_runs(run_id),
+    strategy_id TEXT NOT NULL,
+    strategy_version INTEGER NOT NULL,
+    asset_id TEXT NOT NULL,
+    pool TEXT,
+    decision_at REAL NOT NULL,
+    scout_record_id TEXT NOT NULL,
+    reasons_json TEXT NOT NULL,
+    observed_json TEXT NOT NULL,
+    fingerprints_json TEXT NOT NULL,
+    diagnostics_version INTEGER NOT NULL,
+    recorded_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS shadow_rejections_by_run
+    ON shadow_rejections (run_id, strategy_id, decision_at);
 CREATE TABLE IF NOT EXISTS shadow_checkpoints (
     run_id TEXT PRIMARY KEY REFERENCES shadow_runs(run_id),
     cursor_at REAL NOT NULL,
@@ -281,7 +306,8 @@ class ShadowStore:
             )
         conn.executescript(_SCHEMA + _triggers())
         conn.execute(
-            "INSERT OR IGNORE INTO shadow_meta (key, value) VALUES ('schema_version', ?)",
+            "INSERT INTO shadow_meta (key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             (str(SCHEMA_VERSION),),
         )
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -438,6 +464,7 @@ class ShadowStore:
         closed: Sequence[Position],
         trades: Sequence[dict[str, Any]],
         equity: Sequence[dict[str, Any]],
+        rejections: Sequence[dict[str, Any]] = (),
         cursor: tuple[float, int],
         processed_until: float,
         books: dict[str, Any],
@@ -522,6 +549,18 @@ class ShadowStore:
                       e["unrealized_pnl"], e["unresolved_cost"], e["exposure_pct"],
                       e["open_positions"], e["drawdown_pct"], e["max_drawdown_pct"])
                      for e in equity],
+                )  # fmt: skip
+                db.executemany(
+                    "INSERT OR IGNORE INTO shadow_rejections (rejection_id, run_id, strategy_id, "
+                    "strategy_version, asset_id, pool, decision_at, scout_record_id, "
+                    "reasons_json, observed_json, fingerprints_json, diagnostics_version, "
+                    "recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [(x["rejection_id"], x["run_id"], x["strategy_id"], x["strategy_version"],
+                      x["asset_id"], x["pool"], x["decision_at"].timestamp(),
+                      x["scout_record_id"], json.dumps(x["reasons"]),
+                      json.dumps(x["observed"], default=str, sort_keys=True),
+                      json.dumps(x["fingerprints"], default=str), DIAGNOSTICS_VERSION, now)
+                     for x in rejections],
                 )  # fmt: skip
                 cur = db.execute(
                     "UPDATE shadow_checkpoints SET cursor_at = ?, cursor_id = ?, "
@@ -640,13 +679,128 @@ class ShadowStore:
         where, params = self._where(run_id, strategy_id, None, "at", None, None)
         return self._rows(f"SELECT * FROM shadow_equity WHERE {where} ORDER BY at, id", params)
 
+    # --- rejection diagnostics -----------------------------------------------------------------
+
+    def mark_diagnostics(self, run_id: str, at: datetime) -> None:
+        """Record, once, that rejection diagnostics exist for `run_id` from `at` on (earlier
+        evaluations of an older run are never reconstructed)."""
+        self._write_guard()
+        body = json.dumps({"at": at.isoformat(), "diagnostics_version": DIAGNOSTICS_VERSION})
+        with self._lock:
+            db = self._db()
+            with db:
+                db.execute(
+                    "INSERT OR IGNORE INTO shadow_meta (key, value) VALUES (?, ?)",
+                    (f"diagnostics_from:{run_id}", body),
+                )
+
+    def diagnostics_from(self, run_id: str) -> dict[str, Any] | None:
+        if not self._has("shadow_meta"):
+            return None
+        with self._lock:
+            row = (
+                self._db()
+                .execute(
+                    "SELECT value FROM shadow_meta WHERE key = ?", (f"diagnostics_from:{run_id}",)
+                )
+                .fetchone()
+            )
+        return json.loads(row[0]) if row else None
+
+    def _has(self, table: str) -> bool:
+        """A read-only v1 file has no v2 tables until a writer opens it once."""
+        with self._lock:
+            return (
+                self._db()
+                .execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,))
+                .fetchone()
+                is not None
+            )
+
+    def rejections(
+        self,
+        run_id: str | None = None,
+        strategy_id: str | None = None,
+        asset_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        reason: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if not self._has("shadow_rejections"):
+            return []
+        where, params = self._where(run_id, strategy_id, asset_id, "decision_at", since, until)
+        if reason is not None:
+            where += " AND EXISTS (SELECT 1 FROM json_each(reasons_json) j WHERE j.value = ?)"
+            params.append(reason)
+        rows = self._rows(
+            f"SELECT * FROM shadow_rejections WHERE {where} ORDER BY decision_at, id LIMIT ?",
+            [*params, limit],
+        )
+        for r in rows:
+            r["reasons"] = json.loads(r.pop("reasons_json"))
+            r["observed"] = json.loads(r.pop("observed_json"))
+        return rows
+
+    def rejection_summary(
+        self,
+        run_id: str,
+        strategy_id: str | None = None,
+        asset_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> dict[tuple[str, int], dict[str, Any]]:
+        """Per (strategy, version): rejected evaluations and how often each reason occurs."""
+        if not self._has("shadow_rejections"):
+            return {}
+        where, params = self._where(run_id, strategy_id, asset_id, "decision_at", since, until)
+        out: dict[tuple[str, int], dict[str, Any]] = {}
+        with self._lock:
+            db = self._db()
+            for sid, version, n in db.execute(
+                f"SELECT strategy_id, strategy_version, COUNT(*) FROM shadow_rejections "
+                f"WHERE {where} GROUP BY strategy_id, strategy_version",
+                params,
+            ):
+                out[(sid, version)] = {"rejected": n, "reasons": {}}
+            for sid, version, code, n in db.execute(
+                f"SELECT strategy_id, strategy_version, j.value, COUNT(*) FROM shadow_rejections, "
+                f"json_each(reasons_json) j WHERE {where} "
+                "GROUP BY strategy_id, strategy_version, j.value",
+                params,
+            ):
+                out[(sid, version)]["reasons"][code] = n
+        return out
+
+    def decision_counts(
+        self,
+        run_id: str,
+        strategy_id: str | None = None,
+        asset_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> dict[tuple[str, int], dict[str, int]]:
+        where, params = self._where(run_id, strategy_id, asset_id, "decision_at", since, until)
+        out: dict[tuple[str, int], dict[str, int]] = {}
+        with self._lock:
+            for sid, version, action, n in self._db().execute(
+                f"SELECT strategy_id, strategy_version, action, COUNT(*) FROM shadow_decisions "
+                f"WHERE {where} GROUP BY strategy_id, strategy_version, action",
+                params,
+            ):
+                out.setdefault((sid, version), {})[action] = n
+        return out
+
     def counts(self) -> dict[str, int]:
         with self._lock:
             db = self._db()
             return {
                 t: int(db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (t,)).fetchone()
+                else 0
                 for t in ("shadow_strategies", "shadow_runs", "shadow_decisions",
-                          "shadow_positions", "shadow_trades", "shadow_equity", "shadow_metrics")
+                          "shadow_positions", "shadow_trades", "shadow_equity", "shadow_metrics",
+                          "shadow_rejections")
             }  # fmt: skip
 
 

@@ -8,6 +8,8 @@ python -m upscale.services.shadow positions [--open | --closed]
 python -m upscale.services.shadow trades
 python -m upscale.services.shadow decisions [--action ENTER]
 python -m upscale.services.shadow metrics
+python -m upscale.services.shadow diagnostics [--strategy scout_technical --strategy ...] [--json]
+python -m upscale.services.shadow rejections [--reason TECHNICAL_NOT_AVAILABLE]
 
 Filters: --run, --strategy, --asset, --since, --until.
 """
@@ -75,7 +77,39 @@ def parser() -> argparse.ArgumentParser:
     d.add_argument("--action", choices=("ENTER", "HOLD", "EXIT", "NO_ACTION"), default=None)
     d.add_argument("--limit", type=int, default=200)
     _filters(sub.add_parser("metrics"))
+    dg = sub.add_parser("diagnostics", help="why each strategy entered or rejected candidates")
+    dg.add_argument("--run", default=None, help=f"run id (default: {DEFAULT_RUN_ID})")
+    dg.add_argument("--strategy", action="append", default=None, help="repeatable")
+    dg.add_argument("--asset", default=None)
+    dg.add_argument("--since", type=_timestamp, default=None)
+    dg.add_argument("--until", type=_timestamp, default=None)
+    dg.add_argument("--json", action="store_true", help="print JSON")
+    rj = sub.add_parser("rejections", help="individual rejection diagnostics")
+    _filters(rj)
+    rj.add_argument("--reason", default=None, help="only rows with this reason code")
+    rj.add_argument("--limit", type=int, default=200)
     return p
+
+
+def _diagnostics_text(d: dict[str, Any]) -> str:
+    lines = [f"run {d['run_id']}: diagnostics available from "
+             f"{d['diagnostics_available_from'] or 'NOT AVAILABLE'}", d["note"]]  # fmt: skip
+    for s in d["strategies"]:
+        lines += [
+            f"{s['strategy']}:",
+            f"  evaluated: {s['evaluated']}",
+            f"  entered: {s['entered']}",
+            f"  blocked (qualified, stopped by position/risk control): {s['blocked']}",
+            f"  rejected: {s['rejected']}",
+            f"  held (position already open): {s['held']}",
+            "  reasons:" if s["reasons"] else "  reasons: none",
+        ]
+        lines += [f"    {code}: {v['count']} ({v['pct_of_rejected']}%)"
+                  for code, v in s["reasons"].items()]  # fmt: skip
+        if s["before_diagnostics_first_reason_only"]:
+            lines.append("  before diagnostics (first failed rule only, v1 codes):")
+            lines += [f"    {k}: {v}" for k, v in s["before_diagnostics_first_reason_only"].items()]
+    return "\n".join(lines)
 
 
 def _print(data: Any) -> None:
@@ -116,6 +150,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print(readable(store.trades(**common)))
             elif args.command == "decisions":
                 _print(readable(store.decisions(action=args.action, limit=args.limit, **common)))
+            elif args.command == "diagnostics":
+                d = engine.diagnostics(run_id, args.strategy, args.asset, args.since, args.until)
+                print(json.dumps(d, indent=2, default=str) if args.json else _diagnostics_text(d))
+            elif args.command == "rejections":
+                _print(readable(store.rejections(reason=args.reason, limit=args.limit, **common)))
             elif args.command == "metrics":
                 _print(engine.metrics(run_id, args.strategy, args.asset, args.since, args.until))
         return 0

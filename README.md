@@ -221,7 +221,14 @@ slippage) and are not real profit.
 * CLI: `python -m upscale.services.shadow init | strategies | run | status | positions
   [--open|--closed] | trades | decisions | metrics` (filters `--run --strategy --asset --since
   --until`). API (read-only): `GET /shadow/status`, `/strategies`, `/positions`, `/trades`,
-  `/decisions`, `/metrics`, `/shadow/background/status`.
+  `/decisions`, `/metrics`, `/diagnostics`, `/rejections`, `/shadow/background/status`.
+* Rejection diagnostics: every Scout evaluation a strategy does not enter on is stored in
+  the append-only `shadow_rejections` table with every failed rule as a stable code
+  (`TECHNICAL_NOT_AVAILABLE`, `SCORE_BELOW_MIN`, `SAFETY_NOT_AVAILABLE`...), the observed
+  values and evidence fingerprints. Decisions keep their meaning (NO_ACTION = qualified but
+  blocked by position / risk control). `python -m upscale.services.shadow diagnostics --run
+  <run> [--strategy ...]` summarizes them; `rejections --reason <code>` lists rows. Runs
+  processed before diagnostics report `diagnostics_available_from` (never reconstructed).
 * Calibration reads closed shadow trades as the SHADOW origin, kept apart from LIVE_FORWARD
   and HISTORICAL_REPLAY: `python -m upscale.services.calibration origins --horizon 1h`.
 

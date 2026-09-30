@@ -131,3 +131,39 @@ async def shadow_metrics(
     )
     assert isinstance(result, dict)
     return result
+
+
+@router.get("/diagnostics")
+async def shadow_diagnostics(
+    run: str | None = None,
+    strategy: Annotated[list[str] | None, Query()] = None,
+    asset: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> dict[str, Any]:
+    """Why each strategy entered or rejected Scout candidates (stored rows only)."""
+    empty: dict[str, Any] = {"label": NOT_REAL_PROFIT, "strategies": []}
+    result = await asyncio.to_thread(
+        _read,
+        lambda e: e.diagnostics(_run(e, run), strategy, asset, _time(since), _time(until)),
+        empty,
+    )
+    assert isinstance(result, dict)
+    return result
+
+
+@router.get("/rejections")
+async def shadow_rejections(
+    run: str | None = None,
+    strategy: str | None = None,
+    asset: str | None = None,
+    reason: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=5000)] = 200,
+) -> list[dict[str, Any]] | dict[str, Any]:
+    return await asyncio.to_thread(
+        _read,
+        lambda e: readable(
+            e.store.rejections(_run(e, run), strategy, asset, reason=reason, limit=limit)
+        ),
+        [],
+    )

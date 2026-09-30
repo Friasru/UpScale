@@ -106,8 +106,10 @@ class Output:
     closed: list[Position] = field(default_factory=list)
     trades: list[dict[str, Any]] = field(default_factory=list)
     equity: list[dict[str, Any]] = field(default_factory=list)
+    rejections: list[dict[str, Any]] = field(default_factory=list)
 
     def extend(self, other: "Output") -> None:
+        self.rejections += other.rejections
         self.decisions += other.decisions
         self.opened += other.opened
         self.closed += other.closed
@@ -318,11 +320,14 @@ class Book:
                     position=p, scout=s,
                 ))  # fmt: skip
             return out
-        reasons = self._entry_reasons(s, analyze)
+        reasons, detail = self._evaluate(s, analyze)
         if reasons:
-            self._count(f"no_entry:{reasons[0]}")
+            # Diagnostics only: a rejection row never becomes a decision and never changes
+            # the book (no sequence number, no state besides the counter).
+            self._count(f"rejected:{reasons[0]}")
+            out.rejections.append(self._rejection(s, reasons, detail))
             return out
-        assert price is not None  # _entry_reasons requires the exact-pool price
+        assert price is not None  # _evaluate requires the exact-pool price
         blocked = self._risk_block(s, len(held))
         size = 0.0
         if blocked is None:
@@ -347,98 +352,158 @@ class Book:
             return None
         return analyze(s.asset_id, s.decision_at, timedelta(minutes=rules.max_age_minutes))
 
-    def _entry_reasons(self, s: ScoutView, analyze: AnalyzeLookup) -> list[str]:
-        """Why the signal rules reject this evaluation (empty: it qualifies)."""
+    def _evaluate(self, s: ScoutView, analyze: AnalyzeLookup) -> tuple[list[str], dict[str, Any]]:
+        """Every entry rule this Scout evaluation fails, as stable reason codes (empty: it
+        qualifies), plus details. Only evidence already at hand is inspected: the Scout
+        record and, for strategies with Analyze rules, the archived Analyze decision at or
+        before the decision time. The random draw only selects among otherwise qualifying
+        candidates, so RANDOM_BASELINE_NOT_SELECTED is only ever the sole reason."""
         e = self.cfg.entry
         r: list[str] = []
+        detail: dict[str, Any] = {}
         if e.require_eligible and not s.eligible:
-            r.append("NOT_ELIGIBLE")
+            r.append("SCOUT_NOT_ELIGIBLE")
         if e.require_current_data and s.data_status != "CURRENT":
             r.append("STALE_DATA")
         if s.price is None:
-            r.append("NO_EXACT_TOKEN_PRICE")  # never trade without the exact pool's price
+            r.append("CURRENT_PRICE_UNAVAILABLE")  # never trade without the exact pool's price
         if s.market_status == "MARKET_COLLAPSE":
             r.append("MARKET_COLLAPSE")
         if s.stage not in e.allowed_stages:
-            r.append("STAGE")
+            r.append("STAGE_NOT_ALLOWED")
         if s.score is None or s.score < e.min_scout_score:
-            r.append("SCORE")
+            r.append("SCORE_BELOW_MIN")
         if s.liquidity_usd is None or s.liquidity_usd < e.min_liquidity_usd:
-            r.append("LIQUIDITY")
+            r.append("LIQUIDITY_BELOW_MIN")
         if e.max_risk_penalty is not None and (
             s.risk_penalty is None or s.risk_penalty > e.max_risk_penalty
         ):
-            r.append("RISK_PENALTY")
-        if any(sev in e.blocking_flag_severities for _, sev, _ in s.risk_flags):
+            r.append("RISK_PENALTY_TOO_HIGH")
+        blocking = [c for c, sev, _ in s.risk_flags if sev in e.blocking_flag_severities]
+        if blocking:
             r.append("BLOCKING_RISK_FLAG")
+            detail["blocking_flags"] = blocking
         missing = s.missing()
-        for label in sorted(missing - set(e.allowed_missing)):
-            r.append(f"MISSING:{label}")
+        # Missing evidence the strategy does not allow: the label is the reason code
+        # (SAFETY_NOT_AVAILABLE, TECHNICAL_NOT_AVAILABLE, SOCIAL_NOT_AVAILABLE, ...).
+        r += sorted(missing - set(e.allowed_missing))
+        safety_known = "SAFETY_NOT_AVAILABLE" not in missing
         if e.required_safety == "COMPLETE" and s.safety_status != "SAFETY_CHECKS_COMPLETE":
-            r.append("SAFETY")
+            r.append("SAFETY_LEVEL_INSUFFICIENT" if safety_known else "SAFETY_NOT_AVAILABLE")
         if e.required_safety == "PARTIAL_OR_COMPLETE" and s.safety_status not in (
             "SAFETY_CHECKS_COMPLETE", "SAFETY_CHECKS_PARTIAL",
         ):  # fmt: skip
-            r.append("SAFETY")
-        if e.block_active_authorities and (s.mint_authority_active or s.freeze_authority_active):
-            r.append("ACTIVE_AUTHORITY")
+            r.append("SAFETY_LEVEL_INSUFFICIENT" if safety_known else "SAFETY_NOT_AVAILABLE")
+        if e.block_active_authorities and s.mint_authority_active:
+            r.append("MINT_AUTHORITY_ACTIVE")
+        if e.block_active_authorities and s.freeze_authority_active:
+            r.append("FREEZE_AUTHORITY_ACTIVE")
         if e.max_holder_top10_pct is not None and (
             s.holder_top10_pct is not None and s.holder_top10_pct > e.max_holder_top10_pct
         ):
-            r.append("HOLDER_CONCENTRATION")
+            r.append("HOLDER_CONCENTRATION_TOO_HIGH")
         if e.technical is not None and s.technical is not None:
             t, tr = s.technical, e.technical
             snapshots = t.get("snapshots")
             if t.get("trend") not in tr.allowed_trends:
-                r.append("TECHNICAL_TREND")
+                r.append("TECHNICAL_TREND_NOT_ALLOWED")
             if not isinstance(snapshots, int) or snapshots < tr.min_snapshots:
-                r.append("TECHNICAL_SNAPSHOTS")
+                r.append("TECHNICAL_TOO_FEW_SNAPSHOTS")
             if tr.require_breakout and t.get("breakout") is not True:
-                r.append("TECHNICAL_BREAKOUT")
+                r.append("TECHNICAL_BREAKOUT_REQUIRED")
             if tr.require_volume_confirmed and t.get("volume_confirmed") is not True:
-                r.append("TECHNICAL_VOLUME")
+                r.append("TECHNICAL_VOLUME_NOT_CONFIRMED")
             if tr.require_higher_lows and t.get("higher_lows") is not True:
-                r.append("TECHNICAL_HIGHER_LOWS")
+                r.append("TECHNICAL_HIGHER_LOWS_REQUIRED")
         if e.social is not None and "SOCIAL_NOT_AVAILABLE" not in missing:
             so = e.social
+            failed = []
             if so.allowed_statuses is not None and s.social_status not in so.allowed_statuses:
-                r.append("SOCIAL_STATUS")
+                failed.append("STATUS")
             if (
                 so.max_spam_risk is not None
                 and SPAM_ORDER.get(s.spam_risk or "", 3) > SPAM_ORDER[so.max_spam_risk]
             ):
-                r.append("SOCIAL_SPAM_RISK")
-        if r:
-            return r
-        # Only now (cheap rules passed): the Analyze lookup, bounded to the decision time.
+                failed.append("SPAM_RISK")
+            if failed:
+                r.append("SOCIAL_REQUIREMENT_FAILED")
+                detail["social_failed"] = failed
+        # The Analyze lookup reads the local archive only, bounded to the decision time.
         if e.analyze is not None:
             a = self._analyze_for(s, analyze)
             ar = e.analyze
+            failed = []
             if a is None:
-                return ["ANALYZE_NOT_AVAILABLE"]
-            if a.observed_at > s.decision_at:
-                raise AssertionError("Analyze evidence later than the decision time")
-            if a.action not in ar.allowed_actions:
-                r.append("ANALYZE_ACTION")
-            if CONFIDENCE_ORDER.get(a.confidence or "", -1) < CONFIDENCE_ORDER[ar.min_confidence]:
-                r.append("ANALYZE_CONFIDENCE")
-            if (
-                ar.max_risk_level is not None
-                and RISK_ORDER.get(a.risk_level or "", 9) > RISK_ORDER[ar.max_risk_level]
-            ):
-                r.append("ANALYZE_RISK")
-            if ar.allowed_technical_trends is not None and (
-                a.technical_trend not in ar.allowed_technical_trends
-            ):
-                r.append("ANALYZE_TECHNICAL")
-            if r:
-                return r
+                failed.append("NOT_AVAILABLE")
+            else:
+                if a.observed_at > s.decision_at:
+                    raise AssertionError("Analyze evidence later than the decision time")
+                detail["analyze"] = a.summary()
+                if a.action not in ar.allowed_actions:
+                    failed.append("ACTION")
+                if (
+                    CONFIDENCE_ORDER.get(a.confidence or "", -1)
+                    < CONFIDENCE_ORDER[ar.min_confidence]
+                ):
+                    failed.append("CONFIDENCE")
+                if (
+                    ar.max_risk_level is not None
+                    and RISK_ORDER.get(a.risk_level or "", 9) > RISK_ORDER[ar.max_risk_level]
+                ):
+                    failed.append("RISK")
+                if ar.allowed_technical_trends is not None and (
+                    a.technical_trend not in ar.allowed_technical_trends
+                ):
+                    failed.append("TECHNICAL")
+            if failed:
+                r.append("ANALYZE_REQUIREMENT_FAILED")
+                detail["analyze_failed"] = failed
+        if r:
+            return list(dict.fromkeys(r)), detail
         if e.random_fraction is not None:
             key = f"{e.random_seed}|{self.cfg.strategy_id}|{s.asset_id}|{s.decision_at.isoformat()}"
             draw = int(hashlib.sha256(key.encode()).hexdigest()[:15], 16) / float(16**15)
             if draw >= e.random_fraction:
-                return ["RANDOM_NOT_SELECTED"]
-        return []
+                detail["random"] = {"draw": draw, "fraction": e.random_fraction,
+                                    "seed": e.random_seed}  # fmt: skip
+                return ["RANDOM_BASELINE_NOT_SELECTED"], detail
+        return [], detail
+
+    def _rejection(
+        self, s: ScoutView, reasons: list[str], detail: dict[str, Any]
+    ) -> dict[str, Any]:
+        """An immutable diagnostic row: why this strategy did not enter on this Scout
+        evaluation, with the observed values the rules looked at."""
+        t = s.technical or {}
+        observed = {
+            "score": s.score, "stage": s.stage, "eligible": s.eligible,
+            "data_status": s.data_status, "price_usd": s.price_usd,
+            "current_price_available": s.price is not None,
+            "market_status": s.market_status, "liquidity_usd": s.liquidity_usd,
+            "risk_penalty": s.risk_penalty, "safety_status": s.safety_status,
+            "mint_authority_active": s.mint_authority_active,
+            "freeze_authority_active": s.freeze_authority_active,
+            "holder_top10_pct": s.holder_top10_pct, "social_status": s.social_status,
+            "spam_risk": s.spam_risk,
+            "technical": {k: t.get(k) for k in ("trend", "snapshots", "breakout",
+                                                "volume_confirmed", "higher_lows")}
+            if s.technical is not None else None,
+            "missing": sorted(s.missing()),
+            **detail,
+        }  # fmt: skip
+        return {
+            "rejection_id": _id(self.run_id, self.cfg.key, "rejection", s.record_id),
+            "run_id": self.run_id,
+            "strategy_id": self.cfg.strategy_id,
+            "strategy_version": self.cfg.version,
+            "asset_id": s.asset_id,
+            "pool": s.pool,
+            "decision_at": s.decision_at,
+            "scout_record_id": s.record_id,
+            "reasons": reasons,
+            "observed": observed,
+            "fingerprints": s.fingerprints(),
+        }
 
     def _risk_block(self, s: ScoutView, held: int) -> str | None:
         risk = self.cfg.risk

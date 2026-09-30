@@ -168,6 +168,11 @@ class ShadowEngine:
         if limit.timestamp() <= cursor[0]:
             report["note"] = "nothing new to process yet"
             return self._finish(report, books)
+        # Rejection diagnostics exist from here on for this run (never reconstructed for
+        # evaluations an older version already processed).
+        self.store.mark_diagnostics(
+            run_id, max(_dt(cursor[0]) or limit, _dt(run["since_ts"]) or limit)
+        )
         timeline = EvidenceTimeline(self.evidence)
         clock = _dt(cursor[0]) or limit
         group_at: datetime | None = None
@@ -242,19 +247,21 @@ class ShadowEngine:
         timeline: EvidenceTimeline,
         report: dict[str, Any],
     ) -> None:
-        decisions, trades, equity = [], [], []
+        decisions, trades, equity, rejections = [], [], [], []
         opened, marked, closed = [], [], []
         for key, book in books.items():
             out = pending[key]
             decisions += out.decisions
             trades += out.trades
             equity += out.equity
+            rejections += out.rejections
             opened += [(book.cfg.strategy_id, book.cfg.version, p) for p in out.opened]
             closed += out.closed
             marked += [book.positions[pid] for pid in sorted(book.touched) if pid in book.positions]
             book.touched.clear()
             report["actions"].update(d["action"] for d in out.decisions)
             report["fills"] += len(out.trades)
+            report["rejections"] = report.get("rejections", 0) + len(out.rejections)
         skipped = stats.setdefault("skipped", {})
         for why, n in timeline.skipped.items():
             skipped[why] = skipped.get(why, 0) + n
@@ -262,7 +269,7 @@ class ShadowEngine:
         stats["last_commit_at"] = time.time()
         self.store.commit(
             run_id, decisions=decisions, opened=opened, marked=marked, closed=closed,
-            trades=trades, equity=equity, cursor=cursor, processed_until=through,
+            trades=trades, equity=equity, rejections=rejections, cursor=cursor, processed_until=through,
             books={k: {"strategy_id": b.cfg.strategy_id, "strategy_version": b.cfg.version,
                        "state": b.state()} for k, b in books.items()},
             stats=stats,
@@ -339,6 +346,75 @@ class ShadowEngine:
                 "until": until.isoformat() if until else None,
             },  # fmt: skip
             "strategies": [self._metrics(run_id, s, asset_id, since, until) for s in strategies],
+        }
+
+    def diagnostics(
+        self,
+        run_id: str,
+        strategy_ids: Sequence[str] | None = None,
+        asset_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Why each strategy entered or not, from stored rows only (no evidence re-read, no
+        provider request). Counts start when diagnostics began for the run: evaluated =
+        entered + blocked (qualified, stopped by position / risk control) + rejected
+        (entry rules failed). One rejection can carry several reasons."""
+        run = self.store.run(run_id)
+        if run is None:
+            raise ShadowError(f"unknown run {run_id}")
+        strategies = self._strategies(run)
+        if strategy_ids:
+            unknown = sorted(set(strategy_ids) - {s.strategy_id for s in strategies})
+            if unknown:
+                raise ShadowError(f"run {run_id} has no strategy {', '.join(unknown)}")
+            strategies = [s for s in strategies if s.strategy_id in strategy_ids]
+        marker = self.store.diagnostics_from(run_id)
+        start = datetime.fromisoformat(marker["at"]) if marker else None
+        window = max(since, start) if since and start else since or start
+        rejected = self.store.rejection_summary(run_id, None, asset_id, window, until)
+        decided = self.store.decision_counts(run_id, None, asset_id, window, until)
+        books = self.store.checkpoint(run_id)["books"]
+        out = []
+        for cfg in strategies:
+            key = (cfg.strategy_id, cfg.version)
+            d = decided.get(key, {})
+            r = rejected.get(key, {"rejected": 0, "reasons": {}})
+            n_rej = r["rejected"]
+            entered, blocked = d.get("ENTER", 0), d.get("NO_ACTION", 0)
+            reasons = sorted(r["reasons"].items(), key=lambda kv: (-kv[1], kv[0]))
+            counts = (books.get(cfg.key) or {}).get("state", {}).get("counts", {})
+            legacy = {k.removeprefix("no_entry:"): v for k, v in sorted(counts.items())
+                      if k.startswith("no_entry:")}  # fmt: skip
+            out.append({
+                "strategy": cfg.key, "name": cfg.name,
+                "evaluated": entered + blocked + n_rej, "entered": entered,
+                "blocked": blocked, "rejected": n_rej, "held": d.get("HOLD", 0),
+                "reasons": {code: {"count": n, "pct_of_rejected": round(100 * n / n_rej, 1)}
+                            for code, n in reasons},
+                # Counted by the version before diagnostics: the FIRST failed rule only, with
+                # v1 codes, over the whole run (not filtered). Never reconstructed.
+                "before_diagnostics_first_reason_only": legacy or None,
+            })  # fmt: skip
+        return {
+            "label": NOT_REAL_PROFIT,
+            "run_id": run_id,
+            "diagnostics_available_from": marker["at"] if marker else None,
+            "diagnostics_version": marker["diagnostics_version"] if marker else None,
+            "window": {
+                "since": window.isoformat() if window else None,
+                "until": until.isoformat() if until else None,
+                "asset": asset_id,
+            },  # fmt: skip
+            "note": (
+                "evaluated = entered + blocked + rejected, counted from when diagnostics "
+                "began; one rejection may carry several reasons, so reason counts can exceed "
+                "rejected. Earlier evaluations are not reconstructed."
+                if marker
+                else "no rejection diagnostics yet: this run has not been processed by a "
+                "diagnostics-enabled version (earlier evaluations are not reconstructed)"
+            ),
+            "strategies": out,
         }
 
     def status(self) -> dict[str, Any]:

@@ -304,14 +304,14 @@ def test_entry_records_evidence_and_reference_price(h: Harness) -> None:
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
-        ({"score": 50.0}, "SCORE"),
-        ({"stage": "STEADY"}, "STAGE"),
-        ({"liquidity": 5_000.0}, "LIQUIDITY"),
-        ({"liquidity": None}, "LIQUIDITY"),
+        ({"score": 50.0}, "SCORE_BELOW_MIN"),
+        ({"stage": "STEADY"}, "STAGE_NOT_ALLOWED"),
+        ({"liquidity": 5_000.0}, "LIQUIDITY_BELOW_MIN"),
+        ({"liquidity": None}, "LIQUIDITY_BELOW_MIN"),
         ({"data_status": "STALE_CARRIED"}, "STALE_DATA"),
-        ({"eligible": False}, "NOT_ELIGIBLE"),
-        ({"price": float("nan")}, "NO_EXACT_TOKEN_PRICE"),
-        ({"price": 0.0}, "NO_EXACT_TOKEN_PRICE"),
+        ({"eligible": False}, "SCOUT_NOT_ELIGIBLE"),
+        ({"price": float("nan")}, "CURRENT_PRICE_UNAVAILABLE"),
+        ({"price": 0.0}, "CURRENT_PRICE_UNAVAILABLE"),
         ({"market_status": "MARKET_COLLAPSE"}, "MARKET_COLLAPSE"),
     ],
 )
@@ -319,8 +319,8 @@ def test_no_entry(h: Harness, change: dict[str, Any], reason: str) -> None:
     h.scan(T0, h.cand(**change))
     report = h.run()
     assert report["actions"] == {} and not h.positions()
-    counts = h.store.checkpoint("t")["books"]["t@v1"]["state"]["counts"]
-    assert any(k.startswith("no_entry:") and reason in k for k in counts), counts
+    (r,) = h.store.rejections(run_id="t")
+    assert reason in r["reasons"], r["reasons"]
 
 
 def test_missing_safety_follows_the_explicit_config(h: Harness) -> None:

@@ -21,6 +21,7 @@ from upscale.background_scout import (
     outcome_backlog,
     provider_pressure,
 )
+from upscale.calibration_api import router as calibration_router
 from upscale.config import (
     BACKGROUND_SCOUT,
     BACKGROUND_SCOUT_INTERVAL_MINUTES,
@@ -91,6 +92,7 @@ app.add_middleware(
 )
 app.include_router(outcomes_router)
 app.include_router(evidence_router)
+app.include_router(calibration_router)
 
 orchestrator = Orchestrator()
 

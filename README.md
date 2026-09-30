@@ -175,6 +175,25 @@ writes them, and it never raises into or slows production.
 * Status: `GET /evidence/status`, `python -m upscale.services.evidence_archive status`
   (also `readiness`, and `show --asset solana:<mint> --kind safety --at <time>`).
 
+### Calibration Engine (experimental research only)
+
+`services/calibration/` analyzes LIVE_FORWARD outcomes and HISTORICAL_REPLAY samples (never
+merged: every table is per origin, plus a combined view showing its composition) and
+produces EXPERIMENTAL findings and single-change candidate configurations. It never changes
+production scoring, thresholds, confidence or decisions, and never promotes a candidate.
+
+* Splits: replay keeps its own; live observations are split by UTC day in 20-day cycles
+  (14 CALIBRATION, 3 VALIDATION, 3 HOLDOUT), sticky and chronological. HOLDOUT is only read by
+  `final-evaluate <id> --confirm-final-evaluation` (logged; the candidate is frozen first).
+* Evidence rules: 20 measured / 5 assets for descriptive stats, 50 / 10 for candidates,
+  100 / 20 for stronger evidence; per-asset caps and spacing against correlated samples.
+* Storage: `UPSCALE_CALIBRATION_DB` (default `calibration.sqlite3` next to the Scout
+  database), append-only; candidate status only moves forward.
+* CLI: `python -m upscale.services.calibration status | readiness | analyze --horizon 1h |
+  findings | create-candidates | candidates | validate <id> | compare <id> | final-evaluate <id>
+  --confirm-final-evaluation`. API (read-only): `GET /calibration/status`, `/readiness`,
+  `/findings`, `/candidates`.
+
 ## Prerequisites
 
 - Node.js ≥ 20.19 (22 LTS recommended)

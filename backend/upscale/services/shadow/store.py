@@ -734,6 +734,18 @@ class ShadowStore:
             [*params, limit],
         )
 
+    def decisions_by_id(self, decision_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        ids = list(dict.fromkeys(decision_ids))
+        for i in range(0, len(ids), 500):
+            chunk = ids[i : i + 500]
+            marks = ",".join("?" for _ in chunk)
+            for row in self._rows(
+                f"SELECT * FROM shadow_decisions WHERE decision_id IN ({marks})", chunk
+            ):
+                out[row["decision_id"]] = row
+        return out
+
     def equity(self, run_id: str, strategy_id: str | None = None) -> list[dict[str, Any]]:
         where, params = self._where(run_id, strategy_id, None, "at", None, None)
         return self._rows(f"SELECT * FROM shadow_equity WHERE {where} ORDER BY at, id", params)

@@ -12,12 +12,14 @@ python -m upscale.services.shadow diagnostics [--strategy scout_technical --stra
 python -m upscale.services.shadow rejections [--reason TECHNICAL_NOT_AVAILABLE]
 python -m upscale.services.shadow funnel [--run ...] [--strategy scout_technical ...] [--json]
 python -m upscale.services.shadow storage [--json]
+python -m upscale.services.shadow audit-unavailable [--run continuous-v1] [--strategy ...] [--json]
 
 Filters: --run, --strategy, --asset, --since, --until.
 """
 
 import argparse
 import json
+import sqlite3
 import sys
 from collections.abc import Sequence
 from datetime import datetime
@@ -25,6 +27,8 @@ from typing import Any
 
 from upscale.services.evidence_archive import hooks as evidence_hooks
 from upscale.services.evidence_archive.store import EvidenceStore, EvidenceStoreError
+from upscale.services.shadow.audit import AuditSettings, audit_unavailable
+from upscale.services.shadow.audit import text as audit_text
 from upscale.services.shadow.config import (
     CLEAN_DATA_CUTOFF,
     DEFAULT_RUN_ID,
@@ -106,7 +110,37 @@ def parser() -> argparse.ArgumentParser:
     fn.add_argument("--json", action="store_true", help="print JSON")
     sg = sub.add_parser("storage", help="shadow database size and diagnostics storage")
     sg.add_argument("--json", action="store_true", help="print JSON")
+    au = sub.add_parser("audit-unavailable",
+                        help="classify every MARKET_UNAVAILABLE exit (read-only, no requests)")  # fmt: skip
+    au.add_argument("--run", default=None, help=f"run id (default: {DEFAULT_RUN_ID})")
+    au.add_argument("--strategy", action="append", default=None, help="repeatable")
+    au.add_argument("--since", type=_timestamp, default=None, help="exit time, ISO-8601, inclusive")
+    au.add_argument("--until", type=_timestamp, default=None, help="exit time, ISO-8601, exclusive")
+    au.add_argument("--json", action="store_true", help="print JSON")
+    au.add_argument("--collection-gap-minutes", type=float, default=AuditSettings.collection_gap_minutes,
+                    help="largest gap between Scout runs counted as collection running")  # fmt: skip
+    au.add_argument("--recovery-hours", type=float, default=AuditSettings.recovery_hours,
+                    help="how long after an exit to look for the exact pool (retrospective)")  # fmt: skip
     return p
+
+
+def _audit(args: argparse.Namespace) -> int:
+    """Both databases opened read-only (mode=ro): this command can never write either."""
+    store = ShadowStore(args.db or default_shadow_db(), read_only=True)
+    evidence = EvidenceStore(args.evidence_db or default_evidence_db(), read_only=True)
+    try:
+        settings = AuditSettings(collection_gap_minutes=args.collection_gap_minutes,
+                                 recovery_hours=args.recovery_hours)  # fmt: skip
+        d = audit_unavailable(store, evidence, resolve_run(store, args.run), args.strategy,
+                              args.since, args.until, settings)  # fmt: skip
+        print(json.dumps(d, indent=2, default=str) if args.json else audit_text(d))
+        return 0
+    except (ShadowError, ShadowStoreError, EvidenceStoreError, sqlite3.Error) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+        evidence.close()
 
 
 def _num(v: float | None, suffix: str = "%", digits: int = 1) -> str:
@@ -208,6 +242,8 @@ def _print(data: Any) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     evidence_hooks.install(None)  # a simulation process never archives production evidence
+    if args.command == "audit-unavailable":
+        return _audit(args)
     store = ShadowStore(args.db or default_shadow_db())
     evidence_path = args.evidence_db or default_evidence_db()
     evidence = EvidenceStore(evidence_path, read_only=True)

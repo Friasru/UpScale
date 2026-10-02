@@ -17,6 +17,7 @@ from upscale.background_scout import (
     ScanFailed,
     ScanSummary,
     defer_reason,
+    hard_defer_reason,
     load_settings,
     outcome_backlog,
     provider_pressure,
@@ -25,14 +26,23 @@ from upscale.calibration_api import router as calibration_router
 from upscale.config import (
     BACKGROUND_SCOUT,
     BACKGROUND_SCOUT_INTERVAL_MINUTES,
+    BACKGROUND_SCOUT_MAX_DEFERRAL_MINUTES,
     CORS_ORIGINS,
     OUTCOMES_COLLECTOR,
     SHADOW,
     SHADOW_INTERVAL_MINUTES,
     SHADOW_RUN,
     SHADOW_SINCE,
+    SHADOW_WATCH,
+    SHADOW_WATCH_INTERVAL_MINUTES,
 )
 from upscale.evidence_api import router as evidence_router
+from upscale.held_position_watch import (
+    DexScreenerLookup,
+    GeckoTerminalLookup,
+    HeldPositionWatch,
+    load_watch_settings,
+)
 from upscale.orchestrator import Orchestrator
 from upscale.outcomes_api import router as outcomes_router
 from upscale.schemas import ChatRequest, ChatResponse
@@ -48,6 +58,7 @@ from upscale.services.evidence_archive import hooks as evidence
 from upscale.services.outcomes import record_decision, record_scout_run
 from upscale.services.outcomes.models import SurfacingHistory
 from upscale.services.scout.growth.models import GrowthScoutResult
+from upscale.services.shadow.config import default_shadow_db
 from upscale.services.shadow.config import load_settings as load_shadow_settings
 from upscale.services.shadow.service import BackgroundShadow
 from upscale.shadow_api import router as shadow_router
@@ -79,9 +90,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         task = asyncio.create_task(collector.run_forever(stop))
     background_scout.start()
     background_shadow.start()
+    held_position_watch.start()
     try:
         yield
     finally:
+        await held_position_watch.stop()
         await background_shadow.stop()
         await background_scout.stop()
         if _enrichment_task is not None and not _enrichment_task.done():
@@ -213,10 +226,22 @@ async def _background_scan() -> ScanSummary:
     )
 
 
+def _background_hard_defer_reason() -> str | None:
+    """What still defers an overdue background scan: a user waiting, or a scan running."""
+    quiet = services.outcome_config.collector.quiet_after_seconds
+    return hard_defer_reason(
+        analyze_active=_interactive > 0 or time.monotonic() - _last_analyze < quiet,
+        scout_running=scout_feed.refreshing,
+    )
+
+
 background_scout = BackgroundScout(
-    load_settings(BACKGROUND_SCOUT, BACKGROUND_SCOUT_INTERVAL_MINUTES),
+    load_settings(
+        BACKGROUND_SCOUT, BACKGROUND_SCOUT_INTERVAL_MINUTES, BACKGROUND_SCOUT_MAX_DEFERRAL_MINUTES
+    ),
     _background_scan,
     _background_defer_reason,
+    hard_defer=_background_hard_defer_reason,
 )
 
 
@@ -236,6 +261,33 @@ def _shadow_defer_reason() -> str | None:
 background_shadow = BackgroundShadow(
     load_shadow_settings(SHADOW, SHADOW_INTERVAL_MINUTES, SHADOW_RUN, SHADOW_SINCE),
     _shadow_defer_reason,
+)
+
+
+def _watch_defer_reason() -> str | None:
+    """The held-position watch is below every production workload: Analyze, Scout scans
+    (manual or background) and safety enrichment; its provider calls also stay within
+    each gate's unreserved headroom (see upscale.held_position_watch)."""
+    quiet = services.outcome_config.collector.quiet_after_seconds
+    if _interactive > 0 or time.monotonic() - _last_analyze < quiet:
+        return "Analyze is active"
+    if scout_feed.refreshing or background_scout.running:
+        return "a Scout scan is running"
+    if services.safety_enrichment.running:
+        return "safety enrichment is running"
+    return None
+
+
+_watch_settings = load_watch_settings(SHADOW_WATCH, SHADOW_WATCH_INTERVAL_MINUTES)
+held_position_watch = HeldPositionWatch(
+    _watch_settings,
+    [
+        DexScreenerLookup(services.dexscreener_discovery, _watch_settings.keep_free_calls),
+        GeckoTerminalLookup(services.geckoterminal_discovery),
+    ],
+    shadow_db=default_shadow_db,
+    evidence_store=lambda: services.evidence_store,
+    defer=_watch_defer_reason,
 )
 
 
@@ -308,6 +360,12 @@ async def scout_refresh(
 async def scout_background_status() -> BackgroundScoutStatus:
     """The background Scout scheduler's actual state and its last attempt."""
     return background_scout.status()
+
+
+@app.get("/shadow/watch/status")
+async def shadow_watch_status() -> dict[str, object]:
+    """The held-position watch: what it looked up, archived, and why it waited."""
+    return held_position_watch.status()
 
 
 @app.get("/shadow/background/status")

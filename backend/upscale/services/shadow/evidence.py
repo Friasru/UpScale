@@ -5,7 +5,10 @@ The only inputs are Evidence Archive records (read-only), never a provider reque
 * ``scout`` records: Growth Scout's evaluation of one exact token at its decision time D
   (score, stage, liquidity, risk flags, safety, social, snapshot Technical context, the
   selected pool and its price, observed at T <= D);
-* ``market`` records: the exact pool's observed price at its observation time;
+* ``market`` records: the exact pool's observed price at its observation time, from
+  Scout or from the production held-position watch (component ``shadow_watch``, which
+  also archives what an exact-pool lookup found when it found no price: the pool not
+  found, or the provider failing);
 * ``decision`` records (Analyze: Opportunity action / confidence, Technical trend, Risk
   level), looked up only at or before a Scout decision time.
 
@@ -20,7 +23,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from upscale.services.evidence_archive.store import EvidenceRecord, EvidenceStore, Kind
+from upscale.services.evidence_archive.store import (
+    WATCH_COMPONENT,
+    EvidenceRecord,
+    EvidenceStore,
+    Kind,
+)
 
 PRICE_KINDS: tuple[Kind, ...] = ("market", "scout")
 
@@ -63,7 +71,26 @@ class PriceObs:
     pool: str
     price: float
     at: datetime  # when the price was observed
-    source: Literal["market", "scout"]
+    source: Literal["market", "scout", "watch"]
+    record_id: str
+    liquidity_usd: float | None = None  # reporting only (market state), never a rule input
+
+
+WatchState = Literal["NOT_FOUND", "NOT_LISTED", "PROVIDER_FAILED", "RATE_LIMITED"]
+
+
+@dataclass(frozen=True)
+class WatchStatus:
+    """A held-position watch lookup of an exact pool that produced no price: the provider
+    that priced the pool answered without it (NOT_FOUND, authoritative), another provider
+    did (NOT_LISTED, not authoritative), or the provider failed / rate-limited."""
+
+    asset_id: str
+    pool: str
+    status: WatchState
+    authoritative: bool
+    at: datetime
+    provider: str | None
     record_id: str
 
 
@@ -121,6 +148,7 @@ class ScoutView:
             self.market_observed_at,
             "scout",
             self.record_id,
+            self.liquidity_usd,
         )
 
     def missing(self) -> frozenset[str]:
@@ -205,6 +233,12 @@ class Event:
     seq: int  # archive row id: the tie-breaker, and the resume cursor
     price: PriceObs | None = None
     scout: ScoutView | None = None
+    status: WatchStatus | None = None
+
+    @property
+    def from_watch(self) -> bool:
+        """Held-position watch evidence (ignored by LEGACY_V1 books)."""
+        return self.status is not None or (self.price is not None and self.price.source == "watch")
 
 
 def scout_view(r: EvidenceRecord) -> ScoutView:
@@ -252,13 +286,33 @@ def scout_view(r: EvidenceRecord) -> ScoutView:
     )
 
 
+def is_watch(r: EvidenceRecord) -> bool:
+    return r.component == WATCH_COMPONENT and isinstance(r.payload.get("watch"), dict)
+
+
 def market_price(r: EvidenceRecord) -> PriceObs | None:
     c = r.payload.get("candidate") or {}
     price = valid_price(_dig(c, "metrics", "price_usd"))
     pool = _dig(c, "pool", "address") or r.pool_address
     if price is None or not pool or r.availability != "AVAILABLE":
         return None
-    return PriceObs(r.asset_id, pool, price, r.observed_at, "market", r.record_id)
+    source: Literal["market", "watch"] = "watch" if is_watch(r) else "market"
+    liquidity = _num(_dig(c, "metrics", "liquidity_usd"))
+    return PriceObs(r.asset_id, pool, price, r.observed_at, source, r.record_id, liquidity)
+
+
+def watch_status(r: EvidenceRecord) -> WatchStatus | None:
+    """A held-position watch record without a price, as a status of its exact pool."""
+    if r.kind != "market" or not is_watch(r):
+        return None
+    w = r.payload["watch"]
+    status, pool = w.get("status"), w.get("pool") or r.pool_address
+    if status not in ("NOT_FOUND", "NOT_LISTED", "PROVIDER_FAILED", "RATE_LIMITED") or not pool:
+        return None
+    return WatchStatus(
+        r.asset_id, pool, status, bool(w.get("authoritative")) and status == "NOT_FOUND",
+        r.observed_at, r.provider, r.record_id,
+    )  # fmt: skip
 
 
 def analyze_view(r: EvidenceRecord) -> AnalyzeView:
@@ -297,10 +351,14 @@ class EvidenceTimeline:
                 cursor = (r.observed_at.timestamp(), r.id)
                 if r.kind == "market":
                     price = market_price(r)
-                    if price is None:
+                    if price is not None:
+                        yield Event(at=r.observed_at, seq=r.id, price=price)
+                        continue
+                    status = watch_status(r)
+                    if status is None:
                         self._skip("market record without a valid exact-pool price")
                         continue
-                    yield Event(at=r.observed_at, seq=r.id, price=price)
+                    yield Event(at=r.observed_at, seq=r.id, status=status)
                 else:
                     yield Event(at=r.observed_at, seq=r.id, scout=scout_view(r))
             if len(records) < self.batch:

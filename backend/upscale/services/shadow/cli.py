@@ -3,6 +3,7 @@
 python -m upscale.services.shadow init
 python -m upscale.services.shadow strategies
 python -m upscale.services.shadow run [--run production] [--since 2026-09-30T05:50:00Z] [--until ...]
+    [--availability-policy EVIDENCE_AWARE_V2 | LEGACY_V1]  (a new run only; default V2)
 python -m upscale.services.shadow status
 python -m upscale.services.shadow positions [--open | --closed]
 python -m upscale.services.shadow trades
@@ -30,6 +31,7 @@ from upscale.services.evidence_archive.store import EvidenceStore, EvidenceStore
 from upscale.services.shadow.audit import AuditSettings, audit_unavailable
 from upscale.services.shadow.audit import text as audit_text
 from upscale.services.shadow.config import (
+    AVAILABILITY_POLICIES,
     CLEAN_DATA_CUTOFF,
     DEFAULT_RUN_ID,
     DETAIL_MODES,
@@ -71,6 +73,10 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("--until", type=_timestamp, default=None, help="last decision time")
     r.add_argument("--strategy", action="append", default=None,
                    help="strategy id (repeatable; default: every registered strategy)")  # fmt: skip
+    r.add_argument("--availability-policy", choices=AVAILABILITY_POLICIES, default=None,
+                   help="market availability policy of a NEW run (default EVIDENCE_AWARE_V2: "
+                        "missing evidence never closes a position; LEGACY_V1: closes it as "
+                        "MARKET_UNAVAILABLE after the timeouts); an existing run keeps its own")  # fmt: skip
     r.add_argument("--allow-contaminated", action="store_true",
                    help="allow --since before the clean-data cutoff (labeled research run)")  # fmt: skip
     r.add_argument("--diagnostics-detail", choices=DETAIL_MODES, default=None,
@@ -261,6 +267,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             engine.ensure_run(
                 args.run, args.since, args.until, args.strategy, args.allow_contaminated,
                 args={"cli": list(argv or sys.argv[1:])},
+                availability_policy=args.availability_policy,
             )  # fmt: skip
             _print(engine.run(args.run))
         elif args.command == "status":

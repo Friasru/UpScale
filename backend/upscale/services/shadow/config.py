@@ -44,6 +44,36 @@ ExitReason = Literal[
     "SIGNAL_EXIT",
     "MARKET_UNAVAILABLE",
 ]
+# How a run's books treat missing price evidence (a run-level setting, frozen when the run
+# is created; never part of a strategy's config hash):
+#
+# * LEGACY_V1 (every run created before this setting existed): no exact-pool price for
+#   `market_unavailable_after_minutes`, or a triggered exit without a price within
+#   `max_exit_delay_minutes`, closes the position as MARKET_UNAVAILABLE without a price.
+#   Only Scout-derived prices are read (held-position watch records are ignored), so such
+#   a run behaves exactly as it always did.
+# * EVIDENCE_AWARE_V2 (new runs): missing evidence never closes a position. A position
+#   without a recent price stays open (PRICE_STALE / EVIDENCE_GAP / PROVIDER_UNAVAILABLE,
+#   reporting only); a triggered exit waits for the next observed exact-pool price. Only an
+#   authoritative MARKET_NOT_FOUND observation of the exact pool, confirmed (see
+#   `book.NOT_FOUND_CONFIRMATIONS`) over at least `max_exit_delay_minutes` with no valid
+#   price in between, closes it as MARKET_UNAVAILABLE. Held-position watch prices count.
+AvailabilityPolicy = Literal["LEGACY_V1", "EVIDENCE_AWARE_V2"]
+AVAILABILITY_POLICIES: tuple[AvailabilityPolicy, ...] = ("LEGACY_V1", "EVIDENCE_AWARE_V2")
+LEGACY_POLICY: AvailabilityPolicy = "LEGACY_V1"
+DEFAULT_POLICY: AvailabilityPolicy = "EVIDENCE_AWARE_V2"  # for runs created from now on
+
+
+def run_policy(run: dict[str, object]) -> AvailabilityPolicy:
+    """A stored run's policy: runs created before the setting existed are LEGACY_V1."""
+    args = run.get("args")
+    raw = args.get("availability_policy") if isinstance(args, dict) else None
+    for p in AVAILABILITY_POLICIES:
+        if raw == p:
+            return p
+    return LEGACY_POLICY
+
+
 MissingLabel = Literal[
     "SAFETY_NOT_AVAILABLE",
     "SOCIAL_NOT_AVAILABLE",

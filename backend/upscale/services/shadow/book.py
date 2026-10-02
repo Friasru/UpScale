@@ -13,30 +13,69 @@ Accounting (simulated money only, `IDEALIZED_NO_FEES`):
 * equity = cash + open positions marked at their exact pool's last observed price;
   unrealized P/L = that mark minus the open cost basis;
 * MARKET_UNAVAILABLE closes a position without a price: its cost basis is reported as
-  ``unresolved_cost_usd``, excluded from equity (conservative, never a fabricated exit)
-  and from return statistics.
+  ``unresolved_cost_usd`` and the position is valued at zero in equity (written off:
+  conservative, never a fabricated exit); it is left out of return statistics. Metrics
+  also report a last-mark view (reporting only, see `metrics`).
+
+Market availability (`config.AvailabilityPolicy`, per run):
+
+* LEGACY_V1: a position with no exact-pool price for `market_unavailable_after_minutes`,
+  or a triggered exit (signal / max hold) that found no price within
+  `max_exit_delay_minutes`, is closed as MARKET_UNAVAILABLE at that deadline (`sweep`).
+  Held-position watch evidence is ignored entirely.
+* EVIDENCE_AWARE_V2: missing evidence is never a market exit. `sweep` closes nothing; a
+  position without a recent price stays open, and `market_state` labels it (reporting
+  only): MARKET_AVAILABLE (a price within PRICE_STALE_AFTER_MINUTES), LIQUIDITY_COLLAPSE
+  (that price's pool liquidity below LIQUIDITY_COLLAPSE_USD), PRICE_STALE (older, up to
+  `market_unavailable_after_minutes`), PROVIDER_UNAVAILABLE (the latest watch lookup
+  failed / was rate limited), EVIDENCE_GAP (older still, nothing explains it),
+  MARKET_NOT_FOUND (the provider that priced the pool answered without it). A triggered
+  exit (TP / SL / trailing / max hold / signal) still fills only at an observed
+  exact-pool price: it waits as long as it takes. The one priceless close is a confirmed
+  MARKET_NOT_FOUND: NOT_FOUND_CONFIRMATIONS authoritative not-found observations of the
+  exact pool spanning at least `max_exit_delay_minutes` with no valid price in between
+  (closed at the confirming observation, as MARKET_UNAVAILABLE with reason code
+  MARKET_NOT_FOUND).
 """
 
 import hashlib
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from upscale.services.shadow.config import (
     CONFIDENCE_ORDER,
+    LEGACY_POLICY,
     RISK_ORDER,
     SPAM_ORDER,
     Action,
+    AvailabilityPolicy,
     ExitReason,
     StrategyConfig,
 )
-from upscale.services.shadow.evidence import AnalyzeView, Event, PriceObs, ScoutView
+from upscale.services.shadow.evidence import (
+    AnalyzeView,
+    Event,
+    PriceObs,
+    ScoutView,
+    WatchStatus,
+)
 
 AnalyzeLookup = Callable[[str, datetime, timedelta], AnalyzeView | None]
 PRICE_BASIS = "OBSERVED_EXACT_POOL_PRICE"
 MIN_TIMING_VERSION = 2  # Scout records before it carry the legacy (run start) timing
 EPS = 1e-12
+# EVIDENCE_AWARE_V2 market availability (see the module docstring).
+MarketState = Literal[
+    "MARKET_AVAILABLE", "PRICE_STALE", "EVIDENCE_GAP", "PROVIDER_UNAVAILABLE",
+    "MARKET_NOT_FOUND", "LIQUIDITY_COLLAPSE",
+]  # fmt: skip
+PRICE_STALE_AFTER_MINUTES = 60.0
+LIQUIDITY_COLLAPSE_USD = 1_000.0  # Scout's own floor for a usable pool
+NOT_FOUND_CONFIRMATIONS = 2
+_DATES = ("entry_at", "entry_price_at", "last_price_at", "pending_since", "closed_at",
+          "watch_status_at", "not_found_since")  # fmt: skip
 
 
 def _id(*parts: object) -> str:
@@ -74,6 +113,12 @@ class Position:
     pending_decision_id: str | None = None
     closed_at: datetime | None = None
     exit_reason: str | None = None
+    # EVIDENCE_AWARE_V2 availability facts (event-derived; reset by every valid price).
+    last_liquidity_usd: float | None = None  # of the last price's pool (reporting only)
+    watch_status: str | None = None  # latest watch lookup without a price, after it
+    watch_status_at: datetime | None = None
+    not_found_count: int = 0  # authoritative MARKET_NOT_FOUND observations since it
+    not_found_since: datetime | None = None
 
     @property
     def remaining_cost(self) -> float:
@@ -85,16 +130,34 @@ class Position:
 
     def to_json(self) -> dict[str, Any]:
         d = asdict(self)
-        for k in ("entry_at", "entry_price_at", "last_price_at", "pending_since", "closed_at"):
+        for k in _DATES:
             d[k] = _iso(d[k])
         return d
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "Position":
         d = dict(d)
-        for k in ("entry_at", "entry_price_at", "last_price_at", "pending_since", "closed_at"):
-            d[k] = datetime.fromisoformat(d[k]) if d.get(k) else None
+        for k in _DATES:
+            if k in d:
+                d[k] = datetime.fromisoformat(d[k]) if d.get(k) else None
         return cls(**d)
+
+    def market_state(self, now: datetime, unavailable_after_minutes: float) -> MarketState:
+        """EVIDENCE_AWARE_V2's label for this open position at `now` (reporting only)."""
+        if self.not_found_count > 0:
+            return "MARKET_NOT_FOUND"
+        age = now - self.last_price_at
+        if age <= timedelta(minutes=PRICE_STALE_AFTER_MINUTES):
+            low = (
+                self.last_liquidity_usd is not None
+                and self.last_liquidity_usd < LIQUIDITY_COLLAPSE_USD
+            )
+            return "LIQUIDITY_COLLAPSE" if low else "MARKET_AVAILABLE"
+        if self.watch_status in ("PROVIDER_FAILED", "RATE_LIMITED"):
+            return "PROVIDER_UNAVAILABLE"
+        if age <= timedelta(minutes=unavailable_after_minutes):
+            return "PRICE_STALE"
+        return "EVIDENCE_GAP"
 
 
 @dataclass
@@ -123,9 +186,16 @@ class Output:
 
 
 class Book:
-    def __init__(self, run_id: str, cfg: StrategyConfig, state: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        run_id: str,
+        cfg: StrategyConfig,
+        state: dict[str, Any] | None = None,
+        policy: AvailabilityPolicy = LEGACY_POLICY,
+    ):
         self.run_id = run_id
         self.cfg = cfg
+        self.policy = policy
         s = state or {}
         self.cash: float = s.get("cash", cfg.risk.initial_capital_usd)
         self.positions: dict[str, Position] = {
@@ -170,6 +240,19 @@ class Book:
     def equity(self) -> float:
         return self.cash + self.open_value
 
+    @property
+    def evidence_aware(self) -> bool:
+        return self.policy == "EVIDENCE_AWARE_V2"
+
+    def market_states(self, now: datetime) -> dict[str, int]:
+        """Open positions by EVIDENCE_AWARE_V2 market state at `now` (reporting only)."""
+        out: dict[str, int] = {}
+        after = self.cfg.exit.market_unavailable_after_minutes
+        for p in self.positions.values():
+            state = p.market_state(now, after)
+            out[state] = out.get(state, 0) + 1
+        return dict(sorted(out.items()))
+
     def snapshot(self, at: datetime) -> dict[str, Any]:
         equity = self.equity
         self.peak_equity = max(self.peak_equity, equity)
@@ -198,8 +281,11 @@ class Book:
     def sweep(self, now: datetime) -> Output:
         """Time-based closes known by `now` (every event up to it has been applied):
         a triggered exit that found no price in time, or a pool with no observed price for
-        too long. Closed without a price at the rule's own deadline (deterministic)."""
+        too long. Closed without a price at the rule's own deadline (deterministic).
+        LEGACY_V1 only: under EVIDENCE_AWARE_V2 missing evidence never closes a position."""
         out = Output()
+        if self.evidence_aware:
+            return out
         x = self.cfg.exit
         delay = timedelta(minutes=x.max_exit_delay_minutes)
         for p in sorted(self.positions.values(), key=lambda p: p.position_id):
@@ -223,9 +309,13 @@ class Book:
         return out
 
     def on_event(self, event: Event, analyze: AnalyzeLookup) -> Output:
+        if event.from_watch and not self.evidence_aware:
+            return Output()  # LEGACY_V1 reads Scout-derived evidence only, as it always did
         out = self.sweep(event.at)
         if event.price is not None:
             out.extend(self.on_price(event.price, event.at))
+        if event.status is not None:
+            out.extend(self.on_status(event.status))
         if event.scout is not None:
             out.extend(self.on_scout(event.scout, analyze))
         return out
@@ -240,10 +330,47 @@ class Book:
             if p.asset_id != obs.asset_id or p.pool != obs.pool or obs.at <= p.last_price_at:
                 continue
             p.last_price, p.last_price_at = obs.price, obs.at
+            if self.evidence_aware:  # a valid price ends every "no price" state
+                p.last_liquidity_usd = obs.liquidity_usd
+                p.watch_status = p.watch_status_at = p.not_found_since = None
+                p.not_found_count = 0
             p.peak_price = max(p.peak_price, obs.price)
             p.trough_price = min(p.trough_price, obs.price)
             self.touched.add(p.position_id)
             self._price_exits(out, p, obs, at)
+        return out
+
+    def on_status(self, st: WatchStatus) -> Output:
+        """EVIDENCE_AWARE_V2: a watch lookup of an exact pool that found no price. Only an
+        authoritative not-found, confirmed (NOT_FOUND_CONFIRMATIONS over at least
+        `max_exit_delay_minutes`, no valid price in between), closes the position."""
+        out = Output()
+        delay = timedelta(minutes=self.cfg.exit.max_exit_delay_minutes)
+        for p in sorted(self.positions.values(), key=lambda p: p.position_id):
+            if p.asset_id != st.asset_id or p.pool != st.pool or st.at <= p.last_price_at:
+                continue
+            p.watch_status, p.watch_status_at = st.status, st.at
+            if st.status != "NOT_FOUND" or not st.authoritative:
+                continue
+            p.not_found_count += 1
+            p.not_found_since = p.not_found_since or st.at
+            if p.not_found_count < NOT_FOUND_CONFIRMATIONS or st.at - p.not_found_since < delay:
+                continue
+            link = {"kind": "market", "record_id": st.record_id, "fingerprint": None,
+                    "observed_at": st.at.isoformat()}  # fmt: skip
+            d = self._decision(
+                "EXIT", st.at, p.asset_id,
+                f"MARKET_NOT_FOUND: {st.provider or 'the provider'} that priced the exact pool "
+                f"reported it not found {p.not_found_count} times since "
+                f"{p.not_found_since.isoformat()}, no observed price since "
+                f"{p.last_price_at.isoformat()}",
+                position=p, links=[link],
+                evidence={"reason_code": "MARKET_NOT_FOUND", "watch_record": st.record_id,
+                          "not_found_count": p.not_found_count},
+            )  # fmt: skip
+            out.decisions.append(d)
+            self._fill(out, p, st.at, None, p.remaining_quantity, "MARKET_UNAVAILABLE",
+                       d["decision_id"], None)  # fmt: skip
         return out
 
     def _price_exits(self, out: Output, p: Position, obs: PriceObs, at: datetime) -> None:

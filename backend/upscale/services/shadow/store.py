@@ -746,6 +746,26 @@ class ShadowStore:
                 out[row["decision_id"]] = row
         return out
 
+    def unresolved_marks(
+        self, run_id: str, strategy_id: str, version: int
+    ) -> list[tuple[float, float]]:
+        """(cost, last mark value) of each MARKET_UNAVAILABLE fill of one book, in the order
+        the book recorded them: the quantity at the position's last observed exact-pool
+        price (a closed position's row keeps its last mark)."""
+        with self._lock:
+            rows = (
+                self._db()
+                .execute(
+                    "SELECT t.cost_usd, t.quantity * p.last_price FROM shadow_trades t "
+                    "JOIN shadow_positions p ON p.position_id = t.position_id "
+                    "WHERE t.run_id = ? AND t.strategy_id = ? AND t.strategy_version = ? "
+                    "AND t.exit_reason = 'MARKET_UNAVAILABLE' ORDER BY t.id",
+                    (run_id, strategy_id, version),
+                )
+                .fetchall()
+            )
+        return [(float(c), float(m)) for c, m in rows]
+
     def equity(self, run_id: str, strategy_id: str | None = None) -> list[dict[str, Any]]:
         where, params = self._where(run_id, strategy_id, None, "at", None, None)
         return self._rows(f"SELECT * FROM shadow_equity WHERE {where} ORDER BY at, id", params)

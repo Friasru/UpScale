@@ -33,15 +33,18 @@ from pathlib import Path
 from typing import Any
 
 from upscale.services.evidence_archive.store import EvidenceStore
-from upscale.services.shadow.book import Book, Output
+from upscale.services.shadow.book import Book, Output, Position
 from upscale.services.shadow.config import (
     CLEAN_DATA_CUTOFF,
+    DEFAULT_POLICY,
     DEFAULT_RUN_ID,
     NOT_REAL_PROFIT,
     SETTLE_SECONDS,
+    AvailabilityPolicy,
     DiagnosticsSettings,
     StrategyConfig,
     load_diagnostics_settings,
+    run_policy,
 )
 from upscale.services.shadow.evidence import PRICE_KINDS, AnalyzeView, EvidenceTimeline
 from upscale.services.shadow.funnel import (
@@ -113,11 +116,19 @@ class ShadowEngine:
         strategy_ids: Sequence[str] | None = None,
         allow_contaminated: bool = False,
         args: dict[str, Any] | None = None,
+        availability_policy: AvailabilityPolicy | None = None,
     ) -> dict[str, Any]:
         """The run `run_id`, created on first use with the latest registered version of
-        each strategy (frozen from then on). An existing run is never redefined."""
+        each strategy and the market availability policy (default: EVIDENCE_AWARE_V2),
+        frozen from then on. An existing run is never redefined (runs created before the
+        policy existed are LEGACY_V1)."""
         existing = self.store.run(run_id)
         if existing is not None:
+            if availability_policy is not None and availability_policy != run_policy(existing):
+                raise ShadowError(
+                    f"run {run_id} exists with availability policy {run_policy(existing)}: a "
+                    "run is never redefined, use a new --run id"
+                )
             if abs(existing["since_ts"] - since.timestamp()) > 1e-6 or (
                 existing["until_ts"] != (until.timestamp() if until else None)
             ):
@@ -146,9 +157,11 @@ class ShadowEngine:
                 f"unregistered strategies {missing or '(none registered)'}: run "
                 "`python -m upscale.services.shadow init` first"
             )
+        policy = availability_policy or DEFAULT_POLICY
         self.store.create_run(
             run_id, since, until, [latest[w] for w in wanted],
-            clean_data=since >= CLEAN_DATA_CUTOFF, args=args or {},
+            clean_data=since >= CLEAN_DATA_CUTOFF,
+            args={**(args or {}), "availability_policy": policy},
         )  # fmt: skip
         run = self.store.run(run_id)
         assert run is not None
@@ -177,8 +190,10 @@ class ShadowEngine:
             raise ShadowError(f"unknown run {run_id}")
         strategies = self._strategies(run)
         cp = self.store.checkpoint(run_id)
+        policy = run_policy(run)
         books = {
-            s.key: Book(run_id, s, cp["books"].get(s.key, {}).get("state")) for s in strategies
+            s.key: Book(run_id, s, cp["books"].get(s.key, {}).get("state"), policy)
+            for s in strategies
         }
         self._check_consistency(run_id, books)
         started = self.now()
@@ -197,6 +212,7 @@ class ShadowEngine:
         )
         report: dict[str, Any] = {
             "label": NOT_REAL_PROFIT, "run_id": run_id, "clean_data": run["clean_data"],
+            "availability_policy": policy,
             "from": _dt(cursor[0]), "until": limit, "events": 0, "late_evidence_ignored": late,
             "actions": Counter(), "fills": 0,
         }  # fmt: skip
@@ -403,7 +419,8 @@ class ShadowEngine:
                   and (since is None or e["at"] >= since.timestamp())
                   and (until is None or e["at"] < until.timestamp())]  # fmt: skip
         m = strategy_metrics(sid, cfg.version, trades, positions, equity,
-                             cfg.risk.initial_capital_usd)  # fmt: skip
+                             cfg.risk.initial_capital_usd,
+                             self.store.unresolved_marks(run_id, sid, cfg.version))  # fmt: skip
         if asset_id is not None:
             m["note"] = "filtered to one asset: equity, drawdown and exposure are portfolio-wide"
         return m | {"run_id": run_id, "name": cfg.name}
@@ -424,6 +441,7 @@ class ShadowEngine:
             "label": NOT_REAL_PROFIT,
             "run_id": run_id,
             "clean_data": run["clean_data"],
+            "availability_policy": run_policy(run),
             "since": run["since"],
             "filters": {
                 "strategy": strategy_id,
@@ -712,6 +730,8 @@ class ShadowEngine:
         runs = []
         for r in self.store.runs():
             cp = self.store.checkpoint(r["run_id"])
+            policy = run_policy(r)
+            at = _dt(cp["processed_until"]) or self.now()
             books = {
                 k: {
                     "equity": round(b["state"]["cash"] + sum(
@@ -719,12 +739,15 @@ class ShadowEngine:
                         for p in b["state"]["positions"].values()), 2),
                     "open_positions": len(b["state"]["positions"]),
                     "closed_positions": b["state"].get("closed_positions", 0),
+                    **({"open_market_states": _states(b, at, self.store)}
+                       if policy == "EVIDENCE_AWARE_V2" else {}),
                 }
                 for k, b in cp["books"].items()
                 if b.get("state")
             }  # fmt: skip
             runs.append({
-                "run_id": r["run_id"], "since": r["since"], "until": r["until"],
+                "run_id": r["run_id"], "availability_policy": policy,
+                "since": r["since"], "until": r["until"],
                 "clean_data": r["clean_data"], "execution_model": r["execution_model"],
                 "strategies": [f"{s['strategy_id']}@v{s['version']}" for s in r["strategies"]],
                 "processed_until": _dt(cp["processed_until"]),
@@ -745,6 +768,16 @@ class ShadowEngine:
                 "retention_days": self.diagnostics_settings.retention_days,
             },
         }
+
+
+def _states(book: dict[str, Any], at: datetime, store: ShadowStore) -> dict[str, int]:
+    """Open positions by market state at the processed time (EVIDENCE_AWARE_V2 reporting)."""
+    cfg = store.strategy(book["strategy_id"], book["strategy_version"])
+    out: Counter[str] = Counter()
+    for raw in book["state"]["positions"].values():
+        p = Position.from_json(raw)
+        out[p.market_state(at, cfg.exit.market_unavailable_after_minutes)] += 1
+    return dict(sorted(out.items()))
 
 
 def resolve_run(store: ShadowStore, requested: str | None) -> str:

@@ -597,3 +597,92 @@ def test_app_lifespan_starts_and_stops_the_scheduler(monkeypatch: pytest.MonkeyP
         body = client.get("/scout/background/status").json()
         assert body["enabled"] is False and body["next_run"] is None
     assert scan.calls == 0
+
+
+# --- bounded deferral and reliability diagnostics ------------------------------------------------
+
+
+class Clock:
+    def __init__(self, at: datetime) -> None:
+        self.at = at
+
+    def __call__(self) -> datetime:
+        return self.at
+
+
+def test_soft_deferrals_are_bounded_so_scout_cannot_starve() -> None:
+    """A steady outcome backlog deferred background Scout for hours (production gaps of
+    113-360 min): past interval + max_deferral, only hard reasons still defer it."""
+    clock = Clock(T0)
+    scan = FakeScan()
+    hard: list[str | None] = [None]
+    bg = BackgroundScout(
+        BackgroundScoutSettings(interval_minutes=30, max_deferral_minutes=60), scan,
+        lambda: "outcome collection has 12 due measurement(s) deferred for provider quota",
+        now=clock, hard_defer=lambda: hard[0],
+    )  # fmt: skip
+    for minutes in range(5, 90, 5):  # soft reason, not yet overdue: deferred every time
+        clock.at = T0 + timedelta(minutes=minutes)
+        assert run(bg.run_once()).status == "deferred"
+    assert scan.calls == 0
+    s = bg.status()
+    assert s.consecutive_deferrals == 17 and s.deferred_since == T0 + timedelta(minutes=5)
+    assert s.deferrals_by_reason == {
+        "outcome collection has 12 due measurement(s) deferred for provider quota": 17
+    }
+    clock.at = T0 + timedelta(minutes=90)  # 30 + 60 without a completed scan: overdue
+    hard[0] = "Analyze is active"  # a user waiting still wins
+    assert run(bg.run_once()).status == "deferred" and scan.calls == 0
+    hard[0] = None
+    result = run(bg.run_once())
+    assert result.status == "completed" and result.overdue and scan.calls == 1
+    s = bg.status()
+    assert s.overdue_runs == 1 and s.consecutive_deferrals == 0 and s.deferred_since is None
+    assert s.background_scans_started == 1 and s.background_scans_completed == 1
+    assert s.last_completed_at == T0 + timedelta(minutes=90)
+    clock.at = T0 + timedelta(minutes=100)  # just completed: soft reasons defer again
+    assert run(bg.run_once()).status == "deferred" and scan.calls == 1
+
+
+def test_without_a_hard_defer_callback_the_old_behaviour_holds() -> None:
+    clock = Clock(T0)
+    scan = FakeScan()
+    bg = BackgroundScout(BackgroundScoutSettings(), scan, lambda: "busy", now=clock)
+    clock.at = T0 + timedelta(hours=10)
+    assert run(bg.run_once()).status == "deferred" and scan.calls == 0
+
+
+def test_reliability_diagnostics() -> None:
+    clock = Clock(T0)
+    scan = FakeScan(ScanSummary(), ScanFailed("Scout scan produced no result"), ScanSummary())
+    bg = BackgroundScout(BackgroundScoutSettings(), scan, lambda: None, now=clock)
+    run(bg.run_once())
+    clock.at = T0 + timedelta(minutes=40)
+    run(bg.run_once())
+    clock.at = T0 + timedelta(minutes=200)
+    run(bg.run_once())
+    s = bg.status()
+    assert (s.background_scans_started, s.background_scans_completed,
+            s.background_scans_failed) == (3, 2, 1)  # fmt: skip
+    assert s.last_failure_at == T0 + timedelta(minutes=40)
+    assert s.last_failure_reason == "Scout scan produced no result"
+    assert s.last_started_at == T0 + timedelta(minutes=200)
+    assert s.longest_gap_between_completed_minutes == 200.0
+    assert s.last_scan_duration_seconds == 0.0 and s.process_started_at == T0
+
+
+def test_max_deferral_setting() -> None:
+    assert load_settings(None, None).max_deferral_minutes == 60.0
+    assert load_settings(None, None, "120").max_deferral_minutes == 120.0
+    assert load_settings(None, None, "1").max_deferral_minutes == MIN_INTERVAL_MINUTES
+    assert load_settings(None, None, "x").max_deferral_minutes == 60.0
+
+
+def test_production_hard_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+    main = upscale.main
+    monkeypatch.setattr(main, "_last_analyze", -1e9)
+    monkeypatch.setattr(main, "_interactive", 0)
+    assert main._background_hard_defer_reason() is None
+    monkeypatch.setattr(main, "_interactive", 1)
+    assert main._background_hard_defer_reason() == "Analyze is active"
+    assert main.background_scout._hard_defer is main._background_hard_defer_reason

@@ -127,9 +127,13 @@ def observation(r: EvidenceRecord) -> Obs:
         price, pool, liquidity = s.get("price_usd"), s.get("pair_address"), s.get("liquidity_usd")
     else:
         price = pool = liquidity = None
+    availability = r.availability
+    watch = p.get("watch")
+    if isinstance(watch, dict) and watch.get("status") == "NOT_LISTED":
+        availability = "NOT_COLLECTED"  # a non-authoritative provider: not proof it is gone
     return Obs(
         record_id=r.record_id, kind=r.kind, observed_at=r.observed_at, price_at=price_at,
-        archived_at=r.archived_at, availability=r.availability,
+        archived_at=r.archived_at, availability=availability,
         pool=pool if isinstance(pool, str) and pool else r.pool_address,
         price=valid_price(price), liquidity_usd=_num(liquidity), market_status=status,
         data_status=data_status,

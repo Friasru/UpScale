@@ -151,6 +151,9 @@ _geckoterminal_discovery = GeckoTerminalDiscoveryProvider(
     scout_config,
     gate=RequestGate("GeckoTerminal", scout_config.geckoterminal, limiter=geckoterminal_quota),
 )
+# The same provider objects (and gates) serve the held-position watch (upscale.main).
+dexscreener_discovery = _dexscreener_discovery
+geckoterminal_discovery = _geckoterminal_discovery
 scout_service = ScoutService(
     [_geckoterminal_discovery, _dexscreener_discovery],
     ScoutSnapshotStore(SCOUT_DB_PATH),

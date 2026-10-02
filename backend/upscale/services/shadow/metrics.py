@@ -5,6 +5,18 @@ A *trade* is one closed position (its fills aggregated). Its return is
 return (``unresolved``) and is left out of every return statistic, never counted as a
 win, a loss or zero.
 
+Equity is reported two ways (reporting only; decisions and sizing only ever use the
+written-off book equity):
+
+* written off (``equity_usd`` / ``written_off_equity_usd``, ``max_drawdown_pct`` /
+  ``written_off_max_drawdown_pct``): the book's own conservative accounting, a
+  MARKET_UNAVAILABLE position valued at zero;
+* last mark (``last_mark_equity_usd``, ``last_mark_max_drawdown_pct``): the same, with each
+  unresolved position carried at its last observed exact-pool mark instead. STALE: that
+  mark is the last price seen before the evidence stopped, not a price it could have been
+  sold at. Rebuilt from the immutable rows (equity rows, MARKET_UNAVAILABLE fills, the
+  positions' last marks), so it covers a run's whole history.
+
 Repeated scans of one asset are not independent evidence: `effective_sample_size` treats
 the trades of one asset as fully correlated (``n^2 / sum_a n_a^2``, i.e. n when every asset
 traded once, 1 when one asset holds every trade).
@@ -66,6 +78,31 @@ def closed_positions(trades: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(out, key=lambda p: (p["exit_at"], p["position_id"]))
 
 
+LAST_MARK_NOTE = (
+    "last_mark_*: REPORTING ONLY. Unresolved (MARKET_UNAVAILABLE) positions carried at their "
+    "last observed exact-pool mark (stale, retrospective): never used for decisions or sizing; "
+    "written_off_* is the book's own accounting."
+)
+
+
+def last_mark_series(
+    equity: Sequence[dict[str, Any]], unresolved: Sequence[tuple[float, float]]
+) -> list[float]:
+    """Each equity row's unresolved last-mark value: the marks of the first k unresolved
+    fills, k such that their cost adds up to the row's own `unresolved_cost` (the book adds
+    them in this order, so rows and fills align exactly)."""
+    out: list[float] = []
+    k, cost, mark = 0, 0.0, 0.0
+    for e in equity:
+        target = e["unresolved_cost"]
+        while k < len(unresolved) and cost + unresolved[k][0] <= target + 1e-6 * max(1.0, target):
+            cost += unresolved[k][0]
+            mark += unresolved[k][1]
+            k += 1
+        out.append(mark)
+    return out
+
+
 def effective_sample_size(assets: Sequence[str]) -> float:
     if not assets:
         return 0.0
@@ -80,6 +117,7 @@ def strategy_metrics(
     positions: Sequence[dict[str, Any]],
     equity: Sequence[dict[str, Any]],
     capital: float,
+    unresolved: Sequence[tuple[float, float]] = (),
 ) -> dict[str, Any]:
     closed = closed_positions(trades)
     resolved = [p for p in closed if p["resolved"]]
@@ -92,6 +130,15 @@ def strategy_metrics(
     days = {datetime.fromtimestamp(p["entry_at"], UTC).date() for p in positions}
     last = equity[-1] if equity else None
     per_asset = Counter(assets)
+    marks = last_mark_series(equity, unresolved)
+    peak, last_mark_dd = capital, 0.0
+    for e, m in zip(equity, marks, strict=True):
+        value = e["equity"] + m
+        peak = max(peak, value)
+        last_mark_dd = min(last_mark_dd, (value / peak - 1) * 100 if peak > 0 else 0.0)
+    written_off = last["equity"] if last else capital
+    unresolved_cost = last["unresolved_cost"] if last else 0.0
+    unresolved_mark = marks[-1] if marks else 0.0
     sample = (
         "INSUFFICIENT_SAMPLE"
         if len(resolved) < MIN_TRADES or len(set(assets)) < MIN_ASSETS
@@ -128,13 +175,20 @@ def strategy_metrics(
         "average_holding_minutes": _mean([p["holding_minutes"] for p in closed]),
         "exit_reasons": dict(Counter(p["exit_reason"] for p in closed)),
         "max_drawdown_pct": min((e["max_drawdown_pct"] for e in equity), default=0.0),
+        "written_off_max_drawdown_pct": min((e["max_drawdown_pct"] for e in equity), default=0.0),
+        "last_mark_max_drawdown_pct": last_mark_dd,
         "average_exposure_pct": _mean([e["exposure_pct"] for e in equity]),
         "initial_capital_usd": capital,
         "equity_usd": last["equity"] if last else capital,
         "cash_usd": last["cash"] if last else capital,
         "realized_pnl_usd": last["realized_pnl"] if last else 0.0,
         "unrealized_pnl_usd": last["unrealized_pnl"] if last else 0.0,
-        "unresolved_cost_usd": last["unresolved_cost"] if last else 0.0,
+        "unresolved_cost_usd": unresolved_cost,
+        "written_off_equity_usd": written_off,
+        "last_mark_equity_usd": written_off + unresolved_mark,
+        "unresolved_last_mark_value_usd": unresolved_mark,
+        "unresolved_capital_pct": unresolved_cost / capital * 100 if capital else None,
+        "accounting_note": LAST_MARK_NOTE,
         "exposure_pct": last["exposure_pct"] if last else 0.0,
         "equity_at": datetime.fromtimestamp(last["at"], UTC).isoformat() if last else None,
     }

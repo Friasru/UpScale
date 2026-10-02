@@ -2,8 +2,8 @@
 per classification, JSON output and summary counts. Temporary databases only; evidence is
 built with the production payload serializers through the Shadow test harness.
 
-Harness strategy timeouts: no exact-pool price for 120 min -> MARKET_UNAVAILABLE; a
-pending exit gets 60 min to find a price."""
+Harness strategy timeouts (LEGACY_V1 runs): no exact-pool price for 120 min ->
+MARKET_UNAVAILABLE; a pending exit gets 60 min to find a price."""
 
 import hashlib
 import json
@@ -22,6 +22,8 @@ from upscale.services.shadow.cli import main as cli_main
 from upscale.services.shadow.store import ShadowStore, ShadowStoreError
 
 from .test_shadow import T0, A, B, Harness
+
+LEGACY = "LEGACY_V1"  # the audit explains LEGACY_V1 evidence-timeout exits
 
 F = "MintFFFF9999"  # an ineligible filler: keeps Scout runs going, never entered
 
@@ -64,7 +66,7 @@ def record(h: Harness, at: datetime, kind: str = "market", **over: Any) -> None:
 
 def audit(h: Harness, **kw: Any) -> dict[str, Any]:
     h.now = h.now or m(10 * 60)  # every timeout has passed
-    h.run()
+    h.run(policy=LEGACY)
     return audit_unavailable(h.store, h.reader, "t", **kw)
 
 
@@ -214,7 +216,7 @@ def test_summary_counts(h: Harness) -> None:
 
 def test_filters(h: Harness) -> None:
     _two(h)
-    h.run()
+    h.run(policy=LEGACY)
     assert audit_unavailable(h.store, h.reader, "t", ["other"])["cases"] == []
     assert len(audit_unavailable(h.store, h.reader, "t", ["t"])["cases"]) == 2
     assert audit_unavailable(h.store, h.reader, "t", since=m(200))["cases"] == []
@@ -226,7 +228,7 @@ def test_filters(h: Harness) -> None:
 
 def _closed(h: Harness) -> tuple[Path, Path]:
     _two(h)
-    h.run()
+    h.run(policy=LEGACY)
     h.close()
     return h.shadow_path, h.ev_path
 
@@ -296,9 +298,9 @@ def test_no_provider_or_network_calls(
 
 def test_audit_does_not_change_the_book(h: Harness) -> None:
     _two(h)
-    h.run()
+    h.run(policy=LEGACY)
     rows = (h.store.counts(), h.store.checkpoint("t"), h.trades())
     audit_unavailable(h.store, h.reader, "t")
-    h.run()
+    h.run(policy=LEGACY)
     assert (h.store.counts(), h.store.checkpoint("t"), h.trades()) == rows
     assert isinstance(h.reader, EvidenceStore) and h.reader.read_only

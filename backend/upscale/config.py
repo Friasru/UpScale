@@ -93,6 +93,11 @@ OUTCOMES_COLLECTOR = (os.getenv("UPSCALE_OUTCOMES") or "1").strip().lower() not 
 # UPSCALE_BACKGROUND_SCOUT=0 disables it. Interval in minutes (default 30, at least 5).
 BACKGROUND_SCOUT = os.getenv("UPSCALE_BACKGROUND_SCOUT") or None
 BACKGROUND_SCOUT_INTERVAL_MINUTES = os.getenv("UPSCALE_BACKGROUND_SCOUT_INTERVAL_MINUTES") or None
+# Past interval + this many minutes without a completed scan, only Analyze / a running scan
+# still defer background Scout (default 60, at least 5).
+BACKGROUND_SCOUT_MAX_DEFERRAL_MINUTES = (
+    os.getenv("UPSCALE_BACKGROUND_SCOUT_MAX_DEFERRAL_MINUTES") or None
+)
 
 # Point-in-Time Evidence Archive: an append-only record of the evidence production already
 # fetched (market, DEX, on-chain safety, social, Growth Scout, Analyze), for Replay Lab.
@@ -121,6 +126,11 @@ SHADOW = os.getenv("UPSCALE_SHADOW") or None
 SHADOW_INTERVAL_MINUTES = os.getenv("UPSCALE_SHADOW_INTERVAL_MINUTES") or None
 SHADOW_RUN = os.getenv("UPSCALE_SHADOW_RUN") or None
 SHADOW_SINCE = os.getenv("UPSCALE_SHADOW_SINCE") or None
+# Held-position watch: exact-pool prices for open positions of EVIDENCE_AWARE_V2 Shadow runs
+# (upscale.held_position_watch). On by default (idle without such positions);
+# UPSCALE_SHADOW_WATCH=0 disables it. Interval in minutes (default 15, at least 5).
+SHADOW_WATCH = os.getenv("UPSCALE_SHADOW_WATCH") or None
+SHADOW_WATCH_INTERVAL_MINUTES = os.getenv("UPSCALE_SHADOW_WATCH_INTERVAL_MINUTES") or None
 
 # Secret-safe logging for the whole process (every logger and level): the credentials above
 # and any credential-looking query parameter or header are masked in log output.

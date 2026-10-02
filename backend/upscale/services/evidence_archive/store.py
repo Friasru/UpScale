@@ -49,6 +49,9 @@ AVAILABILITY: tuple[Availability, ...] = (
     "AVAILABLE", "NOT_AVAILABLE", "NOT_SUPPORTED", "PROVIDER_FAILED", "RATE_LIMITED", "NOT_COLLECTED",
 )  # fmt: skip
 MAX_CLOCK_SKEW_SECONDS = 300
+# The production component that archives held-position watch lookups (kind "market", with
+# a "watch" payload): exact-pool prices for open Shadow positions, or why none was found.
+WATCH_COMPONENT = "shadow_watch"
 # Timestamps that change without the evidence changing: left out of the fingerprint.
 VOLATILE_KEYS = frozenset(
     {"fetched_at", "observed_at", "computed_at", "as_of", "compared_at", "elapsed_minutes",

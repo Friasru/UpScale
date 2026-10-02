@@ -2,11 +2,12 @@
 production object already holds (nothing fetched, estimated or filled in), plus per-group
 availability so "not reported" is never confused with "safe" or "zero"."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from upscale.schemas import ChatRequest, ChatResponse
-from upscale.services.evidence_archive.store import Availability, PendingRecord
+from upscale.services.evidence_archive.store import WATCH_COMPONENT, Availability, PendingRecord
 from upscale.services.market_data import (
     AssetNotFoundError,
     InvalidRequestError,
@@ -15,10 +16,10 @@ from upscale.services.market_data import (
 from upscale.services.outcomes.models import DecisionObservation
 from upscale.services.scout.growth.models import GrowthScoutResult
 from upscale.services.scout.models import ScoutCandidate, ScoutMarketMetrics
-from upscale.services.scout.normalize import canonical_id
+from upscale.services.scout.normalize import canonical_id, metrics_from_pool
 from upscale.services.scout.social.models import SocialMomentum
 from upscale.services.solana_chain import KnownPool, OnchainSafetySnapshot
-from upscale.services.solana_dex import SolanaDexSnapshot
+from upscale.services.solana_dex import DexPool, SolanaDexSnapshot
 
 # Free text that may be copyrighted (news) is referenced (URL, source, time), not copied.
 TEXT_KEYS = frozenset({"title", "summary", "description", "content", "text", "headline", "body"})
@@ -69,6 +70,80 @@ def market(c: ScoutCandidate) -> list[PendingRecord]:
                 "field_availability": market_fields(c.metrics, c.pool.created_at),
                 "normalized_by": "scout.normalize.build_candidates + scout.features",
             },
+        )
+    ]
+
+
+WatchResult = Literal[
+    "PRICED", "LIQUIDITY_COLLAPSE", "NOT_FOUND", "NOT_LISTED", "PROVIDER_FAILED", "RATE_LIMITED"
+]
+WATCH_AVAILABILITY: dict[str, Availability] = {
+    "PRICED": "AVAILABLE", "LIQUIDITY_COLLAPSE": "AVAILABLE", "NOT_FOUND": "NOT_AVAILABLE",
+    "NOT_LISTED": "NOT_AVAILABLE", "PROVIDER_FAILED": "PROVIDER_FAILED",
+    "RATE_LIMITED": "RATE_LIMITED",
+}  # fmt: skip
+WATCH_VERSION = 1
+
+
+@dataclass(frozen=True)
+class PoolWatchObservation:
+    """One held-position watch lookup of an exact (chain, token, pool): the pool as the
+    provider reported it (`pool`, for PRICED / LIQUIDITY_COLLAPSE), or why there is none.
+    `authoritative`: the provider asked is the one that priced the position's pool, so its
+    answering without the pool means the pool is gone (NOT_FOUND), not just unlisted."""
+
+    chain: str
+    token: str
+    pool_address: str
+    provider: str
+    observed_at: datetime
+    status: WatchResult
+    authoritative: bool
+    pool: DexPool | None = None
+    error: str | None = None
+    holders: int = 1  # open positions (strategies x runs) sharing this exact pool
+
+
+def pool_watch(o: PoolWatchObservation) -> list[PendingRecord]:
+    """A ``market`` record of the exact pool (component ``shadow_watch``): with a price, in
+    the shape Scout's market records use (``candidate.metrics`` / ``candidate.pool``), so
+    every reader of market evidence understands it; without one, its availability says why
+    (NOT_AVAILABLE: not found / not listed; PROVIDER_FAILED; RATE_LIMITED)."""
+    watch = {
+        "version": WATCH_VERSION, "status": o.status, "authoritative": o.authoritative,
+        "chain": o.chain, "token": o.token, "pool": o.pool_address, "provider": o.provider,
+        "error": o.error, "holders": o.holders,
+    }  # fmt: skip
+    payload: dict[str, Any] = {"watch": watch, "normalized_by": "held_position_watch"}
+    p = o.pool
+    if p is not None and o.status in ("PRICED", "LIQUIDITY_COLLAPSE"):
+        metrics = metrics_from_pool(p)
+        payload["candidate"] = {
+            "canonical_id": canonical_id(o.chain, o.token), "chain": o.chain,
+            "address": o.token, "symbol": p.base.symbol, "observed_at": o.observed_at.isoformat(),
+            "market_provider": o.provider, "metrics": metrics.model_dump(mode="json"),
+            "pool": {
+                "address": o.pool_address, "dex": p.dex, "url": p.url,
+                "quote_address": p.quote.address, "quote_symbol": p.quote.symbol,
+                "quote_kind": p.quote_kind,
+                "created_at": p.pair_created_at.isoformat() if p.pair_created_at else None,
+            },
+        }  # fmt: skip
+        payload["field_availability"] = market_fields(metrics, p.pair_created_at)
+    return [
+        PendingRecord(
+            kind="market",
+            asset_id=canonical_id(o.chain, o.token),
+            chain=o.chain,
+            address=o.token,
+            pool_address=o.pool_address,
+            dex=p.dex if p is not None else None,
+            provider=o.provider,
+            observed_at=o.observed_at,
+            component=WATCH_COMPONENT,
+            availability=WATCH_AVAILABILITY[o.status],
+            reason=o.error,
+            payload=payload,
         )
     ]
 

@@ -26,6 +26,7 @@ from upscale.services.shadow.book import Book
 from upscale.services.shadow.cli import main as cli_main
 from upscale.services.shadow.config import (
     CLEAN_DATA_CUTOFF,
+    AvailabilityPolicy,
     DiagnosticsSettings,
     EntryRules,
     ExitRules,
@@ -174,12 +175,12 @@ class Harness:
 
     def run(
         self, *strategies: StrategyConfig, run_id: str = "t", since: datetime = T0 - timedelta(hours=1),
-        until: datetime | None = None,
+        until: datetime | None = None, policy: AvailabilityPolicy | None = None,
     ) -> dict[str, Any]:  # fmt: skip
         for s in strategies or (strat(),):
             self.store.register(s)
         ids = [s.strategy_id for s in strategies or (strat(),)]
-        self.engine.ensure_run(run_id, since, until, ids)
+        self.engine.ensure_run(run_id, since, until, ids, availability_policy=policy)
         return self.engine.run(run_id)
 
     def trades(self, **kw: Any) -> list[dict[str, Any]]:
@@ -505,7 +506,7 @@ def test_market_unavailable_never_fabricates_an_exit(h: Harness) -> None:
     h.scan(T0, h.cand(price=1.0))
     h.scan(T0 + timedelta(minutes=30), h.cand(price=1.1, stage="FADING", pool="other-pool"))
     h.now = T0 + timedelta(hours=3)
-    h.run()  # no price of our pool within the 60-minute exit delay
+    h.run(policy="LEGACY_V1")  # no price of our pool within the 60-minute exit delay
     (t,) = h.trades()
     assert t["exit_reason"] == "MARKET_UNAVAILABLE"
     assert t["exit_price"] is None and t["pnl_usd"] is None and t["return_pct"] is None
@@ -530,7 +531,7 @@ def test_stale_pool_becomes_market_unavailable(h: Harness) -> None:
     h.scan(T0, h.cand(price=1.0))
     h.price(T0 + timedelta(minutes=60), 1.01)
     h.price(T0 + timedelta(minutes=300), 1.5, mint=B)  # time passes, nothing for our pool
-    h.run()
+    h.run(policy="LEGACY_V1")
     (t,) = h.trades()
     assert t["exit_reason"] == "MARKET_UNAVAILABLE" and t["exit_price"] is None
     assert t["exit_at"] == (T0 + timedelta(minutes=180)).timestamp()  # last price + 120 min

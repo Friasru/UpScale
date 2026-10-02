@@ -127,6 +127,8 @@ class EvidenceRecorder:
     def _convert(self, kind: str, obj: Any, extra: dict[str, Any]) -> list[PendingRecord]:
         if kind == "market":
             return payloads.market(obj)
+        if kind == "pool_watch":
+            return payloads.pool_watch(obj)
         if kind == "dex_market":
             return payloads.dex_market(obj)
         if kind == "safety":

@@ -12,11 +12,17 @@ Background Scout is the lowest priority user of every shared provider quota:
 3. Manual Scout refresh
 4. Background Scout
 
-Before each run `defer_reason` is asked why not to run now; any reason defers the run by
-`retry_minutes` (never a busy loop). Deferral is bounded: once no scan has completed for
-`interval_minutes + max_deferral_minutes` (default 30 + 60), only `hard_defer_reason` is
-asked (Analyze active, a Scout scan already running): soft reasons (due outcome work
-waiting for quota, provider pressure) can no longer postpone it again. Every provider gate
+Before each run the hard reasons (`hard_defer_reason`: Analyze active, a Scout scan already
+running) and then the soft ones (`defer_reason`: due outcome work waiting for quota, provider
+pressure) are asked why not to run now; any reason defers the run by `retry_minutes` (never
+a busy loop). Deferral is bounded: the first soft deferral since the last completed scan
+opens a deferral window (`deferred_since`); repeated soft deferrals never move it (they are
+counted by a stable reason code, not by their message, whose counts change every cycle),
+hard deferrals neither open nor reset it, and only a completed scan closes it. Once the
+window is `max_deferral_minutes` old (default 60) the scan is overdue: only hard reasons
+can still defer it, and the next attempt they allow runs the scan (a failed scan keeps the
+window open, so the next scheduled attempt is overdue too). The window is kept in memory: a
+restart opens a new one. Every provider gate
 stays hard, outcome work keeps outranking Scout on the shared GeckoTerminal quota, and the
 "interactive" reservation is never touched, so a scan under pressure just runs fewer
 discovery feeds. Without this bound, a steady outcome backlog on GeckoTerminal (6 calls a
@@ -34,7 +40,7 @@ import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import BaseModel
 
@@ -57,6 +63,35 @@ MAX_DEFERRAL_MINUTES = 60.0
 SHUTDOWN_GRACE_SECONDS = 15.0
 
 _OFF = ("0", "false", "off", "no")
+
+DeferKind = Literal["hard", "soft"]
+
+
+class DeferReason(str):
+    """A human-readable defer message (it may carry counts that change every cycle) with a
+    stable `code`: deferral diagnostics count by code."""
+
+    code: str
+
+    def __new__(cls, message: str, code: str) -> Self:
+        reason = super().__new__(cls, message)
+        reason.code = code
+        return reason
+
+
+def reason_code(reason: str) -> str:
+    """The stable code of a defer reason (a plain message is its own code)."""
+    return reason.code if isinstance(reason, DeferReason) else reason
+
+
+ANALYZE_ACTIVE = DeferReason("Analyze is active", "analyze_active")
+SCOUT_RUNNING = DeferReason("a Scout refresh is already running", "scout_running")
+BACKGROUND_RUNNING = DeferReason(
+    "a background Scout run is already in progress", "background_run_in_progress"
+)
+# Codes that only ever mean "someone is waiting" or "a scan is running": they defer even an
+# overdue scan, whichever check reported them.
+HARD_CODES = frozenset({ANALYZE_ACTIVE.code, SCOUT_RUNNING.code, BACKGROUND_RUNNING.code})
 
 
 @dataclass(frozen=True)
@@ -113,31 +148,42 @@ def load_settings(
 # --- Priority ------------------------------------------------------------------------------
 
 
-def outcome_backlog(report: CycleReport | None, now: datetime, max_age: timedelta) -> str | None:
+def outcome_backlog(
+    report: CycleReport | None, now: datetime, max_age: timedelta
+) -> DeferReason | None:
     """Due outcome work the collector's latest cycle (if recent) could not measure for
     provider access: Scout must not take that capacity first."""
     if report is None or now - report.at > max_age:
         return None
     if report.deferred_for_quota:
-        return (
+        return DeferReason(
             f"outcome collection has {report.deferred_for_quota} due measurement(s) "
-            "deferred for provider quota"
+            "deferred for provider quota",
+            "outcome_backlog_quota",
         )
     if report.network_skipped:
-        return "outcome collection has due measurements waiting for provider access"
+        return DeferReason(
+            "outcome collection has due measurements waiting for provider access",
+            "outcome_backlog_waiting",
+        )
     return None
 
 
-def provider_pressure(gates: Sequence[RequestGate], cooldown_seconds: float) -> str | None:
+def provider_pressure(gates: Sequence[RequestGate], cooldown_seconds: float) -> DeferReason | None:
     """A discovery provider that recently answered "rate limited", or whose shared quota
     can't give discovery its full unreserved share right now (other work is using it)."""
     for gate in gates:
         if gate.rate_limited_within(cooldown_seconds):
-            return f"{gate.name} rate limiting was detected recently"
+            return DeferReason(
+                f"{gate.name} rate limiting was detected recently",
+                f"provider_rate_limited:{gate.name}",
+            )
     for gate in gates:
         share = gate.limits.calls_per_minute - sum(gate.limits.reservations.values())
         if gate.available(DEFAULT_LANE) < share:
-            return f"{gate.name} capacity is in use by other work"
+            return DeferReason(
+                f"{gate.name} capacity is in use by other work", f"provider_capacity:{gate.name}"
+            )
     return None
 
 
@@ -150,20 +196,20 @@ def defer_reason(
 ) -> str | None:
     """Why background Scout should not run now, in priority order (None: run)."""
     if analyze_active:
-        return "Analyze is active"
+        return ANALYZE_ACTIVE
     if outcome_backlog is not None:
         return outcome_backlog
     if scout_running:
-        return "a Scout refresh is already running"
+        return SCOUT_RUNNING
     return provider_pressure
 
 
 def hard_defer_reason(*, analyze_active: bool, scout_running: bool) -> str | None:
     """The reasons that still defer an overdue scan: someone is waiting, or a scan runs."""
     if analyze_active:
-        return "Analyze is active"
+        return ANALYZE_ACTIVE
     if scout_running:
-        return "a Scout refresh is already running"
+        return SCOUT_RUNNING
     return None
 
 
@@ -195,7 +241,9 @@ class BackgroundRunResult(BaseModel):
     candidates_ranked: int | None = None
     new_outcome_anchors: int | None = None
     deferred: bool = False
-    defer_reason: str | None = None
+    defer_reason: str | None = None  # human-readable (may carry changing counts)
+    defer_code: str | None = None  # stable code (what diagnostics count by)
+    defer_kind: DeferKind | None = None  # hard: defers even an overdue scan
     error: str | None = None
 
 
@@ -221,11 +269,17 @@ class BackgroundScoutStatus(BaseModel):
     last_scan_duration_seconds: float | None = None
     longest_scan_duration_seconds: float | None = None
     next_due_at: datetime | None = None
-    deferrals_by_reason: dict[str, int] = {}
+    deferrals_by_reason: dict[str, int] = {}  # by stable reason code
     consecutive_deferrals: int = 0
+    # Start of the deferral window: the first soft deferral since the last completed scan
+    # (repeated soft and any hard deferrals keep it; a completed scan clears it).
     deferred_since: datetime | None = None
+    overdue_at: datetime | None = None  # deferred_since + max_deferral_minutes
+    overdue: bool = False  # now past overdue_at: only hard reasons can still defer
+    last_defer_kind: DeferKind | None = None
+    last_defer_code: str | None = None
     longest_gap_between_completed_minutes: float | None = None
-    overdue_runs: int = 0
+    overdue_runs: int = 0  # forced (overdue) scans actually started
     max_deferral_minutes: float = MAX_DEFERRAL_MINUTES
 
 
@@ -257,6 +311,8 @@ class BackgroundScout:
         self.deferrals: dict[str, int] = {}
         self.consecutive_deferrals = 0
         self.deferred_since: datetime | None = None
+        self.last_defer_kind: DeferKind | None = None
+        self.last_defer_code: str | None = None
         self.overdue_runs = 0
         self.running = False
         self.last_run: datetime | None = None
@@ -291,6 +347,10 @@ class BackgroundScout:
             deferrals_by_reason=dict(self.deferrals),
             consecutive_deferrals=self.consecutive_deferrals,
             deferred_since=self.deferred_since,
+            overdue_at=self._overdue_at(),
+            overdue=self.overdue(self.now()),
+            last_defer_kind=self.last_defer_kind,
+            last_defer_code=self.last_defer_code,
             longest_gap_between_completed_minutes=self.longest_gap,
             overdue_runs=self.overdue_runs,
             max_deferral_minutes=self.settings.max_deferral_minutes,
@@ -305,51 +365,84 @@ class BackgroundScout:
         self.counts[result.status] += 1
         if result.status == "deferred":
             self.consecutive_deferrals += 1
-            self.deferred_since = self.deferred_since or result.attempted_at
-        else:
+            self.last_defer_kind, self.last_defer_code = result.defer_kind, result.defer_code
+            if result.defer_kind == "soft" and self.deferred_since is None:
+                self.deferred_since = result.attempted_at  # opens the deferral window
+        else:  # a scan started
             self.consecutive_deferrals = 0
-            self.deferred_since = None
+            self.last_defer_kind = self.last_defer_code = None
+            if result.status == "completed":  # only a completed scan closes the window
+                self.deferred_since = None
         return result
 
-    def overdue(self, at: datetime) -> bool:
-        """No scan completed for interval + max_deferral (since startup, at first)."""
-        s = self.settings
-        since = self.last_completed_at or self.started_at
-        bound = timedelta(minutes=s.interval_minutes + s.max_deferral_minutes)
-        return at - since >= bound
+    def _overdue_at(self) -> datetime | None:
+        if self._hard_defer is None or self.deferred_since is None:
+            return None  # no bound without a hard check; no window without a soft deferral
+        return self.deferred_since + timedelta(minutes=self.settings.max_deferral_minutes)
 
-    def _deferred(self, at: datetime, reason: str) -> BackgroundRunResult:
-        self.deferrals[reason] = self.deferrals.get(reason, 0) + 1
-        logger.info("background Scout deferred: %s", reason)
+    def overdue(self, at: datetime) -> bool:
+        """Soft reasons have deferred the scan for max_deferral_minutes (counted from the
+        first soft deferral since the last completed scan)."""
+        deadline = self._overdue_at()
+        return deadline is not None and at >= deadline
+
+    def _deferred(
+        self, at: datetime, reason: str, kind: DeferKind, overdue: bool = False
+    ) -> BackgroundRunResult:
+        code = reason_code(reason)
+        if code in HARD_CODES:
+            kind = "hard"
+        self.deferrals[code] = self.deferrals.get(code, 0) + 1
+        logger.info("background Scout deferred (%s): %s", kind, reason)
         return self._record(
             BackgroundRunResult(
                 status="deferred",
                 attempted_at=at,
                 finished_at=self.now(),
+                overdue=overdue,
                 deferred=True,
-                defer_reason=reason,
+                defer_reason=str(reason),
+                defer_code=code,
+                defer_kind=kind,
             )
         )
+
+    def _check(self, at: datetime) -> tuple[str, DeferKind] | None:
+        """Why not to scan now: hard reasons always; soft ones until the scan is overdue."""
+        try:
+            hard = self._hard_defer() if self._hard_defer is not None else None
+        except Exception:
+            logger.exception("background Scout could not check hard priorities")
+            return DeferReason("priority check failed", "priority_check_failed"), "hard"
+        if hard is not None:
+            return hard, "hard"
+        try:
+            soft = self._defer()
+        except Exception:
+            logger.exception("background Scout could not check priorities")
+            soft = DeferReason("priority check failed", "priority_check_failed")
+        if soft is None:
+            return None
+        if self.overdue(at):
+            logger.warning(
+                "background Scout overdue (soft deferrals since %s): bypassing %s",
+                self.deferred_since.isoformat() if self.deferred_since else None,
+                soft,
+            )
+            return None
+        return soft, "soft"
 
     async def run_once(self) -> BackgroundRunResult:
         """One attempt: deferred if anything outranks it, else one scan. Never raises."""
         at = self.now()
+        overdue = self.overdue(at)
         if self.running:  # single-flight: never two background runs at once
-            return self._deferred(at, "a background Scout run is already in progress")
-        overdue = self._hard_defer is not None and self.overdue(at)
-        try:
-            reason = self._hard_defer() if overdue and self._hard_defer else self._defer()
-        except Exception:
-            logger.exception("background Scout could not check priorities")
-            reason = "priority check failed"
-        if reason is not None:
-            return self._deferred(at, reason)
+            return self._deferred(at, BACKGROUND_RUNNING, "hard", overdue)
+        check = self._check(at)
+        if check is not None:
+            return self._deferred(at, *check, overdue)
         if overdue:
-            self.overdue_runs += 1
-            logger.warning(
-                "background Scout overdue (no completed scan since %s): soft deferral "
-                "reasons are bypassed", (self.last_completed_at or self.started_at).isoformat(),
-            )  # fmt: skip
+            self.overdue_runs += 1  # a forced scan actually starts
         self.running = True
         self.started += 1
         previous, self.last_run = self.last_run, at
@@ -359,7 +452,9 @@ class BackgroundScout:
         except ScanDeferred as exc:
             self.last_run = previous  # no scan ran
             self.started -= 1
-            return self._deferred(at, str(exc))
+            if overdue:
+                self.overdue_runs -= 1
+            return self._deferred(at, str(exc), "hard", overdue)
         except Exception as exc:  # never takes the app (or the scheduler) down
             error = str(exc) if isinstance(exc, ScanFailed) else type(exc).__name__
             if isinstance(exc, ScanFailed):

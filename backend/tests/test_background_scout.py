@@ -20,11 +20,14 @@ import upscale.services as services
 from tests.test_outcomes import later_run
 from tests.test_scout_api import ranking
 from upscale.background_scout import (
+    ANALYZE_ACTIVE,
     DEFAULT_INTERVAL_MINUTES,
     MIN_INTERVAL_MINUTES,
+    SCOUT_RUNNING,
     STARTUP_DELAY_MINUTES,
     BackgroundScout,
     BackgroundScoutSettings,
+    DeferReason,
     ScanDeferred,
     ScanFailed,
     ScanSummary,
@@ -32,6 +35,7 @@ from upscale.background_scout import (
     load_settings,
     outcome_backlog,
     provider_pressure,
+    reason_code,
 )
 from upscale.scout_api import ScoutFeed
 from upscale.services.geckoterminal import DexCandleService
@@ -39,7 +43,7 @@ from upscale.services.market_data import MarketDataUnavailableError, ProviderRat
 from upscale.services.outcomes.collector import CycleReport
 from upscale.services.quota import LaneLimiter
 from upscale.services.scout.config import ScoutConfig, ScoutProviderLimits
-from upscale.services.scout.gate import RequestGate
+from upscale.services.scout.gate import RateLimitReachedError, RequestGate
 from upscale.services.scout.growth.models import GrowthScoutResult
 from upscale.services.scout.providers import GeckoTerminalDiscoveryProvider
 
@@ -610,38 +614,190 @@ class Clock:
         return self.at
 
 
-def test_soft_deferrals_are_bounded_so_scout_cannot_starve() -> None:
-    """A steady outcome backlog deferred background Scout for hours (production gaps of
-    113-360 min): past interval + max_deferral, only hard reasons still defer it."""
-    clock = Clock(T0)
-    scan = FakeScan()
-    hard: list[str | None] = [None]
-    bg = BackgroundScout(
+def backlog(due: int) -> DeferReason | None:
+    """The production soft reason, with its per-cycle count."""
+    return outcome_backlog(CycleReport(at=T0, due=due, deferred_for_quota=due), T0,
+                           timedelta(days=365))  # fmt: skip
+
+
+def production_scout(
+    clock: Clock, scan: FakeScan, soft: list[str | None], hard: list[str | None]
+) -> BackgroundScout:
+    """The production schedule: 30-minute interval, retries every 5, 60-minute bound."""
+    return BackgroundScout(
         BackgroundScoutSettings(interval_minutes=30, max_deferral_minutes=60), scan,
-        lambda: "outcome collection has 12 due measurement(s) deferred for provider quota",
-        now=clock, hard_defer=lambda: hard[0],
+        lambda: soft[0], now=clock, hard_defer=lambda: hard[0],
     )  # fmt: skip
-    for minutes in range(5, 90, 5):  # soft reason, not yet overdue: deferred every time
-        clock.at = T0 + timedelta(minutes=minutes)
-        assert run(bg.run_once()).status == "deferred"
+
+
+def test_soft_deferrals_are_bounded_from_the_first_soft_deferral() -> None:
+    """Production (2026-10-02): started 01:30:53, deferred since 01:35:53 for an outcome
+    backlog whose count changed every cycle; at 02:45:53 (70 min deferred) still
+    `overdue: false`, because the bound was interval + max_deferral (90 min) since startup.
+    Now the first attempt 60 min after the first soft deferral runs the scan."""
+    started = datetime(2026, 10, 2, 1, 30, 53, tzinfo=UTC)
+    clock = Clock(started)
+    scan = FakeScan()
+    soft: list[str | None] = [None]
+    hard: list[str | None] = [None]
+    bg = production_scout(clock, scan, soft, hard)
+    first = started + timedelta(minutes=5)  # after the startup delay
+    counts = [93, 81, 146, 120, 99, 146, 77, 88, 101, 146, 64, 146]
+    for i, due in enumerate(counts):  # 01:35:53 .. 02:30:53: soft, not yet overdue
+        clock.at = first + timedelta(minutes=5 * i)
+        soft[0] = backlog(due)
+        result = run(bg.run_once())
+        assert result.status == "deferred" and not result.overdue
+        assert result.defer_kind == "soft" and result.defer_code == "outcome_backlog_quota"
+        assert result.defer_reason == (
+            f"outcome collection has {due} due measurement(s) deferred for provider quota"
+        )
+        s = bg.status()
+        assert s.deferred_since == first  # changing text / counts never reset the window
+        assert s.overdue_at == first + timedelta(minutes=60) and not s.overdue
     assert scan.calls == 0
     s = bg.status()
-    assert s.consecutive_deferrals == 17 and s.deferred_since == T0 + timedelta(minutes=5)
-    assert s.deferrals_by_reason == {
-        "outcome collection has 12 due measurement(s) deferred for provider quota": 17
-    }
-    clock.at = T0 + timedelta(minutes=90)  # 30 + 60 without a completed scan: overdue
-    hard[0] = "Analyze is active"  # a user waiting still wins
-    assert run(bg.run_once()).status == "deferred" and scan.calls == 0
-    hard[0] = None
+    assert s.consecutive_deferrals == 12 == s.runs_deferred
+    assert s.deferrals_by_reason == {"outcome_backlog_quota": 12}  # one stable code
+    assert (s.last_defer_kind, s.last_defer_code) == ("soft", "outcome_backlog_quota")
+
+    clock.at = first + timedelta(minutes=60)  # 02:35:53: the bound is reached
+    assert bg.status().overdue
+    soft[0] = backlog(146)
     result = run(bg.run_once())
     assert result.status == "completed" and result.overdue and scan.calls == 1
     s = bg.status()
-    assert s.overdue_runs == 1 and s.consecutive_deferrals == 0 and s.deferred_since is None
-    assert s.background_scans_started == 1 and s.background_scans_completed == 1
-    assert s.last_completed_at == T0 + timedelta(minutes=90)
-    clock.at = T0 + timedelta(minutes=100)  # just completed: soft reasons defer again
-    assert run(bg.run_once()).status == "deferred" and scan.calls == 1
+    assert s.overdue_runs == 1 and s.background_scans_started == 1
+    assert s.background_scans_completed == 1 and s.runs_deferred == 12  # counters kept
+    # A completed scan closes the window.
+    assert s.deferred_since is None and s.overdue_at is None and not s.overdue
+    assert s.consecutive_deferrals == 0 and s.last_defer_kind is None
+
+    clock.at += timedelta(minutes=30)  # the next slot: soft reasons defer again, anew
+    result = run(bg.run_once())
+    assert result.status == "deferred" and not result.overdue and scan.calls == 1
+    assert bg.status().deferred_since == clock.at
+
+
+def test_a_late_attempt_past_the_bound_runs_at_once() -> None:
+    clock = Clock(T0)
+    scan = FakeScan()
+    bg = production_scout(clock, scan, [backlog(5)], [None])
+    run(bg.run_once())
+    clock.at = T0 + timedelta(minutes=61, seconds=7)  # any attempt at/after the bound
+    assert run(bg.run_once()).status == "completed" and bg.overdue_runs == 1
+
+
+def test_hard_reasons_still_defer_an_overdue_scan_then_it_runs_immediately() -> None:
+    clock = Clock(T0)
+    scan = FakeScan()
+    soft: list[str | None] = [backlog(93)]
+    hard: list[str | None] = [None]
+    bg = production_scout(clock, scan, soft, hard)
+    run(bg.run_once())  # opens the window at T0
+    clock.at = T0 + timedelta(minutes=30)
+    hard[0] = ANALYZE_ACTIVE  # hard before the bound: neither opens nor resets the window
+    result = run(bg.run_once())
+    assert (result.defer_kind, result.defer_code) == ("hard", "analyze_active")
+    assert bg.status().deferred_since == T0
+    soft[0] = backlog(81)
+    for minutes in (60, 65):  # at the deadline a hard reason still defers
+        clock.at = T0 + timedelta(minutes=minutes)
+        hard[0] = ANALYZE_ACTIVE if minutes == 60 else SCOUT_RUNNING
+        result = run(bg.run_once())
+        assert result.status == "deferred" and result.overdue and result.defer_kind == "hard"
+        s = bg.status()
+        assert s.overdue and s.deferred_since == T0 and s.overdue_runs == 0
+    assert scan.calls == 0
+    assert bg.status().deferrals_by_reason == {
+        "outcome_backlog_quota": 1, "analyze_active": 2, "scout_running": 1,
+    }  # fmt: skip
+    clock.at = T0 + timedelta(minutes=70)
+    hard[0] = None  # cleared: the next attempt runs, overdue, despite the soft reason
+    result = run(bg.run_once())
+    assert result.status == "completed" and result.overdue and bg.overdue_runs == 1
+
+
+def test_a_failed_overdue_scan_keeps_the_window_a_completed_one_closes_it() -> None:
+    clock = Clock(T0)
+    scan = FakeScan(ScanFailed("no feeds answered"), ScanSummary())
+    bg = production_scout(clock, scan, [backlog(146)], [None])
+    run(bg.run_once())
+    clock.at = T0 + timedelta(minutes=60)
+    assert run(bg.run_once()).status == "failed"
+    s = bg.status()
+    assert s.deferred_since == T0 and s.overdue and s.overdue_runs == 1
+    clock.at = T0 + timedelta(minutes=90)  # the next slot is still overdue
+    result = run(bg.run_once())
+    assert result.status == "completed" and result.overdue and bg.overdue_runs == 2
+    assert bg.status().deferred_since is None
+
+
+def test_a_scan_that_defers_itself_is_not_counted_as_an_overdue_run() -> None:
+    clock = Clock(T0)
+    scan = FakeScan(ScanDeferred("a Scout scan finished moments ago"))
+    bg = production_scout(clock, scan, [backlog(146)], [None])
+    run(bg.run_once())
+    clock.at = T0 + timedelta(minutes=60)
+    result = run(bg.run_once())
+    assert result.status == "deferred" and result.defer_kind == "hard" and result.overdue
+    s = bg.status()
+    assert s.overdue_runs == 0 and s.background_scans_started == 0 and s.deferred_since == T0
+
+
+def test_hard_deferrals_alone_open_no_window() -> None:
+    clock = Clock(T0)
+    scan = FakeScan()
+    bg = production_scout(clock, scan, [backlog(5)], [ANALYZE_ACTIVE])
+    for minutes in range(0, 300, 5):
+        clock.at = T0 + timedelta(minutes=minutes)
+        assert run(bg.run_once()).defer_kind == "hard"
+    s = bg.status()
+    assert s.deferred_since is None and not s.overdue and scan.calls == 0
+
+
+def test_soft_reason_codes_are_stable() -> None:
+    assert reason_code(backlog(93) or "") == reason_code(backlog(146) or "")
+    waiting = outcome_backlog(CycleReport(at=T0, due=3, network_skipped=True), T0,
+                              timedelta(hours=1))  # fmt: skip
+    assert waiting is not None and reason_code(waiting) == "outcome_backlog_waiting"
+    assert reason_code("plain message") == "plain message"
+
+
+def test_a_forced_scan_still_respects_provider_budgets() -> None:
+    """Overdue only bypasses soft *deferral*: inside the scan every gate still enforces its
+    budget and keeps the "interactive" reservation, so the scan runs fewer feeds."""
+    clock = Clock(T0)
+    g = gate(6, {"interactive": 2})
+    assert g._limiter.try_acquire("outcomes") and g._limiter.try_acquire("outcomes")
+    fetched: list[str] = []
+    refused: list[str] = []
+
+    async def scan() -> ScanSummary:
+        for feed in ("trending", "new", "top", "gainers"):
+
+            async def fetch(feed: str = feed) -> str:
+                return feed
+
+            try:
+                fetched.append(await g.run(feed, fetch))
+            except RateLimitReachedError:
+                refused.append(feed)
+        return ScanSummary(candidates_discovered=len(fetched))
+
+    pressure = provider_pressure([g], 600)
+    assert pressure is not None and reason_code(pressure) == "provider_capacity:GeckoTerminal"
+    bg = BackgroundScout(
+        BackgroundScoutSettings(interval_minutes=30, max_deferral_minutes=60), scan,
+        lambda: provider_pressure([g], 600), now=clock, hard_defer=lambda: None,
+    )  # fmt: skip
+    assert run(bg.run_once()).defer_kind == "soft"
+    clock.at = T0 + timedelta(minutes=60)
+    result = run(bg.run_once())
+    assert result.status == "completed" and result.overdue
+    # 6 a minute, 2 reserved for interactive, 2 already used by outcomes: 2 feeds run.
+    assert fetched == ["trending", "new"] and refused == ["top", "gainers"]
+    assert g.available("interactive") == 2  # the reservation is untouched
 
 
 def test_without_a_hard_defer_callback_the_old_behaviour_holds() -> None:

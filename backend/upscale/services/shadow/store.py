@@ -734,6 +734,22 @@ class ShadowStore:
             [*params, limit],
         )
 
+    def decision_counts(
+        self, run_id: str, since: datetime | None = None, until: datetime | None = None
+    ) -> list[tuple[str, int, str, int, float, float]]:
+        """(strategy_id, version, action, count, first, last decision time) in [since, until)."""
+        where, params = self._where(run_id, None, None, "decision_at", since, until)
+        with self._lock:
+            return [
+                (r[0], int(r[1]), r[2], int(r[3]), float(r[4]), float(r[5]))
+                for r in self._db().execute(
+                    "SELECT strategy_id, strategy_version, action, COUNT(*), MIN(decision_at), "
+                    f"MAX(decision_at) FROM shadow_decisions WHERE {where} "
+                    "GROUP BY strategy_id, strategy_version, action ORDER BY 1, 2, 3",
+                    params,
+                )
+            ]
+
     def decisions_by_id(self, decision_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         ids = list(dict.fromkeys(decision_ids))

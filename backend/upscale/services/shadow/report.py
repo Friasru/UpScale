@@ -10,6 +10,12 @@ when the window reaches the processed time, otherwise the last equity snapshot b
 ``--until`` (the stored marks of open positions are current, so a past ``--until`` never
 reads them).
 
+Execution (`execution` section): IDEALIZED_NO_FEES fills have no friction (gross = net);
+REALISTIC_V1 fills are read from ``shadow_executions`` (fees, slippage, impact, latency
+drift, execution delay, gross vs net P/L), and pending entry / exit intents from the
+checkpoint. `compare_runs` puts two runs side by side (e.g. continuous-v2 against
+continuous-v2-realistic) as factual deltas, never a ranking.
+
 Anti-lookahead: every figure comes from rows the book wrote at the time, or from archived
 evidence observed no later than the report's as-of time. Market availability over a held
 position's life is rebuilt with the book's own rules (`Position.market_state`): at each
@@ -36,9 +42,11 @@ from upscale.services.shadow.config import (
     CLEAN_DATA_CUTOFF,
     EXECUTION_NOTE,
     NOT_REAL_PROFIT,
+    REALISTIC_NOTE,
     AvailabilityPolicy,
     ExitReason,
     StrategyConfig,
+    run_execution,
     run_policy,
 )
 from upscale.services.shadow.engine import ShadowError
@@ -68,6 +76,11 @@ WATCH_STATUSES = (
 IDEALIZED_WARNING = (
     "IDEALIZED_NO_FEES is NOT live-realistic performance: fills at the observed exact-pool "
     "price with no fees, slippage, latency or price impact. Real trading would do worse."
+)
+REALISTIC_WARNING = (
+    "REALISTIC_V1 is still a simulation: fixed latency, fixed adverse slippage and fees, "
+    "optional constant-product impact; no gas, MEV, failed transactions or partial fills. "
+    "Not real profit."
 )
 NOT_RANKED = (
     "Side by side in a fixed order, NOT ranked: no winner is selected. Strategies flagged "
@@ -347,7 +360,9 @@ def strategy_report(
         unresolved_cost = state["unresolved_cost"]
         unresolved_mark = sum(m for _, m in shadow.unresolved_marks(run_id, sid, version))
         account = {"source": "checkpoint", "at": _iso(w.as_of)}
-        equity_now, unrealized = cash + open_value, open_value - open_cost
+        # Cash reserved by pending REALISTIC_V1 entry intents counts at cost.
+        reserved = sum(e["budget_usd"] for e in (state.get("pending_entries") or {}).values())
+        equity_now, unrealized = cash + open_value + reserved, open_value - open_cost
     elif rows:
         last = rows[-1]
         cash, realized, unrealized = last["cash"], last["realized_pnl"], last["unrealized_pnl"]
@@ -517,8 +532,8 @@ def strategy_report(
         for p in held_rows:
             h = availability(p, records.get(p["asset_id"], []), policy,
                              cfg.exit.market_unavailable_after_minutes, w)  # fmt: skip
-            for state, n in h.seconds.items():
-                seconds[state] += n
+            for label, n in h.seconds.items():
+                seconds[label] += n
             ever.update(h.seen)
             watch |= h.watch
             if h.final_state is not None:
@@ -569,8 +584,94 @@ def strategy_report(
         "trade_behavior": behaviour,
         "excursion": excursion,
         "availability": avail,
+        "execution": execution_section(shadow, run, cfg, state, in_window, w),
         "_affected": affected,
     }
+
+
+def execution_section(
+    shadow: ShadowStore,
+    run: dict[str, Any],
+    cfg: StrategyConfig,
+    state: dict[str, Any] | None,
+    fills: Sequence[dict[str, Any]],
+    w: Window,
+) -> dict[str, Any]:
+    """Trading friction of the fills in the window and the intents still pending."""
+    execution = run_execution(run)
+    run_id, sid, version = run["run_id"], cfg.strategy_id, cfg.version
+    net = sum(t["pnl_usd"] for t in fills if t["pnl_usd"] is not None)
+    out: dict[str, Any] = {
+        "execution_model": run["execution_model"],
+        "settings": execution.model_dump(mode="json") if execution else None,
+        "net_realized_pnl_usd": net,
+    }
+    pending: dict[str, Any] | None = None
+    if w.current and state:
+        entries = list((state.get("pending_entries") or {}).values())
+        exits = Counter(p["pending_exit"] for p in state["positions"].values()
+                        if p.get("pending_exit"))  # fmt: skip
+        pending = {
+            "entry_intents": len(entries),
+            "entry_reserved_usd": sum(e["budget_usd"] for e in entries),
+            "exit_intents": sum(exits.values()),
+            "exit_intents_by_reason": dict(sorted(exits.items())),
+        }
+    out["pending"] = pending
+    if pending is None:
+        out["pending_note"] = "pending intents live in the checkpoint: shown only when the "
+        "window reaches the processed time"
+    if execution is None:
+        return out | {
+            "gross_realized_pnl_usd": net, "total_friction_usd": 0.0, "fees_usd": 0.0,
+            "slippage_cost_usd": 0.0, "price_impact_cost_usd": 0.0, "latency_cost_usd": None,
+            "average_slippage_bps": 0.0, "average_execution_delay_seconds": None,
+            "cancelled_entry_intents": 0,
+            "note": "IDEALIZED_NO_FEES: fills at the triggering observation, no friction "
+            "(gross = net); latency is not modeled",
+        }  # fmt: skip
+    rows = [x for x in shadow.executions(run_id, sid)
+            if x["strategy_version"] == version and w.contains(x["filled_at"])]  # fmt: skip
+    sells = [x for x in rows if x["side"] == "SELL"]
+    delays = [x["delay_seconds"] for x in rows]
+    traded = sum(x["observed_value_usd"] for x in rows)
+    friction = sum(x["friction_usd"] for x in rows)
+    cancels = [
+        d for d in shadow.decisions(run_id, sid, None, w.since, w.until, "NO_ACTION", 10**9)
+        if d["strategy_version"] == version and d["reason"].startswith("entry order cancelled")
+        and w.before_end(d["decision_at"])
+    ]  # fmt: skip
+    released = sum(json.loads(d["evidence_json"]).get("released_usd") or 0.0 for d in cancels)
+    return out | {
+        "fills": {"BUY": len(rows) - len(sells), "SELL": len(sells)},
+        "gross_realized_pnl_usd": sum(x["gross_pnl_usd"] or 0.0 for x in sells),
+        "realized_trade_friction_usd": sum(x["trade_friction_usd"] for x in sells),
+        "total_friction_usd": friction,
+        "fees_usd": sum(x["fee_usd"] for x in rows),
+        "slippage_cost_usd": sum(x["slippage_cost_usd"] for x in rows),
+        "price_impact_cost_usd": sum(x["impact_cost_usd"] for x in rows),
+        "price_impact_status": dict(sorted(Counter(x["impact_status"] for x in rows).items())),
+        "latency_cost_usd": sum(x["latency_cost_usd"] for x in rows),
+        "average_slippage_bps": _mean([x["slippage_bps"] for x in rows]),
+        "average_price_impact_bps": _mean([x["impact_bps"] for x in rows]),
+        "effective_friction_bps": friction / traded * 1e4 if traded > 0 else None,
+        "configured_min_latency_seconds": execution.latency_seconds,
+        "average_execution_delay_seconds": _mean(delays),
+        "median_execution_delay_seconds": _median(delays),
+        "max_execution_delay_seconds": max(delays) if delays else None,
+        "cancelled_entry_intents": len(cancels),
+        "cancelled_entry_released_usd": released,
+        "cancelled_note": "a cancelled entry order is a NO_ACTION decision (ENTRY_NOT_FILLED): "
+        "not a trade, no P/L, its reserved cash released",
+        "execution_delay_note": "observed: intent time to the fill observation (the first "
+        "archived exact-pool price at or after the minimum latency); not market-data "
+        "resolution",
+        "note": REALISTIC_NOTE + " Gross P/L: observed-price P/L of the quantity held; "
+        "realized trade friction: exit costs plus the entry costs of the quantity sold "
+        "(gross - friction = net, exactly). Latency cost: price drift between an intent's "
+        "reference observation and its fill observation (inside gross; may be negative). "
+        "Friction and fees cover BUY and SELL fills in the window, open positions included.",
+    }  # fmt: skip
 
 
 # --- the run -------------------------------------------------------------------------------------
@@ -661,7 +762,9 @@ def shadow_report(
         "run_id": run_id,
         "availability_policy": run_policy(run),
         "execution_model": run["execution_model"],
-        "execution_note": EXECUTION_NOTE,
+        "execution_note": REALISTIC_NOTE if run_execution(run) else EXECUTION_NOTE,
+        "execution_settings": (e.model_dump(mode="json") if (e := run_execution(run)) else None),
+        "execution_warning": REALISTIC_WARNING if run_execution(run) else IDEALIZED_WARNING,
         "idealized_warning": IDEALIZED_WARNING,
         "run_since": run["since"],
         "run_until": run["until"],
@@ -757,7 +860,8 @@ def text(d: dict[str, Any]) -> str:
     lines = [
         f"SHADOW VALIDATION REPORT  run {d['run_id']}  (read-only, no provider requests)",
         d["label"],
-        g["idealized_warning"],
+        f"execution model: {g['execution_model']}",
+        g["execution_warning"],
         f"window: {win['since'] or 'run start'} .. {win['until'] or 'now'}; as of {win['as_of']} "
         f"(account from {win['account_source']})",
     ]
@@ -815,8 +919,9 @@ def text(d: dict[str, Any]) -> str:
              f"{_f(x['open_to_date']['mfe_median_pct'], '.2f', '%')} MAE median "
              f"{_f(x['open_to_date']['mae_median_pct'], '.2f', '%')}")
             if x["open_to_date"] else f"  open to date: {x.get('open_to_date_note', '-')}",
-            "[availability]",
         ]  # fmt: skip
+        lines += _execution_text(r["execution"])
+        lines.append("[availability]")
         if a.get("available"):
             lines += [
                 "  open now by state: " + ", ".join(f"{k2} {v}" for k2, v in a["open_positions_by_state"].items()),
@@ -860,7 +965,346 @@ def text(d: dict[str, Any]) -> str:
         f"  MARKET_UNAVAILABLE exits exist: {'yes' if g['market_unavailable_exits_exist'] else 'no'} "
         f"({g['market_unavailable_exits']})",
         "  evidence gaps affected exits: " + {True: "yes", False: "no", None: "unknown (no evidence archive)"}[g["evidence_gaps_affected_exits"]],
+        f"  {g['execution_warning']}",
         f"  {g['idealized_warning']}",
         f"  {g['anti_lookahead']}",
     ]  # fmt: skip
+    return "\n".join(lines)
+
+
+def _execution_text(e: dict[str, Any]) -> list[str]:
+    p = e["pending"]
+    lines = [
+        f"[execution] {e['execution_model']}",
+        f"  gross realized {_usd(e['gross_realized_pnl_usd'])}  net realized "
+        f"{_usd(e['net_realized_pnl_usd'])}  total friction {_usd(e['total_friction_usd'])}",
+        f"  fees {_usd(e['fees_usd'])}  slippage {_usd(e['slippage_cost_usd'])}  price impact "
+        f"{_usd(e['price_impact_cost_usd'])}  latency drift {_usd(e['latency_cost_usd'])}",
+        f"  average slippage {_f(e['average_slippage_bps'], '.1f', ' bps')}  observed execution "
+        f"delay avg {_f(e['average_execution_delay_seconds'], '.0f', ' s')} median "
+        f"{_f(e.get('median_execution_delay_seconds'), '.0f', ' s')} max "
+        f"{_f(e.get('max_execution_delay_seconds'), '.0f', ' s')} (minimum latency "
+        f"{_f(e.get('configured_min_latency_seconds'), '.0f', ' s')})",
+        f"  cancelled entry orders {e['cancelled_entry_intents']} (not trades, no P/L; "
+        f"{_usd(e.get('cancelled_entry_released_usd', 0.0))} released)",
+        f"  pending: {p['entry_intents']} entry intents ({_usd(p['entry_reserved_usd'])} "
+        f"reserved), {p['exit_intents']} exit intents {p['exit_intents_by_reason'] or ''}"
+        if p else f"  pending: {e.get('pending_note')}",
+    ]  # fmt: skip
+    return lines
+
+
+# --- two runs side by side ----------------------------------------------------------------------
+
+COMPARED_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("sample", "decisions", "decisions"),
+    ("sample", "positions_opened", "positions_opened"),
+    ("sample", "positions_closed", "closed_trades"),
+    ("sample", "resolved_closed", "resolved_closed"),
+    ("sample", "currently_open", "currently_open"),
+    ("performance", "total_return_pct", "total_return_pct"),
+    ("performance", "current_equity_usd", "equity_usd"),
+    ("performance", "realized_pnl_usd", "realized_pnl_usd"),
+    ("performance", "unrealized_pnl_usd", "unrealized_pnl_usd"),
+    ("performance", "win_rate", "win_rate"),
+    ("performance", "profit_factor", "profit_factor"),
+    ("performance", "median_return_pct", "median_return_pct"),
+    ("performance", "mean_return_pct", "mean_return_pct"),
+    ("risk", "max_drawdown_pct", "max_drawdown_pct"),
+    ("risk", "unresolved_cost_usd", "unresolved_cost_usd"),
+    ("excursion", "mfe_median_pct", "mfe_median_pct"),
+    ("excursion", "mae_median_pct", "mae_median_pct"),
+    ("trade_behavior", "market_unavailable", "market_unavailable_exits"),
+    ("execution", "gross_realized_pnl_usd", "gross_realized_pnl_usd"),
+    ("execution", "net_realized_pnl_usd", "net_realized_pnl_usd"),
+    ("execution", "total_friction_usd", "total_friction_usd"),
+    ("execution", "fees_usd", "fees_usd"),
+    ("execution", "slippage_cost_usd", "slippage_cost_usd"),
+    ("execution", "price_impact_cost_usd", "price_impact_cost_usd"),
+    ("execution", "latency_cost_usd", "latency_cost_usd"),
+    ("execution", "average_execution_delay_seconds", "average_execution_delay_seconds"),
+    ("execution", "cancelled_entry_intents", "cancelled_entry_intents"),
+)
+
+
+def _number(v: Any) -> float | None:
+    return float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+
+
+@dataclass(frozen=True)
+class Side:
+    """One run's view of one strategy for the comparison."""
+
+    enters: dict[tuple[str, float], str]  # (asset, ENTER decision time) -> decision id
+    positions: dict[str, dict[str, Any]]  # entry decision id -> position row
+    closed: dict[str, dict[str, Any]]  # position id -> closed trade (before the window end)
+    gross: dict[str, float]  # position id -> gross P/L of its fills
+    friction: dict[str, float]  # position id -> trading friction of its fills
+
+
+def _side(shadow: ShadowStore, run: dict[str, Any], cfg: StrategyConfig, w: Window) -> Side:
+    run_id, sid, version = run["run_id"], cfg.strategy_id, cfg.version
+    enters = {
+        (d["asset_id"], d["decision_at"]): d["decision_id"]
+        for d in shadow.decisions(run_id, sid, None, w.since, w.until, "ENTER", 10**9)
+        if d["strategy_version"] == version and w.before_end(d["decision_at"])
+    }  # fmt: skip
+    positions = {p["entry_decision_id"]: p for p in shadow.positions(run_id, sid)
+                 if p["strategy_version"] == version and w.before_end(p["entry_at"])}  # fmt: skip
+    fills = [t for t in shadow.trades(run_id, sid)
+             if t["strategy_version"] == version and w.before_end(t["exit_at"])]  # fmt: skip
+    closed = {c["position_id"]: c for c in closed_positions(fills)}
+    gross: dict[str, float] = {}
+    friction: dict[str, float] = {}
+    if run_execution(run) is None:  # IDEALIZED_NO_FEES: no friction, gross = net
+        for c in closed.values():
+            if c["pnl_usd"] is not None:
+                gross[c["position_id"]], friction[c["position_id"]] = c["pnl_usd"], 0.0
+    else:
+        for x in shadow.executions(run_id, sid):
+            if x["side"] != "SELL" or x["strategy_version"] != version:
+                continue
+            if not w.before_end(x["filled_at"]):
+                continue
+            pid = x["position_id"]
+            gross[pid] = gross.get(pid, 0.0) + (x["gross_pnl_usd"] or 0.0)
+            friction[pid] = friction.get(pid, 0.0) + x["trade_friction_usd"]
+    return Side(enters, positions, closed, gross, friction)
+
+
+def _sums(pairs: Sequence[tuple[float, float]]) -> dict[str, float]:
+    base = sum(a for a, _ in pairs)
+    other = sum(b for _, b in pairs)
+    return {"base": base, "other": other, "delta": other - base}
+
+
+def _first(at: float | None, **detail: Any) -> dict[str, Any] | None:
+    return None if at is None else {"at": _iso(_dt(at))} | detail
+
+
+def divergence(
+    shadow: ShadowStore,
+    a: tuple[str, str, int],
+    b: tuple[str, str, int],
+    since: datetime | None,
+    until: datetime | None,
+) -> dict[str, Any]:
+    """The first ENTER decision, and the first decision of any kind, made in one run and
+    not the other (same asset, action and decision time)."""
+    out: dict[str, Any] = {}
+    for label, actions in (("first_entry_divergence", ("ENTER",)),
+                           ("first_decision_divergence", ACTIONS)):  # fmt: skip
+        found = []
+        for x, y, only in ((a, b, "base"), (b, a, "other")):
+            row = shadow.first_decision_difference(x, y, since, until, actions)
+            if row is not None:
+                found.append((row, only))
+        if not found:
+            out[label] = None
+            continue
+        (at, action, asset), only = min(found)
+        out[label] = _first(at, action=action, asset_id=asset, only_in=only)
+    return out
+
+
+def compare_runs(
+    shadow: ShadowStore,
+    evidence: EvidenceStore | None,
+    base: str,
+    other: str,
+    strategies: Sequence[str] | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> dict[str, Any]:
+    """`other` against `base`, per strategy present in both, over the same window ending
+    at the earlier of the two runs' processed times. Factual only, never a ranking.
+
+    The runs make the same strategy decisions only until their portfolios diverge (cash
+    after fees, pending fills, open slots, cooldowns). So it separates:
+
+    A. matched entry opportunities (an ENTER decision of the same asset at the same decision
+       time in both) and matched completed trades (both filled, closed and resolved);
+    B. the execution delta on matched completed trades: gross P/L, net P/L and friction;
+    C / D. ENTER decisions only in base / only in other;
+    E. portfolio divergence: the first ENTER decision and the first decision of any kind
+       made in one run only, and the portfolio totals, which mix execution friction with
+       everything that diverged and are never attributed to friction alone."""
+    runs = {}
+    for run_id in (base, other):
+        run = shadow.run(run_id)
+        if run is None:
+            raise ShadowError(f"unknown run {run_id}")
+        runs[run_id] = run
+    processed = []
+    for run_id in (base, other):
+        t = _dt(shadow.checkpoint(run_id)["processed_until"])
+        assert t is not None
+        processed.append(t)
+    end = min([*processed, *([until] if until else [])])
+    if since is not None and end <= since:
+        raise ShadowError("the window is empty: --since is after the runs' common end")
+    ids = [set(s["strategy_id"] for s in runs[r]["strategies"]) for r in (base, other)]
+    common = sorted(ids[0] & ids[1])
+    if strategies:
+        missing = sorted(set(strategies) - set(common))
+        if missing:
+            raise ShadowError(f"not in both runs: {', '.join(missing)}")
+        common = [s for s in common if s in strategies]
+    if not common:
+        raise ShadowError(f"runs {base} and {other} share no strategy")
+    reports = {r: shadow_report(shadow, evidence, r, common, since, end)
+               for r in (base, other)}  # fmt: skip
+    windows = [Window(since, end, min(end, t), end >= t) for t in processed]
+    order = {sid: i for i, sid in enumerate(COMPARED)}
+    out: list[dict[str, Any]] = []
+    for sid in sorted(common, key=lambda x: (order.get(x, len(order)), x)):
+        a = next(r for r in reports[base]["strategies"] if r["strategy_id"] == sid)
+        b = next(r for r in reports[other]["strategies"] if r["strategy_id"] == sid)
+        totals = {}
+        for section, key, label in COMPARED_FIELDS:
+            va, vb = a[section].get(key), b[section].get(key)
+            na, nb = _number(va), _number(vb)
+            totals[label] = {"base": va, "other": vb,
+                             "delta": nb - na if na is not None and nb is not None else None}  # fmt: skip
+        cfg_a = shadow.strategy(sid, a["strategy_version"])
+        cfg_b = shadow.strategy(sid, b["strategy_version"])
+        sa = _side(shadow, runs[base], cfg_a, windows[0])
+        sb = _side(shadow, runs[other], cfg_b, windows[1])
+        matched = sorted(set(sa.enters) & set(sb.enters))
+        only_a = sorted(set(sa.enters) - set(sb.enters))
+        only_b = sorted(set(sb.enters) - set(sa.enters))
+        filled = [(sa.positions[sa.enters[k]], sb.positions[sb.enters[k]]) for k in matched
+                  if sa.enters[k] in sa.positions and sb.enters[k] in sb.positions]  # fmt: skip
+        done = [(sa.closed[pa["position_id"]], sb.closed[pb["position_id"]]) for pa, pb in filled
+                if pa["position_id"] in sa.closed and pb["position_id"] in sb.closed
+                and sa.closed[pa["position_id"]]["resolved"]
+                and sb.closed[pb["position_id"]]["resolved"]]  # fmt: skip
+        ret = [cb["return_pct"] - ca["return_pct"] for ca, cb in done]
+
+        def unmatched(side: Side, keys: Sequence[tuple[str, float]]) -> dict[str, Any]:
+            pos = [side.positions[side.enters[k]] for k in keys if side.enters[k] in side.positions]
+            closed = [side.closed[p["position_id"]] for p in pos if p["position_id"] in side.closed]
+            return {
+                "enter_decisions": len(keys), "filled": len(pos), "closed": len(closed),
+                "net_pnl_usd": sum(c["pnl_usd"] for c in closed if c["pnl_usd"] is not None),
+                "first": [{"asset_id": k[0], "decision_at": _iso(_dt(k[1]))} for k in keys[:5]],
+            }  # fmt: skip
+
+        out.append({
+            "strategy_id": sid,
+            "base_strategy": a["strategy"], "other_strategy": b["strategy"],
+            "same_rules": cfg_a.config_hash == cfg_b.config_hash,
+            "base_sample": a["sample"]["status"], "other_sample": b["sample"]["status"],
+            "insufficient_sample": "INSUFFICIENT_SAMPLE" in (a["sample"]["status"],
+                                                             b["sample"]["status"]),
+            "matched": {  # A and B
+                "enter_decisions": len(matched),
+                "filled_in_both": len(filled),
+                "completed_in_both": len(done),
+                "gross_pnl_usd": _sums([(sa.gross.get(ca["position_id"], 0.0),
+                                         sb.gross.get(cb["position_id"], 0.0)) for ca, cb in done]),
+                "net_pnl_usd": _sums([(ca["pnl_usd"], cb["pnl_usd"]) for ca, cb in done]),
+                "friction_usd": _sums([(sa.friction.get(ca["position_id"], 0.0),
+                                        sb.friction.get(cb["position_id"], 0.0)) for ca, cb in done]),
+                "return_delta_pct_points_median": _median(ret),
+                "return_delta_pct_points_mean": _mean(ret),
+                "note": "same asset and ENTER decision time in both runs, both closed and "
+                "resolved. Net delta = gross delta (fill prices and timing: latency, a later "
+                "exit observation, the smaller quantity bought after fees) minus the friction "
+                "delta (fees, slippage, impact)",
+            },
+            "only_in_base": unmatched(sa, only_a),  # C
+            "only_in_other": unmatched(sb, only_b),  # D
+            "divergence": divergence(  # E
+                shadow, (base, sid, cfg_a.version), (other, sid, cfg_b.version), since, end
+            ) | {"note": "after the first divergence the portfolios differ: portfolio totals "
+                 "mix execution friction with different decisions and are NOT caused by "
+                 "fees / slippage / latency alone"},
+            "portfolio_totals": totals,
+        })  # fmt: skip
+    info = {
+        r: {
+            "execution_model": runs[r]["execution_model"],
+            "availability_policy": run_policy(runs[r]),
+            "since": runs[r]["since"],
+            "processed_until": _iso(t),
+            "execution_settings": (e.model_dump(mode="json") if (e := run_execution(runs[r]))
+                                   else None),
+        }
+        for r, t in zip((base, other), processed, strict=True)
+    }  # fmt: skip
+    notes = [
+        "Factual comparison (other against base), NOT a ranking: no run or strategy is selected.",
+        "Only matched completed trades isolate execution: everything else includes "
+        "portfolio divergence.",
+    ]
+    if runs[base]["since"] != runs[other]["since"]:
+        notes.append("the runs start at different times: use --since at or after the later "
+                     "start for like-for-like figures")  # fmt: skip
+    return {
+        "label": NOT_REAL_PROFIT,
+        "report": "shadow run comparison",
+        "read_only": True,
+        "provider_requests": 0,
+        "base": base,
+        "other": other,
+        "runs": info,
+        "window": {
+            "since": _iso(since),
+            "until": _iso(end),
+            "note": "ends at the earlier processed time of the two runs (or --until)",
+        },  # fmt: skip
+        "notes": notes,
+        "strategies_only_in_base": sorted(ids[0] - ids[1]),
+        "strategies_only_in_other": sorted(ids[1] - ids[0]),
+        "strategies": out,
+    }
+
+
+def compare_text(d: dict[str, Any]) -> str:
+    lines = [
+        f"SHADOW RUN COMPARISON  {d['other']} against {d['base']}  (read-only, no provider requests)",
+        d["label"],
+        *d["notes"],
+        f"window: {d['window']['since'] or 'run start'} .. {d['window']['until']}",
+    ]  # fmt: skip
+    for r, i in d["runs"].items():
+        lines.append(f"  {r}: {i['execution_model']}, {i['availability_policy']}, since "
+                     f"{i['since']}, processed until {i['processed_until']}")  # fmt: skip
+    for s in d["strategies"]:
+        flag = "  ** INSUFFICIENT SAMPLE" if s["insufficient_sample"] else ""
+        mt, ob, oo, dv = s["matched"], s["only_in_base"], s["only_in_other"], s["divergence"]
+        lines += [
+            "",
+            f"=== {s['strategy_id']} ({s['base_strategy']} vs {s['other_strategy']})"
+            f"{'' if s['same_rules'] else '  ** DIFFERENT RULES'}{flag}",
+            f"  A matched ENTER decisions {mt['enter_decisions']}, filled in both "
+            f"{mt['filled_in_both']}, completed in both {mt['completed_in_both']}",
+            f"  B matched completed trades: gross {_usd(mt['gross_pnl_usd']['base'])} -> "
+            f"{_usd(mt['gross_pnl_usd']['other'])}; net {_usd(mt['net_pnl_usd']['base'])} -> "
+            f"{_usd(mt['net_pnl_usd']['other'])} (delta {_usd(mt['net_pnl_usd']['delta'])}); "
+            f"friction {_usd(mt['friction_usd']['base'])} -> {_usd(mt['friction_usd']['other'])}; "
+            f"return delta median {_f(mt['return_delta_pct_points_median'], '.2f', ' pp')}",
+            f"  C only in base: {ob['enter_decisions']} ENTER decisions ({ob['filled']} filled, "
+            f"{ob['closed']} closed, net {_usd(ob['net_pnl_usd'])})",
+            f"  D only in other: {oo['enter_decisions']} ENTER decisions ({oo['filled']} filled, "
+            f"{oo['closed']} closed, net {_usd(oo['net_pnl_usd'])})",
+            "  E first ENTER divergence: " + (
+                f"{dv['first_entry_divergence']['at']} {dv['first_entry_divergence']['asset_id']} "
+                f"(only in {dv['first_entry_divergence']['only_in']})"
+                if dv["first_entry_divergence"] else "none"),
+            "    first decision divergence: " + (
+                f"{dv['first_decision_divergence']['at']} {dv['first_decision_divergence']['action']} "
+                f"{dv['first_decision_divergence']['asset_id']} (only in "
+                f"{dv['first_decision_divergence']['only_in']})"
+                if dv["first_decision_divergence"] else "none"),
+            f"    {dv['note']}",
+            f"  portfolio totals (include divergence)  {'base':>14}{'other':>14}{'delta':>14}",
+        ]  # fmt: skip
+        for label, v in s["portfolio_totals"].items():
+            lines.append(f"  {label:<38}{_f(_number(v['base']), ',.2f'):>14}"
+                         f"{_f(_number(v['other']), ',.2f'):>14}{_f(v['delta'], ',.2f'):>14}")  # fmt: skip
+    if d["strategies_only_in_base"] or d["strategies_only_in_other"]:
+        lines.append(f"\nstrategies only in base: {d['strategies_only_in_base']}; only in other: "
+                     f"{d['strategies_only_in_other']}")  # fmt: skip
     return "\n".join(lines)

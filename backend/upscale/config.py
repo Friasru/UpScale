@@ -126,6 +126,9 @@ SHADOW = os.getenv("UPSCALE_SHADOW") or None
 SHADOW_INTERVAL_MINUTES = os.getenv("UPSCALE_SHADOW_INTERVAL_MINUTES") or None
 SHADOW_RUN = os.getenv("UPSCALE_SHADOW_RUN") or None
 SHADOW_SINCE = os.getenv("UPSCALE_SHADOW_SINCE") or None
+# Comma-separated run ids advanced together (e.g. continuous-v2,continuous-v2-realistic).
+# Unset: only UPSCALE_SHADOW_RUN, exactly as before. Listed runs must already exist.
+SHADOW_RUNS = os.getenv("UPSCALE_SHADOW_RUNS") or None
 # Held-position watch: exact-pool prices for open positions of EVIDENCE_AWARE_V2 Shadow runs
 # (upscale.held_position_watch). On by default (idle without such positions);
 # UPSCALE_SHADOW_WATCH=0 disables it. Interval in minutes (default 15, at least 5).

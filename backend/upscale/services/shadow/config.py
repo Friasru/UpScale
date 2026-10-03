@@ -31,6 +31,21 @@ EXECUTION_NOTE = (
     "IDEALIZED_NO_FEES: fills at the exact pool's observed Scout price, no fees, no "
     "slippage, no latency, no price impact. Results are simulated and not real profit."
 )
+# A run's execution model (a run-level setting frozen when the run is created, like the
+# availability policy; never part of a strategy's config hash). Every strategy config keeps
+# `execution_model = IDEALIZED_NO_FEES`; a run created with an `ExecutionConfig` executes
+# the same decisions with REALISTIC_V1 fills instead.
+RunExecutionModel = Literal["IDEALIZED_NO_FEES", "REALISTIC_V1"]
+EXECUTION_MODELS: tuple[RunExecutionModel, ...] = ("IDEALIZED_NO_FEES", "REALISTIC_V1")
+REALISTIC_NOTE = (
+    "REALISTIC_V1: entries and exits are intents filled only at the first valid exact-pool "
+    "price observed at or after intent time + latency, with adverse slippage, basis-point "
+    "fees and (optional) constant-product price impact from the liquidity observed with "
+    "that price. The latency is a MINIMUM eligibility delay, not 60-second market data: the "
+    "real fill delay is the time to the first archived observation (Scout / held-position "
+    "watch cadence), reported per fill. No gas, MEV, partial-fill or order-book model. "
+    "Simulated, not real profit."
+)
 NOT_REAL_PROFIT = (
     "Shadow / paper simulation only: no order was placed and no money was at risk. "
     "Simulated P/L is not real profit, not an expected return and not a recommendation."
@@ -324,6 +339,76 @@ class StrategyConfig(BaseModel):
         return hashlib.sha256(self.rules_json().encode()).hexdigest()[:24]
 
 
+# --- execution model (run level) ----------------------------------------------------------------
+
+
+class ExecutionConfig(BaseModel):
+    """REALISTIC_V1 paper execution. Defaults are deliberately conservative for a generic
+    DEX swap of a few hundred dollars (not tuned, not chain specific, no gas):
+
+    * fees: 30 bps per side (a typical 0.30% AMM pool fee);
+    * slippage: 50 bps per side, always adverse (BUY above, SELL below the observation);
+    * latency: 60 s, fixed and deterministic. A MINIMUM eligibility delay, not the market
+      data resolution: an intent fills at the first valid exact-pool price OBSERVED at or
+      after intent time + latency (never an earlier observation). Observations only exist
+      when Scout or the held-position watch recorded one (typically minutes apart), so the
+      real simulated fill delay is that first archived observation, reported per fill;
+    * price impact: disabled. When enabled, constant-product: half the pool liquidity
+      reported with the fill observation is the quote reserve y; a BUY of notional N moves
+      the average price by N / y, a SELL of value V by V / (y + V), capped at
+      `max_price_impact_bps`. No liquidity on that observation: no impact (never invented);
+    * entry wait: None (0 on the command line, the default) waits indefinitely. A finite
+      wait cancels an entry intent with no eligible price by then: recorded as a NO_ACTION
+      decision (reason code ENTRY_NOT_FILLED), reserved cash released, no trade, no P/L.
+      Exit intents always wait for a price (missing evidence is never a fake loss).
+    """
+
+    model_config = _frozen()
+
+    name: Literal["REALISTIC_V1"] = "REALISTIC_V1"
+    entry_fee_bps: float = Field(default=30.0, ge=0, lt=1_000)
+    exit_fee_bps: float = Field(default=30.0, ge=0, lt=1_000)
+    slippage_bps: float = Field(default=50.0, ge=0, lt=2_000)
+    latency_seconds: float = Field(default=60.0, ge=0, le=86_400)
+    price_impact: bool = False
+    max_price_impact_bps: float = Field(default=1_000.0, gt=0, le=5_000)
+    entry_max_wait_minutes: float | None = Field(default=None, ge=0)
+
+    @field_validator("entry_fee_bps", "exit_fee_bps", "slippage_bps", "latency_seconds",
+                     "max_price_impact_bps")  # fmt: skip
+    @classmethod
+    def _finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("must be finite")
+        return value
+
+    @field_validator("entry_max_wait_minutes")
+    @classmethod
+    def _wait(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("must be finite")
+        return None if value == 0 else value  # 0: wait indefinitely (one spelling, one hash)
+
+    def config_json(self) -> str:
+        return json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+
+    @property
+    def config_hash(self) -> str:
+        return hashlib.sha256(self.config_json().encode()).hexdigest()[:24]
+
+
+def run_execution(run: dict[str, object]) -> ExecutionConfig | None:
+    """A stored run's execution config: None for IDEALIZED_NO_FEES (every run created
+    before execution models existed)."""
+    if run.get("execution_model") != "REALISTIC_V1":
+        return None
+    args = run.get("args")
+    raw = args.get("execution") if isinstance(args, dict) else None
+    if not isinstance(raw, dict):
+        raise ValueError(f"run {run.get('run_id')} is REALISTIC_V1 without its execution config")
+    return ExecutionConfig.model_validate(raw)
+
+
 # --- background service settings ------------------------------------------------------------------
 
 DEFAULT_INTERVAL_MINUTES = 15.0
@@ -336,11 +421,18 @@ _OFF = ("", "0", "false", "off", "no")
 
 
 class ShadowSettings(BaseModel):
+    """`run_ids` empty: single-run mode (``UPSCALE_SHADOW_RUN``: created on first use from
+    `since`, then advanced; unchanged behavior). Non-empty (``UPSCALE_SHADOW_RUNS``):
+    multi-run mode, every listed run advanced in order, each on its own checkpoint and
+    frozen settings; runs are never created or redefined there (create them with the CLI)."""
+
     model_config = _frozen()
 
     enabled: bool = False
     interval_minutes: float = DEFAULT_INTERVAL_MINUTES
     run_id: str = DEFAULT_RUN_ID
+    run_ids: tuple[str, ...] = ()
+    ignored_run_ids: tuple[str, ...] = ()  # malformed entries of UPSCALE_SHADOW_RUNS
     since: datetime = CLEAN_DATA_CUTOFF
     startup_delay_minutes: float = 5.0
     retry_minutes: float = 5.0
@@ -434,11 +526,13 @@ def load_settings(
     interval_minutes: str | None = None,
     run_id: str | None = None,
     since: str | None = None,
+    runs: str | None = None,
 ) -> ShadowSettings:
     """From ``UPSCALE_SHADOW`` (default OFF: only 1 / true / on / yes enable it),
     ``UPSCALE_SHADOW_INTERVAL_MINUTES`` (default 15, at least 5), ``UPSCALE_SHADOW_RUN``
-    (default ``production``) and ``UPSCALE_SHADOW_SINCE`` (default: the clean-data
-    cutoff; an earlier value is raised to it)."""
+    (default ``production``), ``UPSCALE_SHADOW_SINCE`` (default: the clean-data
+    cutoff; an earlier value is raised to it) and ``UPSCALE_SHADOW_RUNS`` (comma-separated
+    run ids: multi-run mode; unset or empty: single-run mode, exactly as before)."""
     on = (enabled or "").strip().lower() not in _OFF
     interval = DEFAULT_INTERVAL_MINUTES
     if interval_minutes and interval_minutes.strip():
@@ -458,4 +552,8 @@ def load_settings(
     run = (run_id or "").strip() or DEFAULT_RUN_ID
     if not _SLUG.match(run):
         run = DEFAULT_RUN_ID
-    return ShadowSettings(enabled=on, interval_minutes=interval, run_id=run, since=start)
+    listed = [x.strip() for x in (runs or "").split(",") if x.strip()]
+    ids = tuple(dict.fromkeys(x for x in listed if _SLUG.match(x)))
+    ignored = tuple(x for x in listed if not _SLUG.match(x))
+    return ShadowSettings(enabled=on, interval_minutes=interval, run_id=run, since=start,
+                          run_ids=ids, ignored_run_ids=ignored)  # fmt: skip

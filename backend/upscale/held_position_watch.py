@@ -12,9 +12,13 @@ task closes that gap:
       -> Shadow consumes the archived price later, in time order (anti-lookahead intact)
 
 What it watches: the open positions of active runs (no end time, or one in the future)
-whose availability policy reads watch evidence (EVIDENCE_AWARE_V2). LEGACY_V1 runs ignore
-watch records, so their positions are not looked up. One lookup per exact (chain, token,
-pool), however many strategies or runs hold it. A pool priced by any source within
+whose availability policy reads watch evidence (EVIDENCE_AWARE_V2), and the pending
+REALISTIC_V1 entry intents of those runs (an entry fills only at a later observation of
+its exact pool; it stops being watched once filled or cancelled). Pending REALISTIC_V1 exit
+intents belong to open positions, so they are always covered. LEGACY_V1 runs ignore watch
+records, so their positions are not looked up. One lookup per exact (chain, token, pool),
+however many strategies, runs, positions or intents hold it. Observations are archived at
+the time they are made: nothing is backdated or reconstructed. A pool priced by any source within
 `fresh_minutes` is skipped (no duplicate evidence, no wasted request).
 
 How: DEX Screener first (one batched token lookup per chain and 30 tokens; every
@@ -119,9 +123,13 @@ class HeldPool:
     token: str  # as the position stores it
     pool: str
     asset_id: str
-    holders: int  # open positions sharing it (strategies x runs)
+    holders: int  # open positions and pending entry intents sharing it (strategies x runs)
     provider: str | None  # the provider whose observation priced the position's pool
     variants: tuple[tuple[str, str], ...] = ()  # other (asset_id, pool) spellings held
+    positions: int = 0  # open positions
+    pending_entries: int = 0  # REALISTIC_V1 entry intents waiting for a price
+    pending_exits: int = 0  # open positions with an exit intent waiting for a price
+    runs: tuple[str, ...] = ()
 
     @property
     def key(self) -> PoolKey:
@@ -133,35 +141,69 @@ def _norm(chain: str, address: str) -> str:
 
 
 def held_pools(shadow_db: str, now: datetime) -> list[HeldPool]:
-    """Open positions of active EVIDENCE_AWARE_V2 runs, one entry per exact pool (read-only;
-    a missing shadow database holds nothing)."""
+    """Open positions and pending REALISTIC_V1 entry intents of active EVIDENCE_AWARE_V2
+    runs, one entry per exact pool (read-only; a missing shadow database holds nothing).
+    Open positions come first, so a pool's archived spelling is a position's when any
+    position holds it."""
     if not Path(shadow_db).expanduser().exists():
         return []
     store = ShadowStore(shadow_db, read_only=True)
     try:
         groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+
+        def add(row: dict[str, Any]) -> None:
+            chain, token, pool = row["chain"], row["address"], row["pool"]
+            if chain and token and pool:
+                groups.setdefault((chain, _norm(chain, token), _norm(chain, pool)), []).append(row)
+
         for run in store.runs():
             if run_policy(run) != "EVIDENCE_AWARE_V2":
                 continue
             if run["until_ts"] is not None and run["until_ts"] <= now.timestamp():
                 continue
             for p in store.positions(run_id=run["run_id"], status="OPEN"):
-                chain, token, pool = p["chain"], p["address"], p["pool"]
-                if not chain or not token or not pool:
-                    continue
-                groups.setdefault((chain, _norm(chain, token), _norm(chain, pool)), []).append(p)
+                add(p | {"kind": "position", "run_id": run["run_id"]})
+        for run in store.runs():
+            if run_policy(run) != "EVIDENCE_AWARE_V2":
+                continue
+            if run["until_ts"] is not None and run["until_ts"] <= now.timestamp():
+                continue
+            for book in store.checkpoint(run["run_id"])["books"].values():
+                for e in ((book.get("state") or {}).get("pending_entries") or {}).values():
+                    add({"chain": e["chain"], "address": e["address"], "pool": e["pool"],
+                         "asset_id": e["asset_id"], "kind": "pending_entry",
+                         "pending_exit": None, "run_id": run["run_id"]})  # fmt: skip
     finally:
         store.close()
     out = []
     for (chain, _, _), rows in sorted(groups.items()):
         first = rows[0]
         spellings = sorted({(r["asset_id"], r["pool"]) for r in rows})
+        positions = [r for r in rows if r["kind"] == "position"]
         out.append(HeldPool(
             chain=chain, token=first["address"], pool=first["pool"], asset_id=first["asset_id"],
             holders=len(rows), provider=None,
             variants=tuple(s for s in spellings if s != (first["asset_id"], first["pool"])),
+            positions=len(positions), pending_entries=len(rows) - len(positions),
+            pending_exits=sum(1 for r in positions if r.get("pending_exit")),
+            runs=tuple(sorted({r["run_id"] for r in rows})),
         ))  # fmt: skip
     return out
+
+
+def targets_summary(held: Sequence[HeldPool]) -> dict[str, Any]:
+    """What the watch looks after, for status: pools by kind, pending-entry pools listed."""
+    return {
+        "pools": len(held),
+        "open_position_pools": sum(1 for h in held if h.positions),
+        "pending_entry_pools": [
+            {"chain": h.chain, "token": h.token, "pool": h.pool, "pending_entries":
+             h.pending_entries, "open_positions": h.positions, "runs": list(h.runs)}
+            for h in held if h.pending_entries
+        ],
+        "pending_exit_intents": sum(h.pending_exits for h in held),
+        "note": "pending exit intents belong to open positions and are watched with them",
+    }  # fmt: skip
 
 
 # --- Exact-pool lookups ----------------------------------------------------------------------
@@ -301,6 +343,7 @@ class HeldPositionWatch:
         self.last_cycle: CycleResult | None = None
         self._current: CycleResult | None = None
         self.last_completed_at: datetime | None = None
+        self.last_targets: dict[str, Any] | None = None
         self.next_run: datetime | None = None
         self.counts: Counter[str] = Counter()
         self.deferrals: Counter[str] = Counter()
@@ -379,6 +422,7 @@ class HeldPositionWatch:
         result = self._current = CycleResult(now, "completed")
         held = await asyncio.to_thread(held_pools, self._shadow_db(), now)
         result.held = len(held)
+        self.last_targets = {"at": now} | targets_summary(held)
         if not held:
             result.status = "idle"
             return result
@@ -505,6 +549,7 @@ class HeldPositionWatch:
             "archived_by_result": dict(self.results),
             "requests_by_provider": dict(self.requests),
             "last_cycle": c.__dict__ if c is not None else None,
+            "targets": self.last_targets,
             "lane": WATCH_LANE,
             "note": "lowest priority: never runs during Analyze, a Scout scan or safety "
             "enrichment; never uses reserved capacity",

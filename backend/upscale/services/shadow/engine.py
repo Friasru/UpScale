@@ -25,6 +25,7 @@ strategy: decisions, trades, positions and equity are identical in every mode.
 
 import math
 import shutil
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -42,8 +43,10 @@ from upscale.services.shadow.config import (
     SETTLE_SECONDS,
     AvailabilityPolicy,
     DiagnosticsSettings,
+    ExecutionConfig,
     StrategyConfig,
     load_diagnostics_settings,
+    run_execution,
     run_policy,
 )
 from upscale.services.shadow.evidence import PRICE_KINDS, AnalyzeView, EvidenceTimeline
@@ -62,6 +65,12 @@ from upscale.services.shadow.strategies import BASELINES
 
 class ShadowError(Exception):
     pass
+
+
+# Runs being advanced in this process (by any engine): one step per run at a time. Across
+# processes the checkpoint's cursor guards it (`ShadowStore.commit(expected_cursor=...)`).
+_ADVANCING: set[tuple[str, str]] = set()
+_ADVANCING_LOCK = threading.Lock()
 
 
 class LookaheadError(AssertionError):
@@ -117,13 +126,20 @@ class ShadowEngine:
         allow_contaminated: bool = False,
         args: dict[str, Any] | None = None,
         availability_policy: AvailabilityPolicy | None = None,
+        execution: ExecutionConfig | None = None,
     ) -> dict[str, Any]:
         """The run `run_id`, created on first use with the latest registered version of
-        each strategy and the market availability policy (default: EVIDENCE_AWARE_V2),
+        each strategy, the market availability policy (default: EVIDENCE_AWARE_V2) and the
+        execution model (default IDEALIZED_NO_FEES; an `ExecutionConfig`: REALISTIC_V1),
         frozen from then on. An existing run is never redefined (runs created before the
-        policy existed are LEGACY_V1)."""
+        policy existed are LEGACY_V1, before execution models IDEALIZED_NO_FEES)."""
         existing = self.store.run(run_id)
         if existing is not None:
+            if execution is not None and execution != run_execution(existing):
+                raise ShadowError(
+                    f"run {run_id} exists with execution model {existing['execution_model']}"
+                    " and its own settings: a run is never redefined, use a new --run id"
+                )
             if availability_policy is not None and availability_policy != run_policy(existing):
                 raise ShadowError(
                     f"run {run_id} exists with availability policy {run_policy(existing)}: a "
@@ -158,10 +174,18 @@ class ShadowEngine:
                 "`python -m upscale.services.shadow init` first"
             )
         policy = availability_policy or DEFAULT_POLICY
+        extra: dict[str, Any] = {}
+        if execution is not None:
+            if policy != "EVIDENCE_AWARE_V2":
+                raise ShadowError("REALISTIC_V1 execution requires --availability-policy "
+                                  "EVIDENCE_AWARE_V2")  # fmt: skip
+            extra = {"execution": execution.model_dump(mode="json"),
+                     "execution_hash": execution.config_hash}  # fmt: skip
         self.store.create_run(
             run_id, since, until, [latest[w] for w in wanted],
             clean_data=since >= CLEAN_DATA_CUTOFF,
-            args={**(args or {}), "availability_policy": policy},
+            args={**(args or {}), "availability_policy": policy, **extra},
+            execution_model=execution.name if execution is not None else None,
         )  # fmt: skip
         run = self.store.run(run_id)
         assert run is not None
@@ -182,7 +206,20 @@ class ShadowEngine:
 
     def run(self, run_id: str, max_events: int | None = None) -> dict[str, Any]:
         """Process every archived event after the run's cursor up to min(until, now -
-        settle); returns what this step did."""
+        settle); returns what this step did. Refused while another step advances the same
+        run (one run is never advanced twice concurrently)."""
+        key = (str(Path(self.store.path).expanduser().resolve()), run_id)
+        with _ADVANCING_LOCK:
+            if key in _ADVANCING:
+                raise ShadowError(f"run {run_id} is already being advanced")
+            _ADVANCING.add(key)
+        try:
+            return self._run(run_id, max_events)
+        finally:
+            with _ADVANCING_LOCK:
+                _ADVANCING.discard(key)
+
+    def _run(self, run_id: str, max_events: int | None) -> dict[str, Any]:
         if self.evidence is None:
             raise ShadowError("the Evidence Archive is not available (UPSCALE_EVIDENCE_ARCHIVE)")
         run = self.store.run(run_id)
@@ -191,8 +228,11 @@ class ShadowEngine:
         strategies = self._strategies(run)
         cp = self.store.checkpoint(run_id)
         policy = run_policy(run)
+        execution = run_execution(run)
+        if execution is not None and run["args"].get("execution_hash") != execution.config_hash:
+            raise ShadowError(f"run {run_id}: execution settings fail their hash check")
         books = {
-            s.key: Book(run_id, s, cp["books"].get(s.key, {}).get("state"), policy)
+            s.key: Book(run_id, s, cp["books"].get(s.key, {}).get("state"), policy, execution)
             for s in strategies
         }
         self._check_consistency(run_id, books)
@@ -212,7 +252,7 @@ class ShadowEngine:
         )
         report: dict[str, Any] = {
             "label": NOT_REAL_PROFIT, "run_id": run_id, "clean_data": run["clean_data"],
-            "availability_policy": policy,
+            "availability_policy": policy, "execution_model": run["execution_model"],
             "from": _dt(cursor[0]), "until": limit, "events": 0, "late_evidence_ignored": late,
             "actions": Counter(), "fills": 0,
         }  # fmt: skip
@@ -249,11 +289,15 @@ class ShadowEngine:
             for key, book in books.items():
                 pending[key].equity.append(book.snapshot(at))
 
+        committed = cursor  # what the stored checkpoint must still say when we commit
+
         def flush(cursor: tuple[float, int], through: float) -> None:
-            nonlocal unflushed
+            nonlocal unflushed, committed
             stats["events"] = stats.get("events", 0) + unflushed
             unflushed = 0
-            self._commit(run_id, books, pending, cursor, through, stats, timeline, report)
+            self._commit(run_id, books, pending, cursor, through, stats, timeline, report,
+                         committed)  # fmt: skip
+            committed = cursor
             for key in pending:
                 pending[key] = Output()
 
@@ -340,14 +384,16 @@ class ShadowEngine:
         stats: dict[str, Any],
         timeline: EvidenceTimeline,
         report: dict[str, Any],
+        expected: tuple[float, int] | None = None,
     ) -> None:
-        decisions, trades, equity, rejections = [], [], [], []
+        decisions, trades, equity, rejections, executions = [], [], [], [], []
         opened, marked, closed = [], [], []
         counters: Counter[tuple[str, int, float, str, str]] = Counter()
         for key, book in books.items():
             out = pending[key]
             decisions += out.decisions
             trades += out.trades
+            executions += out.executions
             equity += out.equity
             kept = self._sample(book, out.rejections, stats)
             rejections += kept
@@ -369,12 +415,12 @@ class ShadowEngine:
         stats["last_commit_at"] = time.time()
         self.store.commit(
             run_id, decisions=decisions, opened=opened, marked=marked, closed=closed,
-            trades=trades, equity=equity, rejections=rejections,
+            trades=trades, equity=equity, rejections=rejections, executions=executions,
             counters=[(*k, n) for k, n in sorted(counters.items())],
             cursor=cursor, processed_until=through,
             books={k: {"strategy_id": b.cfg.strategy_id, "strategy_version": b.cfg.version,
                        "state": b.state()} for k, b in books.items()},
-            stats=stats,
+            stats=stats, expected_cursor=expected,
         )  # fmt: skip
 
     def _finish(self, report: dict[str, Any], books: dict[str, Book]) -> dict[str, Any]:
@@ -385,6 +431,7 @@ class ShadowEngine:
                 "open_positions": len(b.positions), "closed_positions": b.closed_positions,
                 "realized_pnl": round(b.realized_pnl, 2),
                 "unresolved_cost": round(b.unresolved_cost, 2),
+                **({"pending_entries": len(b.pending_entries)} if b.execution else {}),
             }
             for key, b in books.items()
         }  # fmt: skip
@@ -736,7 +783,9 @@ class ShadowEngine:
                 k: {
                     "equity": round(b["state"]["cash"] + sum(
                         p["remaining_quantity"] * p["last_price"]
-                        for p in b["state"]["positions"].values()), 2),
+                        for p in b["state"]["positions"].values()) + sum(
+                        e["budget_usd"]
+                        for e in (b["state"].get("pending_entries") or {}).values()), 2),
                     "open_positions": len(b["state"]["positions"]),
                     "closed_positions": b["state"].get("closed_positions", 0),
                     **({"open_market_states": _states(b, at, self.store)}

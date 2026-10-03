@@ -4,6 +4,9 @@ python -m upscale.services.shadow init
 python -m upscale.services.shadow strategies
 python -m upscale.services.shadow run [--run production] [--since 2026-09-30T05:50:00Z] [--until ...]
     [--availability-policy EVIDENCE_AWARE_V2 | LEGACY_V1]  (a new run only; default V2)
+    [--execution-model IDEALIZED_NO_FEES | REALISTIC_V1]  (a new run only; default IDEALIZED)
+    [--entry-fee-bps 30] [--exit-fee-bps 30] [--slippage-bps 50] [--latency-seconds 60]
+    [--price-impact [--max-price-impact-bps 1000]] [--entry-max-wait-minutes 0 (indefinite) | N]
 python -m upscale.services.shadow status
 python -m upscale.services.shadow positions [--open | --closed]
 python -m upscale.services.shadow trades
@@ -15,6 +18,8 @@ python -m upscale.services.shadow funnel [--run ...] [--strategy scout_technical
 python -m upscale.services.shadow storage [--json]
 python -m upscale.services.shadow audit-unavailable [--run continuous-v1] [--strategy ...] [--json]
 python -m upscale.services.shadow report [--run continuous-v2] [--strategy ...] [--since ...] [--until ...] [--json]
+python -m upscale.services.shadow compare --base continuous-v2 --other continuous-v2-realistic
+    [--strategy ...] [--since ...] [--until ...] [--json]
 
 Filters: --run, --strategy, --asset, --since, --until.
 """
@@ -37,13 +42,17 @@ from upscale.services.shadow.config import (
     CLEAN_DATA_CUTOFF,
     DEFAULT_RUN_ID,
     DETAIL_MODES,
+    EXECUTION_MODELS,
+    ExecutionConfig,
     default_evidence_db,
     default_shadow_db,
     load_diagnostics_settings,
     parse_timestamp,
+    run_execution,
 )
 from upscale.services.shadow.engine import ShadowEngine, ShadowError, resolve_run
-from upscale.services.shadow.report import shadow_report
+from upscale.services.shadow.report import compare_runs, shadow_report
+from upscale.services.shadow.report import compare_text as compare_text
 from upscale.services.shadow.report import text as report_text
 from upscale.services.shadow.store import ShadowStore, ShadowStoreError, readable
 
@@ -81,6 +90,24 @@ def parser() -> argparse.ArgumentParser:
                    help="market availability policy of a NEW run (default EVIDENCE_AWARE_V2: "
                         "missing evidence never closes a position; LEGACY_V1: closes it as "
                         "MARKET_UNAVAILABLE after the timeouts); an existing run keeps its own")  # fmt: skip
+    r.add_argument("--execution-model", choices=EXECUTION_MODELS, default=None,
+                   help="execution model of a NEW run (default IDEALIZED_NO_FEES; REALISTIC_V1: "
+                        "latency, adverse slippage, fees, optional price impact; requires "
+                        "EVIDENCE_AWARE_V2); an existing run keeps its own")  # fmt: skip
+    defaults = ExecutionConfig()
+    for flag, default, what in (
+        ("--entry-fee-bps", defaults.entry_fee_bps, "entry fee"),
+        ("--exit-fee-bps", defaults.exit_fee_bps, "exit fee"),
+        ("--slippage-bps", defaults.slippage_bps, "adverse slippage per side"),
+        ("--latency-seconds", defaults.latency_seconds, "fixed execution latency"),
+        ("--max-price-impact-bps", defaults.max_price_impact_bps, "price impact cap"),
+        ("--entry-max-wait-minutes", defaults.entry_max_wait_minutes,
+         "cancel an unfilled entry intent after this long (0, the default: wait indefinitely)"),
+    ):  # fmt: skip
+        r.add_argument(flag, type=float, default=None,
+                       help=f"REALISTIC_V1 {what} (default {default or 0:g})")  # fmt: skip
+    r.add_argument("--price-impact", action="store_true",
+                   help="REALISTIC_V1: constant-product price impact from observed liquidity")  # fmt: skip
     r.add_argument("--allow-contaminated", action="store_true",
                    help="allow --since before the clean-data cutoff (labeled research run)")  # fmt: skip
     r.add_argument("--diagnostics-detail", choices=DETAIL_MODES, default=None,
@@ -138,7 +165,38 @@ def parser() -> argparse.ArgumentParser:
     rp.add_argument("--since", type=_timestamp, default=None, help="ISO-8601, inclusive")
     rp.add_argument("--until", type=_timestamp, default=None, help="ISO-8601, exclusive")
     rp.add_argument("--json", action="store_true", help="print JSON")
+    cp = sub.add_parser("compare", help="factual deltas between two runs (read-only)")
+    cp.add_argument("--base", required=True, help="e.g. continuous-v2")
+    cp.add_argument("--other", required=True, help="e.g. continuous-v2-realistic")
+    cp.add_argument("--strategy", action="append", default=None, help="repeatable")
+    cp.add_argument("--since", type=_timestamp, default=None, help="ISO-8601, inclusive")
+    cp.add_argument("--until", type=_timestamp, default=None, help="ISO-8601, exclusive")
+    cp.add_argument("--json", action="store_true", help="print JSON")
     return p
+
+
+_EXECUTION_FLAGS = ("entry_fee_bps", "exit_fee_bps", "slippage_bps", "latency_seconds",
+                    "max_price_impact_bps", "entry_max_wait_minutes")  # fmt: skip
+
+
+def _execution(args: argparse.Namespace, store: ShadowStore) -> ExecutionConfig | None:
+    """The REALISTIC_V1 settings a `run` asks for (None: IDEALIZED_NO_FEES or continue)."""
+    given = {k: getattr(args, k) for k in _EXECUTION_FLAGS if getattr(args, k) is not None}
+    if args.price_impact:
+        given["price_impact"] = True
+    if args.execution_model != "REALISTIC_V1":
+        if given:
+            raise ShadowError("execution settings need --execution-model REALISTIC_V1")
+        existing = store.run(args.run)
+        if args.execution_model == "IDEALIZED_NO_FEES" and existing and run_execution(existing):
+            raise ShadowError(f"run {args.run} is REALISTIC_V1: a run is never redefined")
+        return None
+    if given.get("entry_max_wait_minutes") == 0:
+        given["entry_max_wait_minutes"] = None
+    try:
+        return ExecutionConfig(**given)
+    except ValueError as exc:
+        raise ShadowError(f"invalid execution settings: {exc}") from exc
 
 
 def _audit(args: argparse.Namespace) -> int:
@@ -170,6 +228,24 @@ def _report(args: argparse.Namespace) -> int:
         d = shadow_report(store, evidence, resolve_run(store, args.run), args.strategy,
                           args.since, args.until)  # fmt: skip
         print(json.dumps(d, indent=2, default=str) if args.json else report_text(d))
+        return 0
+    except (ShadowError, ShadowStoreError, EvidenceStoreError, sqlite3.Error) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+        if evidence is not None:
+            evidence.close()
+
+
+def _compare(args: argparse.Namespace) -> int:
+    store = ShadowStore(args.db or default_shadow_db(), read_only=True)
+    path = args.evidence_db or default_evidence_db()
+    evidence = EvidenceStore(path, read_only=True) if Path(path).expanduser().exists() else None
+    try:
+        d = compare_runs(store, evidence, args.base, args.other, args.strategy, args.since,
+                         args.until)  # fmt: skip
+        print(json.dumps(d, indent=2, default=str) if args.json else compare_text(d))
         return 0
     except (ShadowError, ShadowStoreError, EvidenceStoreError, sqlite3.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -283,6 +359,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _audit(args)
     if args.command == "report":
         return _report(args)
+    if args.command == "compare":
+        return _compare(args)
     store = ShadowStore(args.db or default_shadow_db())
     evidence_path = args.evidence_db or default_evidence_db()
     evidence = EvidenceStore(evidence_path, read_only=True)
@@ -301,6 +379,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.run, args.since, args.until, args.strategy, args.allow_contaminated,
                 args={"cli": list(argv or sys.argv[1:])},
                 availability_policy=args.availability_policy,
+                execution=_execution(args, store),
             )  # fmt: skip
             _print(engine.run(args.run))
         elif args.command == "status":

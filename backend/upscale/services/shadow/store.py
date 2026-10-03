@@ -2,7 +2,7 @@
 database, on Railway ``/data/shadow.sqlite3``). Separate from Scout, outcome, evidence,
 replay and calibration databases: nothing here is read by production decisions.
 
-Tables (schema version 3; an older file gains the newer tables in place, no row changes):
+Tables (schema version 4; an older file gains the newer tables in place, no row changes):
 
 * ``shadow_strategies``: every registered (strategy_id, version), its rules and hash.
   Append-only: changed rules need a new version.
@@ -32,6 +32,10 @@ Tables (schema version 3; an older file gains the newer tables in place, no row 
   checkpoint (a resume never double-counts). Never deleted.
 * ``shadow_retention_window`` (v3): empty except inside a retention transaction; it tells
   the delete trigger which rejection rows that transaction may remove.
+* ``shadow_executions`` (v4): one row per REALISTIC_V1 fill (BUY entry / SELL exit): the
+  intent, eligible and fill times, the observed price and the record it came from, the
+  execution price, fee, slippage, price impact, latency drift, gross and net P/L.
+  Append-only. IDEALIZED_NO_FEES runs write none.
 * ``shadow_meta``: schema metadata, and per run the time from which rejection
   diagnostics exist (``diagnostics_from:<run_id>``) and from which aggregate counters
   exist (``aggregates_from:<run_id>``), each written once.
@@ -51,13 +55,13 @@ from typing import Any
 from upscale.services.shadow.book import Position
 from upscale.services.shadow.config import StrategyConfig
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DIAGNOSTICS_VERSION = 1
 AGGREGATES_VERSION = 1
 BUCKET_SECONDS = 3600  # aggregate counters are per UTC hour
 APPEND_ONLY = (
     "shadow_strategies", "shadow_runs", "shadow_decisions", "shadow_trades", "shadow_equity",
-    "shadow_metrics", "shadow_rejections",
+    "shadow_metrics", "shadow_rejections", "shadow_executions",
 )  # fmt: skip
 _POSITION_ENTRY = (
     "position_id", "run_id", "strategy_id", "strategy_version", "asset_id", "chain", "address",
@@ -241,6 +245,56 @@ CREATE TABLE IF NOT EXISTS shadow_retention_window (
     cutoff REAL NOT NULL,
     recorded_from REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS shadow_executions (
+    id INTEGER PRIMARY KEY,
+    execution_id TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL REFERENCES shadow_runs(run_id),
+    strategy_id TEXT NOT NULL,
+    strategy_version INTEGER NOT NULL,
+    position_id TEXT NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    reason TEXT NOT NULL,
+    fill_no INTEGER NOT NULL,
+    decision_id TEXT NOT NULL,
+    asset_id TEXT NOT NULL,
+    pool TEXT NOT NULL,
+    intent_at REAL NOT NULL,
+    eligible_at REAL NOT NULL,
+    filled_at REAL NOT NULL,
+    price_observed_at REAL NOT NULL,
+    price_record TEXT NOT NULL,
+    price_source TEXT NOT NULL,
+    reference_price REAL NOT NULL,
+    observed_price REAL NOT NULL CHECK (observed_price > 0),
+    execution_price REAL NOT NULL CHECK (execution_price > 0),
+    quantity REAL NOT NULL CHECK (quantity > 0),
+    notional_usd REAL NOT NULL,
+    observed_value_usd REAL NOT NULL,
+    fee_bps REAL NOT NULL,
+    fee_usd REAL NOT NULL,
+    slippage_bps REAL NOT NULL,
+    slippage_cost_usd REAL NOT NULL,
+    impact_bps REAL NOT NULL,
+    impact_cost_usd REAL NOT NULL,
+    impact_status TEXT NOT NULL,
+    liquidity_usd REAL,
+    friction_usd REAL NOT NULL,
+    cash_flow_usd REAL NOT NULL,
+    latency_seconds REAL NOT NULL,
+    delay_seconds REAL NOT NULL,
+    latency_cost_usd REAL NOT NULL,
+    gross_pnl_usd REAL,
+    trade_friction_usd REAL NOT NULL,
+    net_pnl_usd REAL,
+    execution_model TEXT NOT NULL,
+    config_hash TEXT NOT NULL,
+    recorded_at REAL NOT NULL,
+    CHECK (price_observed_at >= eligible_at),
+    CHECK (eligible_at >= intent_at),
+    CHECK (price_observed_at <= filled_at)
+);
+CREATE INDEX IF NOT EXISTS shadow_executions_by_run
+    ON shadow_executions (run_id, strategy_id, filled_at);
 CREATE TABLE IF NOT EXISTS shadow_checkpoints (
     run_id TEXT PRIMARY KEY REFERENCES shadow_runs(run_id),
     cursor_at REAL NOT NULL,
@@ -438,13 +492,17 @@ class ShadowStore:
         strategies: Sequence[StrategyConfig],
         clean_data: bool,
         args: dict[str, Any],
+        execution_model: str | None = None,
     ) -> None:
+        """`execution_model`: the run's own (REALISTIC_V1); None: the strategies'."""
         self._write_guard()
         frozen = [
             {"strategy_id": s.strategy_id, "version": s.version, "config_hash": s.config_hash}
             for s in strategies
         ]
-        models = {s.execution_model for s in strategies}
+        models: set[str] = (
+            {execution_model} if execution_model else {s.execution_model for s in strategies}
+        )
         with self._lock:
             db = self._db()
             with db:
@@ -515,19 +573,35 @@ class ShadowStore:
         trades: Sequence[dict[str, Any]],
         equity: Sequence[dict[str, Any]],
         rejections: Sequence[dict[str, Any]] = (),
+        executions: Sequence[dict[str, Any]] = (),
         counters: Sequence[tuple[str, int, float, str, str, int]] = (),
         cursor: tuple[float, int],
         processed_until: float,
         books: dict[str, Any],
         stats: dict[str, Any],
+        expected_cursor: tuple[float, int] | None = None,
     ) -> None:
         """Every row one processing step produced, plus the checkpoint that resumes after
-        it, atomically: a crash never leaves rows without the matching checkpoint."""
+        it, atomically: a crash never leaves rows without the matching checkpoint.
+        `expected_cursor`: the checkpoint this step started from (or last committed); if
+        another writer has moved it since, nothing is written (no double advancement)."""
         self._write_guard()
         now = time.time()
         with self._lock:
             db = self._db()
             with db:
+                if expected_cursor is not None:
+                    # First statement: takes the write lock before anything is inserted.
+                    moved = db.execute(
+                        "UPDATE shadow_checkpoints SET updated_at = updated_at WHERE run_id = ? "
+                        "AND cursor_at = ? AND cursor_id = ?",
+                        (run_id, expected_cursor[0], expected_cursor[1]),
+                    ).rowcount
+                    if moved != 1:
+                        raise ShadowStoreError(
+                            f"run {run_id}: its checkpoint was advanced by another writer; "
+                            "nothing from this step was written"
+                        )
                 db.executemany(
                     "INSERT OR IGNORE INTO shadow_decisions (decision_id, run_id, strategy_id, "
                     "strategy_version, action, asset_id, chain, address, pool, decision_at, "
@@ -613,6 +687,14 @@ class ShadowStore:
                       json.dumps(x["fingerprints"], default=str), DIAGNOSTICS_VERSION, now)
                      for x in rejections],
                 )  # fmt: skip
+                if executions:
+                    cols = _EXECUTION_COLUMNS
+                    db.executemany(
+                        f"INSERT INTO shadow_executions ({', '.join(cols)}, recorded_at) "
+                        f"VALUES ({', '.join('?' for _ in cols)}, ?)",
+                        [(*(x[c].timestamp() if c in _EXECUTION_TIMES else x[c] for c in cols),
+                          now) for x in executions],
+                    )  # fmt: skip
                 # (strategy_id, version, bucket_at, outcome, reasons_key, count)
                 db.executemany(
                     "INSERT INTO shadow_funnel_counts (run_id, strategy_id, strategy_version, "
@@ -750,6 +832,35 @@ class ShadowStore:
                 )
             ]
 
+    def first_decision_difference(
+        self,
+        run_a: tuple[str, str, int],
+        run_b: tuple[str, str, int],
+        since: datetime | None = None,
+        until: datetime | None = None,
+        actions: Sequence[str] = ("ENTER", "HOLD", "EXIT", "NO_ACTION"),
+    ) -> tuple[float, str, str] | None:
+        """The earliest (decision_at, action, asset_id) that (run, strategy, version) `run_a`
+        decided and `run_b` did not, among `actions`. Cancelled REALISTIC_V1 entry orders
+        are execution events, not strategy decisions: left out."""
+        parts, params = [], []
+        for run_id, sid, version in (run_a, run_b):
+            where, p = self._where(run_id, sid, None, "decision_at", since, until)
+            marks = ",".join("?" for _ in actions)
+            parts.append(
+                "SELECT decision_at, action, asset_id FROM shadow_decisions WHERE "
+                f"{where} AND strategy_version = ? AND action IN ({marks}) "
+                "AND reason NOT LIKE 'entry order cancelled%'"
+            )
+            params += [*p, version, *actions]
+        with self._lock:
+            row = (
+                self._db()
+                .execute(f"{parts[0]} EXCEPT {parts[1]} ORDER BY 1, 2, 3 LIMIT 1", params)
+                .fetchone()
+            )
+        return (float(row[0]), str(row[1]), str(row[2])) if row else None
+
     def decisions_by_id(self, decision_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         ids = list(dict.fromkeys(decision_ids))
@@ -781,6 +892,14 @@ class ShadowStore:
                 .fetchall()
             )
         return [(float(c), float(m)) for c, m in rows]
+
+    def executions(self, run_id: str, strategy_id: str | None = None) -> list[dict[str, Any]]:
+        """REALISTIC_V1 fills of a run, in the order they were recorded (none for a file
+        older than schema v4 opened read-only)."""
+        if not self._has("shadow_executions"):
+            return []
+        where, params = self._where(run_id, strategy_id, None, "filled_at", None, None)
+        return self._rows(f"SELECT * FROM shadow_executions WHERE {where} ORDER BY id", params)
 
     def equity(self, run_id: str, strategy_id: str | None = None) -> list[dict[str, Any]]:
         where, params = self._where(run_id, strategy_id, None, "at", None, None)
@@ -1058,12 +1177,26 @@ STORAGE_TABLES: dict[str, str | None] = {
     "shadow_positions": "entry_at", "shadow_trades": "exit_at", "shadow_equity": "at",
     "shadow_metrics": "computed_at", "shadow_rejections": "decision_at",
     "shadow_funnel_counts": "bucket_at", "shadow_checkpoints": None,
+    "shadow_executions": "filled_at",
 }  # fmt: skip
+
+_EXECUTION_TIMES = frozenset({"intent_at", "eligible_at", "filled_at", "price_observed_at"})
+_EXECUTION_COLUMNS = (
+    "execution_id", "run_id", "strategy_id", "strategy_version", "position_id", "side",
+    "reason", "fill_no", "decision_id", "asset_id", "pool", "intent_at", "eligible_at",
+    "filled_at", "price_observed_at", "price_record", "price_source", "reference_price",
+    "observed_price", "execution_price", "quantity", "notional_usd", "observed_value_usd",
+    "fee_bps", "fee_usd", "slippage_bps", "slippage_cost_usd", "impact_bps",
+    "impact_cost_usd", "impact_status", "liquidity_usd", "friction_usd", "cash_flow_usd",
+    "latency_seconds", "delay_seconds", "latency_cost_usd", "gross_pnl_usd",
+    "trade_friction_usd", "net_pnl_usd", "execution_model", "config_hash",
+)  # fmt: skip
 
 
 TIME_COLUMNS = frozenset(
     {"entry_at", "entry_price_at", "last_price_at", "closed_at", "exit_at", "exit_price_at",
-     "decision_at", "reference_price_at", "recorded_at", "at"}
+     "decision_at", "reference_price_at", "recorded_at", "at", "intent_at", "eligible_at",
+     "filled_at", "price_observed_at"}
 )  # fmt: skip
 
 

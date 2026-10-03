@@ -36,6 +36,20 @@ Market availability (`config.AvailabilityPolicy`, per run):
   exact pool spanning at least `max_exit_delay_minutes` with no valid price in between
   (closed at the confirming observation, as MARKET_UNAVAILABLE with reason code
   MARKET_NOT_FOUND).
+
+Execution model (`config.ExecutionConfig`, per run; None: IDEALIZED_NO_FEES, unchanged):
+
+* REALISTIC_V1 (EVIDENCE_AWARE_V2 runs only): the strategy's decisions are made exactly as
+  above, but an ENTER or a triggered exit is an *intent*. It fills only at the first valid
+  exact-pool price observed at or after intent time + latency (pool identity compared
+  chain-aware: EVM lowercased, Solana case-sensitive), with adverse slippage, fees and
+  optional price impact (`_execute`). Until then it is pending: an entry intent reserves its
+  cash (it counts toward equity at cost and holds the asset slot) and is cancelled without
+  a fill after `entry_max_wait_minutes`; an exit intent waits for a price as long as it
+  takes. Take profit / stop loss / trailing levels are measured on observed market prices
+  against the observed entry price (`Position.trigger_price`), so the rules read the same
+  market moves as IDEALIZED_NO_FEES; the position's `entry_price` is its all-in cost per
+  unit (fees, slippage, impact included), so cost, proceeds and realized P/L are net.
 """
 
 import hashlib
@@ -44,6 +58,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
+from upscale.services.chains import same_address
 from upscale.services.shadow.config import (
     CONFIDENCE_ORDER,
     LEGACY_POLICY,
@@ -51,6 +66,7 @@ from upscale.services.shadow.config import (
     SPAM_ORDER,
     Action,
     AvailabilityPolicy,
+    ExecutionConfig,
     ExitReason,
     StrategyConfig,
 )
@@ -64,6 +80,7 @@ from upscale.services.shadow.evidence import (
 
 AnalyzeLookup = Callable[[str, datetime, timedelta], AnalyzeView | None]
 PRICE_BASIS = "OBSERVED_EXACT_POOL_PRICE"
+REALISTIC_BASIS = "REALISTIC_V1_EXECUTION_PRICE"  # observed price, adverse slippage / impact
 MIN_TIMING_VERSION = 2  # Scout records before it carry the legacy (run start) timing
 EPS = 1e-12
 # EVIDENCE_AWARE_V2 market availability (see the module docstring).
@@ -75,7 +92,10 @@ PRICE_STALE_AFTER_MINUTES = 60.0
 LIQUIDITY_COLLAPSE_USD = 1_000.0  # Scout's own floor for a usable pool
 NOT_FOUND_CONFIRMATIONS = 2
 _DATES = ("entry_at", "entry_price_at", "last_price_at", "pending_since", "closed_at",
-          "watch_status_at", "not_found_since")  # fmt: skip
+          "watch_status_at", "not_found_since", "pending_eligible_at")  # fmt: skip
+# REALISTIC_V1-only position facts: left out of an IDEALIZED_NO_FEES book's state.
+_REALISTIC = ("trigger_price", "pending_quantity", "pending_level", "pending_eligible_at",
+              "pending_reference_price")  # fmt: skip
 
 
 def _id(*parts: object) -> str:
@@ -119,6 +139,18 @@ class Position:
     watch_status_at: datetime | None = None
     not_found_count: int = 0  # authoritative MARKET_NOT_FOUND observations since it
     not_found_since: datetime | None = None
+    # REALISTIC_V1: the observed exact-pool price at the entry fill (the rules' reference;
+    # `entry_price` is the all-in cost per unit) and the pending exit intent's order.
+    trigger_price: float | None = None
+    pending_quantity: float | None = None  # None: everything remaining at fill time
+    pending_level: float | None = None
+    pending_eligible_at: datetime | None = None
+    pending_reference_price: float | None = None
+
+    @property
+    def basis(self) -> float:
+        """The price entry-relative rules and excursions are measured against."""
+        return self.trigger_price if self.trigger_price is not None else self.entry_price
 
     @property
     def remaining_cost(self) -> float:
@@ -132,6 +164,9 @@ class Position:
         d = asdict(self)
         for k in _DATES:
             d[k] = _iso(d[k])
+        for k in _REALISTIC:
+            if d[k] is None:
+                del d[k]
         return d
 
     @classmethod
@@ -161,6 +196,38 @@ class Position:
 
 
 @dataclass
+class PendingEntry:
+    """A REALISTIC_V1 entry intent: its ENTER decision is final, its fill is not yet."""
+
+    decision_id: str
+    asset_id: str
+    chain: str | None
+    address: str | None
+    symbol: str | None
+    pool: str
+    dex: str | None
+    decided_at: datetime
+    eligible_at: datetime  # the first observation time that may fill it
+    expires_at: datetime | None
+    budget_usd: float  # reserved cash: fee + notional
+    reference_price: float  # the decision's observed price (never a fill price)
+    reference_price_at: datetime
+
+    def to_json(self) -> dict[str, Any]:
+        d = asdict(self)
+        for k in ("decided_at", "eligible_at", "expires_at", "reference_price_at"):
+            d[k] = _iso(d[k])
+        return d
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> "PendingEntry":
+        d = dict(d)
+        for k in ("decided_at", "eligible_at", "expires_at", "reference_price_at"):
+            d[k] = datetime.fromisoformat(d[k]) if d.get(k) else None
+        return cls(**d)
+
+
+@dataclass
 class Output:
     """Rows produced by one step, written together with the next checkpoint."""
 
@@ -174,8 +241,10 @@ class Output:
     # counters: ENTERED, BLOCKED (reasons: the control), REJECTED (reasons: every failed
     # rule) or HELD (asset already held: not evaluated).
     evaluations: list[tuple[datetime, str, tuple[str, ...]]] = field(default_factory=list)
+    executions: list[dict[str, Any]] = field(default_factory=list)  # REALISTIC_V1 fills
 
     def extend(self, other: "Output") -> None:
+        self.executions += other.executions
         self.rejections += other.rejections
         self.evaluations += other.evaluations
         self.decisions += other.decisions
@@ -192,11 +261,18 @@ class Book:
         cfg: StrategyConfig,
         state: dict[str, Any] | None = None,
         policy: AvailabilityPolicy = LEGACY_POLICY,
+        execution: ExecutionConfig | None = None,
     ):
         self.run_id = run_id
         self.cfg = cfg
         self.policy = policy
+        self.execution = execution
+        if execution is not None and policy != "EVIDENCE_AWARE_V2":
+            raise ValueError("REALISTIC_V1 execution requires the EVIDENCE_AWARE_V2 policy")
         s = state or {}
+        self.pending_entries: dict[str, PendingEntry] = {
+            k: PendingEntry.from_json(v) for k, v in (s.get("pending_entries") or {}).items()
+        }
         self.cash: float = s.get("cash", cfg.risk.initial_capital_usd)
         self.positions: dict[str, Position] = {
             k: Position.from_json(v) for k, v in (s.get("positions") or {}).items()
@@ -215,6 +291,12 @@ class Book:
     # --- state ------------------------------------------------------------------------------
 
     def state(self) -> dict[str, Any]:
+        out = self._state()
+        if self.execution is not None:
+            out["pending_entries"] = {k: e.to_json() for k, e in self.pending_entries.items()}
+        return out
+
+    def _state(self) -> dict[str, Any]:
         return {
             "cash": self.cash,
             "positions": {k: p.to_json() for k, p in self.positions.items()},
@@ -237,8 +319,26 @@ class Book:
         return sum(p.value for p in self.positions.values())
 
     @property
+    def pending_cost(self) -> float:
+        """Cash reserved by pending REALISTIC_V1 entry intents (valued at cost)."""
+        return sum(e.budget_usd for e in self.pending_entries.values())
+
+    @property
     def equity(self) -> float:
+        if self.pending_entries:
+            return self.cash + self.open_value + self.pending_cost
         return self.cash + self.open_value
+
+    @property
+    def model(self) -> str:
+        return self.execution.name if self.execution is not None else self.cfg.execution_model
+
+    def _same_pool(self, asset_id: str, a: str, b: str) -> bool:
+        """Exact pool identity. REALISTIC_V1 compares chain-aware (EVM addresses are
+        case-insensitive, Solana's are not); IDEALIZED_NO_FEES keeps its exact comparison."""
+        if self.execution is None:
+            return a == b
+        return same_address(asset_id.split(":", 1)[0], a, b)
 
     @property
     def evidence_aware(self) -> bool:
@@ -284,6 +384,8 @@ class Book:
         too long. Closed without a price at the rule's own deadline (deterministic).
         LEGACY_V1 only: under EVIDENCE_AWARE_V2 missing evidence never closes a position."""
         out = Output()
+        if self.execution is not None:
+            self._expire_entries(out, now)
         if self.evidence_aware:
             return out
         x = self.cfg.exit
@@ -324,6 +426,8 @@ class Book:
         """A price of an exact pool, observed at `obs.at` and learned at event time `at`
         (the same for a market record; a Scout decision's time for its embedded price):
         any exit it triggers is decided and filled at `at`, at that observed price."""
+        if self.execution is not None:
+            return self._on_price_realistic(obs, at)
         out = Output()
         for p in sorted(self.positions.values(), key=lambda p: p.position_id):
             # Exact-token identity: the same token AND the same pool; never another market.
@@ -340,6 +444,37 @@ class Book:
             self._price_exits(out, p, obs, at)
         return out
 
+    def _on_price_realistic(self, obs: PriceObs, at: datetime) -> Output:
+        """REALISTIC_V1: fill pending intents eligible at this observation (its own
+        observation time at or after intent time + latency), then mark the open positions
+        and turn any rule it triggers into an exit intent."""
+        out = Output()
+        for e in sorted(self.pending_entries.values(), key=lambda e: e.decision_id):
+            if (e.asset_id == obs.asset_id and self._same_pool(e.asset_id, e.pool, obs.pool)
+                    and obs.at >= e.eligible_at):  # fmt: skip
+                self._fill_entry(out, e, obs, at)
+        for p in sorted(self.positions.values(), key=lambda p: p.position_id):
+            if (p.asset_id != obs.asset_id or not self._same_pool(p.asset_id, p.pool, obs.pool)
+                    or obs.at <= p.last_price_at):  # fmt: skip
+                continue
+            p.last_price, p.last_price_at = obs.price, obs.at
+            p.last_liquidity_usd = obs.liquidity_usd
+            p.watch_status = p.watch_status_at = p.not_found_since = None
+            p.not_found_count = 0
+            p.peak_price = max(p.peak_price, obs.price)
+            p.trough_price = min(p.trough_price, obs.price)
+            self.touched.add(p.position_id)
+            if p.pending_exit is not None:
+                assert p.pending_eligible_at is not None
+                if obs.at >= p.pending_eligible_at:
+                    qty = p.remaining_quantity if p.pending_quantity is None else p.pending_quantity
+                    assert p.pending_decision_id is not None
+                    self._fill(out, p, at, obs, qty, p.pending_exit,  # type: ignore[arg-type]
+                               p.pending_decision_id, p.pending_level)  # fmt: skip
+                continue  # one intent at a time: rules resume once it has filled
+            self._price_exits(out, p, obs, at)
+        return out
+
     def on_status(self, st: WatchStatus) -> Output:
         """EVIDENCE_AWARE_V2: a watch lookup of an exact pool that found no price. Only an
         authoritative not-found, confirmed (NOT_FOUND_CONFIRMATIONS over at least
@@ -347,7 +482,8 @@ class Book:
         out = Output()
         delay = timedelta(minutes=self.cfg.exit.max_exit_delay_minutes)
         for p in sorted(self.positions.values(), key=lambda p: p.position_id):
-            if p.asset_id != st.asset_id or p.pool != st.pool or st.at <= p.last_price_at:
+            if (p.asset_id != st.asset_id or not self._same_pool(p.asset_id, p.pool, st.pool)
+                    or st.at <= p.last_price_at):  # fmt: skip
                 continue
             p.watch_status, p.watch_status_at = st.status, st.at
             if st.status != "NOT_FOUND" or not st.authoritative:
@@ -375,7 +511,7 @@ class Book:
 
     def _price_exits(self, out: Output, p: Position, obs: PriceObs, at: datetime) -> None:
         x = self.cfg.exit
-        price, entry = obs.price, p.entry_price
+        price, entry = obs.price, p.basis
         reason: ExitReason | None = None
         level: float | None = None
         if p.pending_exit is not None:
@@ -397,7 +533,7 @@ class Book:
                                    links=[_price_link(obs)])  # fmt: skip
                 out.decisions.append(d)
                 decision_id = d["decision_id"]
-            self._fill(out, p, at, obs, p.remaining_quantity, reason, decision_id, level)  # fmt: skip
+            self._exit(out, p, at, obs, p.remaining_quantity, reason, decision_id, level, True)
             return
         # Take-profit ladder: fractions of the original quantity, the last level sells the rest.
         levels = x.take_profit
@@ -415,18 +551,58 @@ class Book:
                                position=p, evidence={"price": _price_json(obs)}, reference=obs,
                                links=[_price_link(obs)])  # fmt: skip
             out.decisions.append(d)
-            self._fill(out, p, at, obs, qty, "TAKE_PROFIT", d["decision_id"],
-                       entry * (1 + lv.gain_pct / 100))  # fmt: skip
-            if p.position_id not in self.positions:
+            self._exit(out, p, at, obs, qty, "TAKE_PROFIT", d["decision_id"],
+                       entry * (1 + lv.gain_pct / 100), last)  # fmt: skip
+            if p.position_id not in self.positions or p.pending_exit is not None:
                 return
+        if p.pending_exit is not None:
+            return
         if at >= p.entry_at + timedelta(minutes=x.max_hold_minutes):
             d = self._decision("EXIT", at, p.asset_id,
                                f"MAX_HOLD_TIME ({x.max_hold_minutes:g} min): observed {price:.10g}",
                                position=p, evidence={"price": _price_json(obs)}, reference=obs,
                                links=[_price_link(obs)])  # fmt: skip
             out.decisions.append(d)
-            self._fill(out, p, at, obs, p.remaining_quantity, "MAX_HOLD_TIME",
-                       d["decision_id"], None)  # fmt: skip
+            self._exit(out, p, at, obs, p.remaining_quantity, "MAX_HOLD_TIME",
+                       d["decision_id"], None, True)  # fmt: skip
+
+    def _exit(
+        self,
+        out: Output,
+        p: Position,
+        at: datetime,
+        obs: PriceObs,
+        qty: float,
+        reason: ExitReason,
+        decision_id: str,
+        level: float | None,
+        everything: bool,
+    ) -> None:
+        """A triggered exit: filled now at the triggering observation (IDEALIZED_NO_FEES),
+        or an intent for the first eligible later observation (REALISTIC_V1)."""
+        if self.execution is None:
+            self._fill(out, p, at, obs, qty, reason, decision_id, level)
+        else:
+            self._intend_exit(p, at, obs.price, None if everything else qty, reason,
+                              decision_id, level)  # fmt: skip
+
+    def _intend_exit(
+        self,
+        p: Position,
+        at: datetime,
+        reference: float,
+        qty: float | None,
+        reason: ExitReason,
+        decision_id: str,
+        level: float | None,
+    ) -> None:
+        assert self.execution is not None
+        p.pending_exit, p.pending_since, p.pending_decision_id = reason, at, decision_id
+        p.pending_quantity, p.pending_level = qty, level
+        p.pending_eligible_at = at + timedelta(seconds=self.execution.latency_seconds)
+        p.pending_reference_price = reference
+        self._count(f"intent:{reason}")
+        self.touched.add(p.position_id)
 
     def on_scout(self, s: ScoutView, analyze: AnalyzeLookup) -> Output:
         out = Output()
@@ -443,14 +619,22 @@ class Book:
         for p in sorted(held, key=lambda p: p.position_id):
             self._signal_exit(out, p, s)
         held = [p for p in self.positions.values() if p.asset_id == s.asset_id]
+        ordered = sorted((e for e in self.pending_entries.values() if e.asset_id == s.asset_id),
+                         key=lambda e: e.decision_id)  # fmt: skip
         risk = self.cfg.risk
-        if held and not risk.allow_scaling:
+        if (held or ordered) and not risk.allow_scaling:
             out.evaluations.append((s.decision_at, "HELD", ()))
             for p in held:
                 self._count("decision:HOLD")
                 out.decisions.append(self._decision(
                     "HOLD", s.decision_at, s.asset_id, "position already open (one per asset)",
                     position=p, scout=s,
+                ))  # fmt: skip
+            for _ in ordered:
+                self._count("decision:HOLD")
+                out.decisions.append(self._decision(
+                    "HOLD", s.decision_at, s.asset_id,
+                    "entry order pending (one per asset)", scout=s,
                 ))  # fmt: skip
             return out
         reasons, detail = self._evaluate(s, analyze)
@@ -462,7 +646,7 @@ class Book:
             out.evaluations.append((s.decision_at, "REJECTED", tuple(reasons)))
             return out
         assert price is not None  # _evaluate requires the exact-pool price
-        blocked = self._risk_block(s, len(held))
+        blocked = self._risk_block(s, len(held) + len(ordered))
         size = 0.0
         if blocked is None:
             size, blocked = self._size(s.asset_id)
@@ -476,7 +660,10 @@ class Book:
                 scout=s, analyze=self._analyze_for(s, analyze),
             ))  # fmt: skip
             return out
-        self._enter(out, s, price, size, analyze)
+        if self.execution is None:
+            self._enter(out, s, price, size, analyze)
+        else:
+            self._intend_entry(out, s, price, size, analyze)
         out.evaluations.append((s.decision_at, "ENTERED", ()))
         return out
 
@@ -656,7 +843,7 @@ class Book:
             return "MIN_ENTRY_SPACING"
         if sum(1 for t in times if t.date() == at.date()) >= risk.max_entries_per_asset_per_day:
             return "MAX_ENTRIES_PER_ASSET_PER_DAY"
-        if len(self.positions) >= risk.max_open_positions:
+        if len(self.positions) + len(self.pending_entries) >= risk.max_open_positions:
             return "MAX_OPEN_POSITIONS"
         return None
 
@@ -671,6 +858,8 @@ class Book:
             "MAX_ASSET_EXPOSURE": equity * risk.max_exposure_per_asset_pct / 100 - asset_value,
             "MAX_GROSS_EXPOSURE": equity * risk.max_gross_exposure_pct / 100 - self.open_value,
         }
+        if self.pending_entries:  # reserved cash is committed exposure
+            caps["MAX_GROSS_EXPOSURE"] -= self.pending_cost
         binding = min(caps, key=lambda k: caps[k])
         size = caps[binding]
         if size < risk.min_position_usd:
@@ -709,6 +898,160 @@ class Book:
         self._count("decision:ENTER")
         out.opened.append(p)
 
+    def _intend_entry(
+        self, out: Output, s: ScoutView, price: PriceObs, size: float, analyze: AnalyzeLookup
+    ) -> None:
+        """REALISTIC_V1: the ENTER decision (at the Scout decision time, as always) and an
+        entry intent reserving `size`; the position exists once the intent fills."""
+        assert self.execution is not None
+        a = self._analyze_for(s, analyze)
+        latency = timedelta(seconds=self.execution.latency_seconds)
+        wait = self.execution.entry_max_wait_minutes
+        d = self._decision(
+            "ENTER", s.decision_at, s.asset_id,
+            f"{self.cfg.name}: Scout {s.stage} score {s.score:.1f}, liquidity "
+            f"${(s.liquidity_usd or 0):,.0f}; entry order for the first exact-pool price "
+            f"observed {self.execution.latency_seconds:g}s after the decision",
+            scout=s, analyze=a, reference=price,
+        )  # fmt: skip
+        out.decisions.append(d)
+        e = PendingEntry(
+            decision_id=d["decision_id"], asset_id=s.asset_id, chain=s.chain, address=s.address,
+            symbol=s.symbol, pool=price.pool, dex=s.dex, decided_at=s.decision_at,
+            eligible_at=s.decision_at + latency,
+            expires_at=s.decision_at + latency + timedelta(minutes=wait) if wait else None,
+            budget_usd=size, reference_price=price.price, reference_price_at=price.at,
+        )  # fmt: skip
+        self.cash -= size
+        self.pending_entries[e.decision_id] = e
+        self.entries.setdefault(s.asset_id, []).append(s.decision_at.isoformat())
+        keep = s.decision_at - timedelta(days=2)
+        self.entries[s.asset_id] = [
+            t for t in self.entries[s.asset_id] if datetime.fromisoformat(t) >= keep
+        ]
+        self._count("decision:ENTER")
+
+    def _fill_entry(self, out: Output, e: PendingEntry, obs: PriceObs, at: datetime) -> None:
+        x = self._execute("BUY", obs, e.budget_usd)
+        qty = x["quantity"]
+        p = Position(
+            position_id=_id(self.run_id, self.cfg.key, "position", e.decision_id),
+            asset_id=e.asset_id, chain=e.chain, address=e.address, symbol=e.symbol,
+            pool=e.pool, dex=e.dex, entry_decision_id=e.decision_id, entry_at=at,
+            entry_price=e.budget_usd / qty, entry_price_at=obs.at, quantity=qty,
+            cost_usd=e.budget_usd, remaining_quantity=qty, last_price=obs.price,
+            last_price_at=obs.at, peak_price=obs.price, trough_price=obs.price,
+            last_liquidity_usd=obs.liquidity_usd, trigger_price=obs.price,
+        )  # fmt: skip
+        del self.pending_entries[e.decision_id]
+        self.positions[p.position_id] = p
+        self.touched.add(p.position_id)
+        out.opened.append(p)
+        out.executions.append(self._execution_row(
+            p, "BUY", "ENTRY", 1, e.decision_id, e.decided_at, e.eligible_at, at, obs,
+            e.reference_price, x,
+            gross_pnl=None, friction=x["friction_usd"], net_pnl=None,
+        ))  # fmt: skip
+        self._count("fill:ENTER")
+
+    def _expire_entries(self, out: Output, now: datetime) -> None:
+        """Entry intents with no eligible observation by their deadline (only with a
+        finite `entry_max_wait_minutes`): cancelled at the deadline as an explicit NO_ACTION
+        decision, never filled, not a trade; the reserved cash returns (no P/L)."""
+        for e in sorted(self.pending_entries.values(), key=lambda e: e.decision_id):
+            if e.expires_at is None or now <= e.expires_at:
+                continue
+            assert self.execution is not None
+            out.decisions.append(self._decision(
+                "NO_ACTION", e.expires_at, e.asset_id,
+                f"entry order cancelled: no exact-pool price observed within "
+                f"{self.execution.entry_max_wait_minutes:g} min of its eligible time",
+                evidence={"reason_code": "ENTRY_NOT_FILLED", "entry_decision_id": e.decision_id,
+                          "released_usd": e.budget_usd, "not_a_trade": True},
+            ))  # fmt: skip
+            self.cash += e.budget_usd
+            del self.pending_entries[e.decision_id]
+            self._count("cancelled:ENTER")
+
+    def _execute(self, side: str, obs: PriceObs, amount: float) -> dict[str, Any]:
+        """One REALISTIC_V1 execution at observation `obs`. BUY: `amount` is the cash spent
+        (fee included); SELL: `amount` is the quantity sold. Adverse slippage and impact
+        are applied to the observed price; fees on the traded notional."""
+        assert self.execution is not None
+        ex = self.execution
+        P = obs.price
+        liquidity = obs.liquidity_usd
+        impact_status = "DISABLED"
+        impact = 0.0  # as a fraction of the observed price
+        if side == "BUY":
+            fee = amount * ex.entry_fee_bps / 1e4
+            notional = amount - fee
+            trade_value = notional
+        else:
+            fee = 0.0
+            notional = 0.0
+            trade_value = amount * P
+        if ex.price_impact:
+            if liquidity is None or liquidity <= 0:
+                impact_status = "LIQUIDITY_UNAVAILABLE"
+            else:
+                y = liquidity / 2  # the quote reserve of a constant-product pool
+                raw = trade_value / y if side == "BUY" else trade_value / (y + trade_value)
+                impact = min(raw, ex.max_price_impact_bps / 1e4)
+                impact_status = "APPLIED" if raw <= ex.max_price_impact_bps / 1e4 else "CAPPED"
+        slip = ex.slippage_bps / 1e4
+        if side == "BUY":
+            price = P * (1 + slip + impact)
+            qty = notional / price
+            observed_value = qty * P
+            slip_cost, impact_cost = observed_value * slip, observed_value * impact
+            cash = -amount
+        else:
+            qty = amount
+            price = P * (1 - slip - impact)
+            gross = qty * price
+            fee = gross * ex.exit_fee_bps / 1e4
+            observed_value = qty * P
+            slip_cost, impact_cost = observed_value * slip, observed_value * impact
+            notional = gross
+            cash = gross - fee
+        return {
+            "observed_price": P, "execution_price": price, "quantity": qty,
+            "notional_usd": notional, "observed_value_usd": observed_value,
+            "fee_bps": ex.entry_fee_bps if side == "BUY" else ex.exit_fee_bps, "fee_usd": fee,
+            "slippage_bps": ex.slippage_bps, "slippage_cost_usd": slip_cost,
+            "impact_bps": impact * 1e4, "impact_cost_usd": impact_cost,
+            "impact_status": impact_status, "liquidity_usd": liquidity,
+            "friction_usd": fee + slip_cost + impact_cost, "cash_flow_usd": cash,
+        }  # fmt: skip
+
+    def _execution_row(
+        self, p: Position, side: str, reason: str, fill_no: int, decision_id: str,
+        intent_at: datetime, eligible_at: datetime, at: datetime, obs: PriceObs,
+        reference: float, x: dict[str, Any], *, gross_pnl: float | None, friction: float,
+        net_pnl: float | None,
+    ) -> dict[str, Any]:  # fmt: skip
+        assert self.execution is not None
+        qty = x["quantity"]
+        # Price drift between the intent's reference observation and the fill observation
+        # (adverse positive): measurable, part of gross P/L, not of trading friction.
+        drift = qty * (obs.price - reference) if side == "BUY" else qty * (reference - obs.price)
+        return {
+            "execution_id": _id(self.run_id, self.cfg.key, p.position_id, side, fill_no),
+            "run_id": self.run_id, "strategy_id": self.cfg.strategy_id,
+            "strategy_version": self.cfg.version, "position_id": p.position_id,
+            "side": side, "reason": reason, "fill_no": fill_no, "decision_id": decision_id,
+            "asset_id": p.asset_id, "pool": p.pool, "intent_at": intent_at,
+            "eligible_at": eligible_at, "filled_at": at, "price_observed_at": obs.at,
+            "price_record": obs.record_id, "price_source": obs.source,
+            "reference_price": reference, **x,
+            "latency_seconds": self.execution.latency_seconds,
+            "delay_seconds": (obs.at - intent_at).total_seconds(),
+            "latency_cost_usd": drift,
+            "gross_pnl_usd": gross_pnl, "trade_friction_usd": friction, "net_pnl_usd": net_pnl,
+            "execution_model": self.execution.name, "config_hash": self.execution.config_hash,
+        }  # fmt: skip
+
     # --- exits ------------------------------------------------------------------------------
 
     def _signal_exit(self, out: Output, p: Position, s: ScoutView) -> None:
@@ -728,6 +1071,11 @@ class Book:
                            position=p, scout=s)  # fmt: skip
         out.decisions.append(d)
         price = s.price
+        if self.execution is not None:
+            ref = price.price if price is not None and self._same_pool(
+                p.asset_id, price.pool, p.pool) else p.last_price  # fmt: skip
+            self._intend_exit(p, s.decision_at, ref, None, "SIGNAL_EXIT", d["decision_id"], None)
+            return
         if price is not None and price.pool == p.pool and price.at >= p.last_price_at:
             self._fill(out, p, s.decision_at, price, p.remaining_quantity, "SIGNAL_EXIT",
                        d["decision_id"], None)  # fmt: skip
@@ -757,6 +1105,10 @@ class Book:
             qty, cost = p.remaining_quantity, p.remaining_cost
         exit_price = obs.price if obs is not None else None
         proceeds = qty * exit_price if exit_price is not None else None
+        x: dict[str, Any] | None = None
+        if self.execution is not None and obs is not None:
+            x = self._execute("SELL", obs, qty)
+            exit_price, proceeds = x["execution_price"], x["cash_flow_usd"]
         pnl = proceeds - cost if proceeds is not None else None
         if proceeds is not None and pnl is not None:
             self.cash += proceeds
@@ -764,8 +1116,23 @@ class Book:
         else:
             self.unresolved_cost += cost
         p.remaining_quantity = 0.0 if final else p.remaining_quantity - qty
-        mfe = max(0.0, p.peak_price / p.entry_price - 1) * 100
-        mae = min(0.0, p.trough_price / p.entry_price - 1) * 100
+        mfe = max(0.0, p.peak_price / p.basis - 1) * 100
+        mae = min(0.0, p.trough_price / p.basis - 1) * 100
+        if x is not None and obs is not None and pnl is not None:
+            assert p.trigger_price is not None and p.pending_since is not None
+            assert p.pending_eligible_at is not None and p.pending_reference_price is not None
+            # Gross: the observed-price P/L of this quantity; friction: this fill's exit
+            # costs plus its share of the entry costs; gross - friction = net, exactly.
+            entry_friction = qty * (p.entry_price - p.trigger_price)
+            gross = qty * (obs.price - p.trigger_price)
+            out.executions.append(self._execution_row(
+                p, "SELL", reason, p.fills, decision_id, p.pending_since,
+                p.pending_eligible_at, at, obs, p.pending_reference_price, x,
+                gross_pnl=gross, friction=x["friction_usd"] + entry_friction, net_pnl=pnl,
+            ))  # fmt: skip
+            p.pending_exit = p.pending_since = p.pending_decision_id = None
+            p.pending_quantity = p.pending_level = p.pending_eligible_at = None
+            p.pending_reference_price = None
         out.trades.append({
             "trade_id": _id(self.run_id, self.cfg.key, p.position_id, "fill", p.fills),
             "run_id": self.run_id, "strategy_id": self.cfg.strategy_id,
@@ -778,12 +1145,14 @@ class Book:
             "exit_price_record": obs.record_id if obs is not None else None,
             "quantity": qty, "fraction": qty / p.quantity if p.quantity else None,
             "cost_usd": cost, "proceeds_usd": proceeds, "pnl_usd": pnl,
-            "return_pct": (exit_price / p.entry_price - 1) * 100 if exit_price is not None else None,
+            "return_pct": (proceeds / cost - 1) * 100 if x is not None and proceeds is not None
+            else (exit_price / p.entry_price - 1) * 100 if exit_price is not None else None,
             "mfe_pct": mfe, "mae_pct": mae,
             "holding_minutes": (at - p.entry_at).total_seconds() / 60,
             "exit_reason": reason, "trigger_level": level,
-            "price_basis": PRICE_BASIS if obs is not None else "NO_PRICE",
-            "execution_model": self.cfg.execution_model,
+            "price_basis": (REALISTIC_BASIS if x is not None else PRICE_BASIS)
+            if obs is not None else "NO_PRICE",
+            "execution_model": self.model,
         })  # fmt: skip
         self._count(f"exit:{reason}")
         self.touched.add(p.position_id)

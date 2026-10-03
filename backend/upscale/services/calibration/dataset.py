@@ -425,7 +425,10 @@ def load_shadow(
         cur = conn.execute("SELECT * FROM shadow_trades ORDER BY position_id, fill_no")
         names = [d[0] for d in cur.description]
         trades = [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
-        trades = [t for t in trades if t["run_id"] in clean]
+        # IDEALIZED_NO_FEES only: a REALISTIC_V1 run re-executes the same decisions with
+        # frictions, and is never a second, independent SHADOW observation of them.
+        trades = [t for t in trades if t["run_id"] in clean
+                  and t["execution_model"] == "IDEALIZED_NO_FEES"]  # fmt: skip
         owner = {t["position_id"]: t for t in trades}
         entry_evidence = {
             d: json.loads(e)

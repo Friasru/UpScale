@@ -32,6 +32,7 @@ from upscale.config import (
     SHADOW,
     SHADOW_INTERVAL_MINUTES,
     SHADOW_RUN,
+    SHADOW_RUNS,
     SHADOW_SINCE,
     SHADOW_WATCH,
     SHADOW_WATCH_INTERVAL_MINUTES,
@@ -259,7 +260,7 @@ def _shadow_defer_reason() -> str | None:
 
 
 background_shadow = BackgroundShadow(
-    load_shadow_settings(SHADOW, SHADOW_INTERVAL_MINUTES, SHADOW_RUN, SHADOW_SINCE),
+    load_shadow_settings(SHADOW, SHADOW_INTERVAL_MINUTES, SHADOW_RUN, SHADOW_SINCE, SHADOW_RUNS),
     _shadow_defer_reason,
 )
 

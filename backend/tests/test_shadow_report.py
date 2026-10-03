@@ -301,6 +301,36 @@ def test_availability_state_aggregation(h: Harness) -> None:
     assert hw["MARKET_AVAILABLE"] == pytest.approx(1.0)
 
 
+def test_exit_after_evidence_gap_sets_integrity_flag(h: Harness) -> None:
+    """A held position goes through PROVIDER_UNAVAILABLE / EVIDENCE_GAP, the price returns
+    and a take profit fills: a real gap exit (no MARKET_UNAVAILABLE exit needed)."""
+    h.scan(T0, h.cand(A, price=1.0))
+    watch(h, m(200), "RATE_LIMITED", price=None)
+    watch(h, m(400), "PRICED", price=1.3)
+    h.price(m(410), 1.3, mint=B)
+    h.now = m(411)
+    h.run(strat(exit={"max_hold_minutes": 2000.0}), policy=V2)
+    d = report(h)
+    r = one(d)
+    assert (
+        r["trade_behavior"]["take_profit"] == 1 and r["trade_behavior"]["market_unavailable"] == 0
+    )
+    a = r["availability"]["evidence_gap_exits"]
+    assert a["exits_after_evidence_gap"] == 1 and a["market_unavailable_exits"] == 0
+    assert d["data_integrity"]["evidence_gaps_affected_exits"] is True
+    assert "evidence gaps affected exits: yes" in text(d)
+
+
+def test_evidence_gap_flag_false_when_every_strategy_count_is_zero(h: Harness) -> None:
+    basic(h, strat(), strat("u"))
+    d = report(h)
+    by = d["data_integrity"]["evidence_gap_exits_by_strategy"]
+    assert len(by) == 2
+    assert all(a["exits_after_evidence_gap"] == 0 and a["market_unavailable_exits"] == 0
+               for a in by.values())  # fmt: skip
+    assert d["data_integrity"]["evidence_gaps_affected_exits"] is False
+
+
 def test_fresh_pricing_with_continuous_prices(h: Harness) -> None:
     basic(h)
     d = report(h)

@@ -21,12 +21,18 @@ import pytest
 from upscale.services.calibration.config import CalibrationConfig
 from upscale.services.calibration.dataset import load_shadow
 from upscale.services.scout.growth.models import GrowthCandidate, GrowthScoutResult
-from upscale.services.shadow.book import Book, PendingEntry
+from upscale.services.shadow.book import Book, PendingEntry, latency_drift_usd
 from upscale.services.shadow.cli import main as cli_main
 from upscale.services.shadow.config import ExecutionConfig, run_execution
 from upscale.services.shadow.engine import ShadowError
 from upscale.services.shadow.evidence import PriceObs
-from upscale.services.shadow.report import compare_runs, compare_text, shadow_report, text
+from upscale.services.shadow.report import (
+    compare_runs,
+    compare_text,
+    delay_stats,
+    shadow_report,
+    text,
+)
 
 from .test_shadow import T0, A, B, Harness, strat
 from .test_shadow_availability import watch
@@ -116,7 +122,8 @@ def test_entry_waits_for_latency_and_never_fills_earlier(h: Harness) -> None:
     assert buy["price_observed_at"] == m(5).timestamp()  # not the 1.01 at +30 s
     assert buy["observed_price"] == 1.02 and buy["reference_price"] == 1.0
     assert buy["delay_seconds"] == 300 and buy["latency_seconds"] == 60
-    assert buy["latency_cost_usd"] == pytest.approx(buy["quantity"] * 0.02)
+    # The same spend at the 1.0 reference: quantity * 1.02 tokens, worth quantity * 1.02^2.
+    assert buy["latency_cost_usd"] == pytest.approx(buy["quantity"] * 1.02 * 0.02)
     (enter,) = h.store.decisions(run_id="r", action="ENTER")
     assert enter["decision_at"] == T0.timestamp()  # the decision time never moves
     (p,) = h.store.positions(run_id="r")
@@ -517,6 +524,150 @@ def test_report_execution_fields(h: Harness) -> None:
     i = shadow_report(h.store, h.reader, "t")["strategies"][0]["execution"]
     assert i["execution_model"] == "IDEALIZED_NO_FEES" and i["fees_usd"] == 0
     assert i["gross_realized_pnl_usd"] == i["net_realized_pnl_usd"] == pytest.approx(250.0)
+
+
+# --- latency drift (USD) ---------------------------------------------------------------------
+
+
+def test_latency_drift_tiny_price_huge_quantity() -> None:
+    """The continuous-v2-realistic random_eligible fill that reported -$52,762: a $492.62
+    BUY of a token whose exact pool fell 0.0003814 -> 0.000003528 between intent and fill.
+    The fill quantity (139.6M tokens) was sized at the fill price; multiplying it by the
+    price move scaled the drift by reference / observed (x108)."""
+    qty, ref, obs = 139_630_463.8675, 0.0003814, 3.528e-06
+    drift = latency_drift_usd("BUY", ref, obs, qty)
+    assert qty * (obs - ref) == pytest.approx(-52_762.44, abs=0.01)  # the old formula
+    assert drift == pytest.approx(-488.06, abs=0.01)
+    assert drift > -qty * obs  # never more than the spend, however far the price fell
+    # A collapse toward zero tends to minus the spend, never beyond it.
+    assert latency_drift_usd("BUY", 1.0, 1e-12, 500.0 / 1e-12) == pytest.approx(-500.0)
+
+
+@pytest.mark.parametrize(
+    ("side", "ref", "obs", "adverse"),
+    [("BUY", 1.0, 1.1, True), ("BUY", 1.0, 0.9, False),
+     ("SELL", 1.0, 0.9, True), ("SELL", 1.0, 1.1, False)],
+)  # fmt: skip
+def test_latency_drift_sign(side: str, ref: float, obs: float, adverse: bool) -> None:
+    drift = latency_drift_usd(side, ref, obs, 100.0)
+    assert (drift > 0) is adverse  # adverse positive: BUY paid more, SELL received less
+    assert latency_drift_usd(side, ref, ref, 100.0) == 0
+
+
+def test_latency_drift_quantity_applied_once() -> None:
+    # Linear in quantity (applied once), and in USD: the observed value times the move.
+    for side in ("BUY", "SELL"):
+        one, two = (latency_drift_usd(side, 2.0, 2.2, q) for q in (10.0, 20.0))
+        assert two == pytest.approx(2 * one)
+    assert latency_drift_usd("BUY", 2.0, 2.2, 10.0) == pytest.approx(22.0 * 0.1)
+    assert latency_drift_usd("SELL", 2.0, 2.2, 10.0) == pytest.approx(-2.0)
+    # A SELL's drift is bounded by its reference notional.
+    assert latency_drift_usd("SELL", 2.0, 1e-12, 10.0) == pytest.approx(20.0)
+
+
+def test_latency_drift_end_to_end_exact_pool_collapse(h: Harness) -> None:
+    """A tiny-price token collapses before the entry fill. Another pool of the same token
+    priced on a different scale is never used, as fill or as reference. The stored row and
+    the report agree with the formula on the raw fields, within the spend."""
+    h.scan(T0, h.cand(A, price=0.0003814))
+    h.price(m(10), 0.5, pool="other-pool")  # same token, another pool: never this fill
+    h.price(m(30), 3.528e-06)
+    h.now = m(31)
+    realistic(h)
+    (buy,) = execs(h)
+    assert buy["pool"] == f"pool-{A}" and buy["price_observed_at"] == m(30).timestamp()
+    assert buy["reference_price"] == 0.0003814 and buy["observed_price"] == 3.528e-06
+    expected = latency_drift_usd("BUY", 0.0003814, 3.528e-06, buy["quantity"])
+    assert buy["latency_cost_usd"] == pytest.approx(expected)
+    assert -buy["observed_value_usd"] < buy["latency_cost_usd"] < 0
+    e = shadow_report(h.store, h.reader, "r")["strategies"][0]["execution"]
+    assert e["latency_cost_usd"] == pytest.approx(expected)
+    assert e["stored_latency_cost_usd"] == pytest.approx(expected)
+
+
+def test_report_derives_latency_from_raw_fields_not_the_stored_column(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows recorded before the fix keep their stored latency_cost_usd (immutable history);
+    the report derives the metric from the raw reference / observed price and quantity."""
+    from upscale.services.shadow import book
+
+    def old(side: str, reference: float, observed: float, quantity: float) -> float:
+        return quantity * ((observed - reference) if side == "BUY" else (reference - observed))
+
+    roundtrip(h)
+    h.now = m(41)
+    monkeypatch.setattr(book, "latency_drift_usd", old)  # the book as it was before the fix
+    realistic(h)
+    monkeypatch.undo()
+    buy, sell = execs(h)
+    assert buy["latency_cost_usd"] == pytest.approx(buy["quantity"] * 0.02)
+    e = shadow_report(h.store, h.reader, "r")["strategies"][0]["execution"]
+    derived = sum(latency_drift_usd(x["side"], x["reference_price"], x["observed_price"],
+                                    x["quantity"]) for x in (buy, sell))  # fmt: skip
+    assert e["latency_cost_usd"] == pytest.approx(derived)
+    assert e["stored_latency_cost_usd"] == pytest.approx(
+        buy["quantity"] * 0.02 + sell["latency_cost_usd"])  # fmt: skip
+
+
+# --- execution delay ----------------------------------------------------------------------------
+
+
+def test_delay_percentiles_and_buckets() -> None:
+    d = delay_stats([60, 300, 600, 900, 1_200, 1_800, 2_400, 3_000, 3_600, 7_200])
+    assert d["median_execution_delay_seconds"] == pytest.approx(1_500)
+    assert d["p90_execution_delay_seconds"] == pytest.approx(3_600 + 0.1 * 3_600)
+    assert d["max_execution_delay_seconds"] == 7_200
+    assert d["filled_within_pct"] == {"5m": 20.0, "15m": 40.0, "30m": 60.0, "60m": 90.0}
+    assert delay_stats([42.0])["p90_execution_delay_seconds"] == 42.0
+    empty = delay_stats([])
+    assert (
+        empty["p90_execution_delay_seconds"] is None
+        and empty["max_execution_delay_seconds"] is None
+    )
+    assert empty["filled_within_pct"] == {"5m": None, "15m": None, "30m": None, "60m": None}
+
+
+def test_report_delay_fields(h: Harness) -> None:
+    roundtrip(h)  # entry fill 300 s after its intent, the exit 600 s after its
+    h.now = m(41)
+    realistic(h)
+    d = shadow_report(h.store, h.reader, "r")
+    e = d["strategies"][0]["execution"]
+    assert e["configured_min_latency_seconds"] == 60
+    assert e["median_execution_delay_seconds"] == pytest.approx(450)
+    assert e["p90_execution_delay_seconds"] == pytest.approx(570)
+    assert e["max_execution_delay_seconds"] == pytest.approx(600)
+    assert e["filled_within_pct"] == {"5m": 50.0, "15m": 100.0, "30m": 100.0, "60m": 100.0}
+    out = text(d)
+    assert "p90 570 s" in out and "filled within 5m 50%  15m 100%" in out
+
+
+# --- evidence gaps ------------------------------------------------------------------------------
+
+
+def test_delayed_exit_fill_alone_is_not_an_evidence_gap(h: Harness) -> None:
+    roundtrip(h)  # the take profit decided at 30 min fills at 40 min: delayed, prices fresh
+    h.now = m(41)
+    realistic(h)
+    d = shadow_report(h.store, h.reader, "r")
+    a = d["strategies"][0]["availability"]["evidence_gap_exits"]
+    assert a["delayed_exit_fills"] == 1
+    assert a["exits_after_evidence_gap"] == 0 and a["market_unavailable_exits"] == 0
+    g = d["data_integrity"]
+    assert g["evidence_gaps_affected_exits"] is False
+    assert "delayed exit fills alone never count" in g["evidence_gaps_affected_exits_rule"]
+    assert "evidence gaps affected exits: no" in text(d)
+
+
+def test_report_is_read_only_and_execution_rows_unchanged(h: Harness) -> None:
+    roundtrip(h)
+    h.now = m(41)
+    realistic(h)
+    before = everything(h)
+    shadow_report(h.store, h.reader, "r")
+    text(shadow_report(h.store, h.reader, "r"))
+    assert everything(h) == before
 
 
 def test_compare_idealized_and_realistic(h: Harness) -> None:

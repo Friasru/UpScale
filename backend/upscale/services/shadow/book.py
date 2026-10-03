@@ -106,6 +106,23 @@ def _iso(t: datetime | None) -> str | None:
     return t.isoformat() if t is not None else None
 
 
+def latency_drift_usd(side: str, reference: float, observed: float, quantity: float) -> float:
+    """USD effect of the exact-pool price moving from the intent's reference observation to
+    the fill observation (adverse positive), from a fill's raw fields only.
+
+    SELL sells a fixed token quantity: ``quantity * (reference - observed)``, the proceeds
+    lost to the move. BUY spends a fixed USD amount, so its filled quantity already depends
+    on the fill price: the same spend at the reference price would have bought
+    ``quantity * observed / reference`` tokens, now worth ``quantity * observed**2 /
+    reference``, against the ``quantity * observed`` actually held. The drift is the
+    difference, ``observed value * (observed / reference - 1)``: never below minus the
+    observed value, however far the price fell (the fill quantity alone would scale it
+    by ``reference / observed``)."""
+    if side == "BUY":
+        return quantity * observed * (observed / reference - 1) if reference > 0 else 0.0
+    return quantity * (reference - observed)
+
+
 @dataclass
 class Position:
     position_id: str
@@ -1032,10 +1049,9 @@ class Book:
         net_pnl: float | None,
     ) -> dict[str, Any]:  # fmt: skip
         assert self.execution is not None
-        qty = x["quantity"]
         # Price drift between the intent's reference observation and the fill observation
-        # (adverse positive): measurable, part of gross P/L, not of trading friction.
-        drift = qty * (obs.price - reference) if side == "BUY" else qty * (reference - obs.price)
+        # (adverse positive): an analytic of the fill timing, not trading friction.
+        drift = latency_drift_usd(side, reference, obs.price, x["quantity"])
         return {
             "execution_id": _id(self.run_id, self.cfg.key, p.position_id, side, fill_no),
             "run_id": self.run_id, "strategy_id": self.cfg.strategy_id,

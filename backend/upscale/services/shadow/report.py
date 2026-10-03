@@ -37,6 +37,7 @@ from upscale.services.shadow.book import (
     MIN_TIMING_VERSION,
     PRICE_STALE_AFTER_MINUTES,
     Position,
+    latency_drift_usd,
 )
 from upscale.services.shadow.config import (
     CLEAN_DATA_CUTOFF,
@@ -103,6 +104,34 @@ def _iso(t: datetime | None) -> str | None:
 
 def _median(values: Sequence[float]) -> float | None:
     return statistics.median(values) if values else None
+
+
+def _percentile(values: Sequence[float], q: float) -> float | None:
+    """The q-th percentile (0-100), linear between the closest ranks."""
+    if not values:
+        return None
+    v = sorted(values)
+    k = (len(v) - 1) * q / 100
+    lo = math.floor(k)
+    hi = min(lo + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (k - lo)
+
+
+DELAY_BUCKETS_MINUTES = (5, 15, 30, 60)
+
+
+def delay_stats(delays: Sequence[float]) -> dict[str, Any]:
+    """Observed execution delays (seconds): median, p90, max and the share filled within
+    each bucket (intent to fill observation, inclusive)."""
+    return {
+        "median_execution_delay_seconds": _median(delays),
+        "p90_execution_delay_seconds": _percentile(delays, 90),
+        "max_execution_delay_seconds": max(delays) if delays else None,
+        "filled_within_pct": {
+            f"{b}m": sum(d <= b * 60 for d in delays) / len(delays) * 100 if delays else None
+            for b in DELAY_BUCKETS_MINUTES
+        },
+    }
 
 
 def _mean(values: Sequence[float]) -> float | None:
@@ -651,25 +680,35 @@ def execution_section(
         "slippage_cost_usd": sum(x["slippage_cost_usd"] for x in rows),
         "price_impact_cost_usd": sum(x["impact_cost_usd"] for x in rows),
         "price_impact_status": dict(sorted(Counter(x["impact_status"] for x in rows).items())),
-        "latency_cost_usd": sum(x["latency_cost_usd"] for x in rows),
+        "latency_cost_usd": sum(
+            latency_drift_usd(x["side"], x["reference_price"], x["observed_price"], x["quantity"])
+            for x in rows
+        ),
+        "stored_latency_cost_usd": sum(x["latency_cost_usd"] for x in rows),
+        "latency_cost_note": "derived from each fill's stored reference price, observed "
+        "price and quantity (latency_drift_usd); stored_latency_cost_usd sums the rows' own "
+        "column, which for fills recorded before this fix scaled a BUY's drift by "
+        "reference / observed price (unbounded when the price collapsed before the fill)",
         "average_slippage_bps": _mean([x["slippage_bps"] for x in rows]),
         "average_price_impact_bps": _mean([x["impact_bps"] for x in rows]),
         "effective_friction_bps": friction / traded * 1e4 if traded > 0 else None,
         "configured_min_latency_seconds": execution.latency_seconds,
         "average_execution_delay_seconds": _mean(delays),
-        "median_execution_delay_seconds": _median(delays),
-        "max_execution_delay_seconds": max(delays) if delays else None,
+        **delay_stats(delays),
         "cancelled_entry_intents": len(cancels),
         "cancelled_entry_released_usd": released,
         "cancelled_note": "a cancelled entry order is a NO_ACTION decision (ENTRY_NOT_FILLED): "
         "not a trade, no P/L, its reserved cash released",
         "execution_delay_note": "observed: intent time to the fill observation (the first "
         "archived exact-pool price at or after the minimum latency); not market-data "
-        "resolution",
+        "resolution. The configured latency is only the earliest eligible time: the "
+        "actual delay is set by when the next exact-pool observation is archived (Scout / "
+        "held-position watch cadence)",
         "note": REALISTIC_NOTE + " Gross P/L: observed-price P/L of the quantity held; "
         "realized trade friction: exit costs plus the entry costs of the quantity sold "
-        "(gross - friction = net, exactly). Latency cost: price drift between an intent's "
-        "reference observation and its fill observation (inside gross; may be negative). "
+        "(gross - friction = net, exactly). Latency drift: the USD effect of the price moving "
+        "between an intent's reference observation and its fill observation (adverse "
+        "positive, may be negative); an analytic of fill timing, not a term of gross or net. "
         "Friction and fees cover BUY and SELL fills in the window, open positions included.",
     }  # fmt: skip
 
@@ -751,9 +790,10 @@ def shadow_report(
     stats = cp["stats"]
     mu = sum(r["trade_behavior"]["market_unavailable"] for r in reports)
     known = [a for a in affected if a is not None]
+    # Only exits that followed missing evidence: a fill that merely waited for the next
+    # observation (minimum latency, watch cadence) is a delayed fill, not an evidence gap.
     gap_affected = (
-        any(a["exits_after_evidence_gap"] or a["delayed_exit_fills"] or a["market_unavailable_exits"]
-            for a in known)
+        any(a["exits_after_evidence_gap"] > 0 or a["market_unavailable_exits"] > 0 for a in known)
         if known else None
     )  # fmt: skip
     since_run = _dt(run["since_ts"])
@@ -781,6 +821,9 @@ def shadow_report(
         "market_unavailable_exits_exist": mu > 0,
         "market_unavailable_exits": mu,
         "evidence_gaps_affected_exits": gap_affected,
+        "evidence_gaps_affected_exits_rule": "true when a reported strategy has an exit after "
+        "an evidence gap (PROVIDER_UNAVAILABLE, EVIDENCE_GAP or MARKET_NOT_FOUND while held) "
+        "or a MARKET_UNAVAILABLE exit; delayed exit fills alone never count",
         "evidence_gap_exits_by_strategy": {r["strategy"]: a for r, a in zip(reports, affected, strict=True)},
         "evidence_archive": evidence.path if evidence is not None else None,
         "anti_lookahead": "every figure is a stored row written by the book at the time, or "
@@ -982,9 +1025,12 @@ def _execution_text(e: dict[str, Any]) -> list[str]:
         f"{_usd(e['price_impact_cost_usd'])}  latency drift {_usd(e['latency_cost_usd'])}",
         f"  average slippage {_f(e['average_slippage_bps'], '.1f', ' bps')}  observed execution "
         f"delay avg {_f(e['average_execution_delay_seconds'], '.0f', ' s')} median "
-        f"{_f(e.get('median_execution_delay_seconds'), '.0f', ' s')} max "
+        f"{_f(e.get('median_execution_delay_seconds'), '.0f', ' s')} p90 "
+        f"{_f(e.get('p90_execution_delay_seconds'), '.0f', ' s')} max "
         f"{_f(e.get('max_execution_delay_seconds'), '.0f', ' s')} (minimum latency "
         f"{_f(e.get('configured_min_latency_seconds'), '.0f', ' s')})",
+        "  filled within "
+        + "  ".join(f"{k} {_f(v, '.0f', '%')}" for k, v in (e.get("filled_within_pct") or {}).items()),
         f"  cancelled entry orders {e['cancelled_entry_intents']} (not trades, no P/L; "
         f"{_usd(e.get('cancelled_entry_released_usd', 0.0))} released)",
         f"  pending: {p['entry_intents']} entry intents ({_usd(p['entry_reserved_usd'])} "

@@ -138,7 +138,7 @@ def _holders(
             "holder_count_change")}  # fmt: skip
         large = {k: _m(missing(status, why)) for k in LARGE_METRICS}
         return {**none, "observed_at": None, "source": None, "baseline_observed_at": None}, {
-            **large, "changes": []}  # fmt: skip
+            **large, **_no_changes()}  # fmt: skip
     if not inp.holders:
         why = "no holder snapshot collected yet"
         none = {k: _m(missing("NOT_COLLECTED", why)) for k in (
@@ -146,7 +146,7 @@ def _holders(
             "holder_count_change")}  # fmt: skip
         large = {k: _m(missing("NOT_COLLECTED", why)) for k in LARGE_METRICS}
         return {**none, "observed_at": None, "source": None, "baseline_observed_at": None}, {
-            **large, "changes": []}  # fmt: skip
+            **large, **_no_changes()}  # fmt: skip
     cur = inp.holders[0]
     prev = inp.holders[1] if len(inp.holders) > 1 else None
     notes = "; ".join(cur.reasons) or None
@@ -205,6 +205,12 @@ WALLET_METRICS = (
     "large_wallet_accumulation_count", "large_wallet_reduction_count", "large_wallet_exit_count",
 )  # fmt: skip
 LARGE_METRICS = HOLDER_METRICS + WALLET_METRICS
+# changes[] is a display list: changes_total counts every qualifying change before the cap.
+MAX_CHANGES_SHOWN = 10
+
+
+def _no_changes() -> dict[str, Any]:
+    return {"changes": [], "changes_total": 0, "changes_truncated": False}
 
 
 def _large(
@@ -212,7 +218,7 @@ def _large(
 ) -> dict[str, Any]:
     if prev is None:
         why = "no earlier holder snapshot to compare with"
-        return {k: _m(missing("NOT_COLLECTED", why)) for k in LARGE_METRICS} | {"changes": []}
+        return {k: _m(missing("NOT_COLLECTED", why)) for k in LARGE_METRICS} | _no_changes()
     threshold, step = settings.large_holder_min_pct, settings.large_change_min_pp
     owners = sorted(
         {o for o, b in prev.balances.items() if b[2] == "LARGE"}
@@ -291,7 +297,9 @@ def _large(
             },
             "note": "NORMAL_WALLET = signed a transaction Radar read at or before this snapshot",
         },
-        "changes": changes[:10],
+        "changes": changes[:MAX_CHANGES_SHOWN],
+        "changes_total": len(changes),
+        "changes_truncated": len(changes) > MAX_CHANGES_SHOWN,
     }
 
 

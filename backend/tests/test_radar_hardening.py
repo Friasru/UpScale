@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from tests.radar_fakes import MINT, POOL, T0, Clock, FakeChain, addr, make_service, tx
-from tests.test_radar_pipeline import CID, CRE, CREATED, DEP, A, B, base_chain, setup
+from tests.test_radar_pipeline import CID, CRE, CREATED, DEP, A, B, base_chain, second_round, setup
 from upscale.services.radar.models import RadarCausalityError, ts
 from upscale.services.radar.parsing import KNOWN_ROUTERS, classify, parse_transaction
 from upscale.services.radar.repository import RadarRepository
@@ -314,6 +314,65 @@ def test_large_wallet_metrics_only_count_proven_wallets(tmp_path: Any) -> None:
     assert cov["wallet_metrics_include"] == ["NORMAL_WALLET"]
     assert cov["holder_metrics_include"] == ["NORMAL_WALLET", "UNKNOWN"]
     assert (cov["unknown_owners"], cov["excluded_known_non_wallet_owners"]) == (1, 1)
+
+
+# --- changes[] is capped for display; changes_total / changes_truncated say so ----------------
+
+
+def test_large_holder_changes_total_when_not_truncated(tmp_path: Any) -> None:
+    D = addr("WaDDD")
+    svc, clock, chain = setup(tmp_path)
+    asyncio.run(svc.snapshot(CID))
+    second_round(chain, clock)
+    r = asyncio.run(svc.snapshot(CID))
+    lg = r.body["large_holders"]
+    assert [c["owner"] for c in lg["changes"]] == [A, D]
+    assert (lg["changes_total"], lg["changes_truncated"]) == (2, False)
+    # Aggregate counts are unchanged by the new fields.
+    assert lg["large_holder_accumulation_count"]["value"] == 1
+    assert lg["large_holder_reduction_count"]["value"] == 1
+    assert lg["large_wallet_accumulation_count"]["value"] == 1
+    assert lg["large_wallet_reduction_count"]["value"] == 1
+    assert lg["large_wallet_exit_count"]["value"] == 0
+    run = {k: v.as_dict() for k, v in r.steps.items()}
+    assert svc.build(CID, r.observed_at, run) == r.body
+    assert r.body["schema_version"] == "radar.snapshot.v1"
+
+
+def test_large_holder_changes_truncated_reports_full_total(tmp_path: Any) -> None:
+    C = addr("WaCCC")
+    U = [addr(f"UnkHdr{c}") for c in "ABCDEFGHJKMN"]  # never sign: UNKNOWN holders
+    chain = base_chain()
+    chain.holders.update({u: 10_000 for u in U})
+    svc, clock, _ = setup(tmp_path, chain)
+    first = asyncio.run(svc.snapshot(CID)).body["large_holders"]
+    assert (first["changes"], first["changes_total"], first["changes_truncated"]) == ([], 0, False)
+    clock.advance(3600)
+    # A reduces, C exits, B accumulates (all proven wallets); each U accumulates.
+    chain.holders = {A: 100_000, B: 120_000, POOL: 500_000}
+    chain.holders.update({u: 10_000 + (i + 2) * 1_000 for i, u in enumerate(U)})
+    r = asyncio.run(svc.snapshot(CID))
+    lg = r.body["large_holders"]
+
+    assert len(lg["changes"]) == 10  # display cap unchanged
+    assert (lg["changes_total"], lg["changes_truncated"]) == (15, True)
+    assert [c["owner"] for c in lg["changes"]] == [A, C, B] + U[11:4:-1]  # largest |change| first
+    # Aggregates are computed over all 15 qualifying changes, not the 10 shown.
+    assert lg["large_holder_accumulation_count"]["value"] == 13  # B + 12 U
+    assert lg["large_holder_reduction_count"]["value"] == 2  # A, C
+    assert lg["large_wallet_accumulation_count"]["value"] == 1  # B
+    assert lg["large_wallet_reduction_count"]["value"] == 2  # A, C
+    assert lg["large_wallet_exit_count"]["value"] == 1  # C
+    assert lg["large_holder_accumulation_count"]["status"] == "AVAILABLE"
+    assert all(lg[k]["status"] == "PARTIAL" for k in (
+        "large_wallet_accumulation_count", "large_wallet_reduction_count",
+        "large_wallet_exit_count"))  # fmt: skip
+    # Deterministic rebuild and stored body are identical.
+    run = {k: v.as_dict() for k, v in r.steps.items()}
+    assert svc.build(CID, r.observed_at, run) == r.body
+    stored = svc.repo.snapshot_as_of(CID, ts(r.observed_at))
+    assert stored is not None and stored[1] == r.body
+    assert r.body["schema_version"] == "radar.snapshot.v1"
 
 
 # --- UNKNOWN never enters a wallet-named feature until proven --------------------------------

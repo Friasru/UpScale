@@ -134,6 +134,11 @@ SHADOW_RUNS = os.getenv("UPSCALE_SHADOW_RUNS") or None
 # UPSCALE_SHADOW_WATCH=0 disables it. Interval in minutes (default 15, at least 5).
 SHADOW_WATCH = os.getenv("UPSCALE_SHADOW_WATCH") or None
 SHADOW_WATCH_INTERVAL_MINUTES = os.getenv("UPSCALE_SHADOW_WATCH_INTERVAL_MINUTES") or None
+# Data retention (Scout and Evidence Archive databases; Shadow is never pruned). Background
+# passes are OFF unless UPSCALE_RETENTION_ENABLED is 1 (delete) or dry-run (log only);
+# UPSCALE_EVIDENCE_RETENTION_DAYS / UPSCALE_SCOUT_SNAPSHOT_RETENTION_DAYS /
+# UPSCALE_SOCIAL_RETENTION_DAYS (default 7, at least 3) and UPSCALE_OUTCOME_RETENTION_DAYS
+# (default 30, at least 14). Read by upscale.services.retention.config.
 
 # Secret-safe logging for the whole process (every logger and level): the credentials above
 # and any credential-looking query parameter or header are masked in log output.

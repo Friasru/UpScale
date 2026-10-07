@@ -28,7 +28,9 @@ from upscale.config import (
     BACKGROUND_SCOUT_INTERVAL_MINUTES,
     BACKGROUND_SCOUT_MAX_DEFERRAL_MINUTES,
     CORS_ORIGINS,
+    EVIDENCE_DB_PATH,
     OUTCOMES_COLLECTOR,
+    SCOUT_DB_PATH,
     SHADOW,
     SHADOW_INTERVAL_MINUTES,
     SHADOW_RUN,
@@ -58,6 +60,8 @@ from upscale.scout_api import (
 from upscale.services.evidence_archive import hooks as evidence
 from upscale.services.outcomes import record_decision, record_scout_run
 from upscale.services.outcomes.models import SurfacingHistory
+from upscale.services.retention.config import load_settings as load_retention_settings
+from upscale.services.retention.service import BackgroundRetention
 from upscale.services.scout.growth.models import GrowthScoutResult
 from upscale.services.shadow.config import default_shadow_db
 from upscale.services.shadow.config import load_settings as load_shadow_settings
@@ -92,9 +96,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     background_scout.start()
     background_shadow.start()
     held_position_watch.start()
+    background_retention.start()
     try:
         yield
     finally:
+        await background_retention.stop()
         await held_position_watch.stop()
         await background_shadow.stop()
         await background_scout.stop()
@@ -289,6 +295,28 @@ held_position_watch = HeldPositionWatch(
     shadow_db=default_shadow_db,
     evidence_store=lambda: services.evidence_store,
     defer=_watch_defer_reason,
+)
+
+
+def _retention_defer_reason() -> str | None:
+    """Retention is the lowest-priority background work: it waits for Analyze, Scout scans,
+    safety enrichment, a Shadow step and the held-position watch."""
+    reason = _watch_defer_reason()
+    if reason is not None:
+        return reason
+    if background_shadow.running:
+        return "a Shadow step is running"
+    if held_position_watch.running:
+        return "a held-position watch cycle is running"
+    return None
+
+
+background_retention = BackgroundRetention(
+    load_retention_settings(),
+    _retention_defer_reason,
+    scout_db=lambda: SCOUT_DB_PATH,
+    evidence_db=lambda: EVIDENCE_DB_PATH,
+    shadow_db=default_shadow_db,
 )
 
 

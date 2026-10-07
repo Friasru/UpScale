@@ -10,6 +10,9 @@ os.environ["UPSCALE_SCOUT_DB"] = os.path.join(
 os.environ["UPSCALE_REPLAY_DB"] = os.path.join(
     os.path.dirname(os.environ["UPSCALE_SCOUT_DB"]), "replay.sqlite3"
 )
+os.environ["UPSCALE_RADAR_DB"] = os.path.join(
+    os.path.dirname(os.environ["UPSCALE_SCOUT_DB"]), "radar.sqlite3"
+)
 
 import asyncio
 import base64

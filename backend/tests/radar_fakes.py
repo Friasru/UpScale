@@ -113,6 +113,8 @@ class FakeChain:
     )  # address -> txs (oldest first)
     fail: Callable[[str], int | str | None] | None = None  # method -> status / "timeout"
     program_owned: set[str] = field(default_factory=set)  # owners whose account a program owns
+    # signature -> getTransaction answer: {"error": {...}} for a JSON-RPC error, else the result
+    tx_override: dict[str, Any] = field(default_factory=dict)
     calls: Counter[str] = field(default_factory=Counter)
     params: list[tuple[str, Any]] = field(default_factory=list)
 
@@ -136,6 +138,11 @@ class FakeChain:
                 raise httpx2.ReadTimeout("timed out", request=request)
             if isinstance(how, int):
                 return httpx2.Response(how, json={"error": "nope"})
+        if method == "getTransaction" and params[0] in self.tx_override:
+            got = self.tx_override[params[0]]
+            key = "error" if isinstance(got, dict) and set(got) == {"error"} else "result"
+            value = got["error"] if key == "error" else got
+            return httpx2.Response(200, json={"jsonrpc": "2.0", "id": body["id"], key: value})
         return httpx2.Response(
             200, json={"jsonrpc": "2.0", "id": body["id"], "result": self.result(method, params)}
         )

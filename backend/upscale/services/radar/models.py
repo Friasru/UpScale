@@ -84,6 +84,13 @@ class RadarTimeoutError(RadarUnavailableError):
     status: Status = "PROVIDER_UNAVAILABLE"
 
 
+class RadarTxUnavailableError(RadarUnavailableError):
+    """One transaction can't be read in a usable form (unsupported version, malformed,
+    unknown to the provider) while the provider itself works: safe to skip on its own."""
+
+    status: Status = "UNAVAILABLE"
+
+
 def solana_identity(mint: str) -> tuple[str, str]:
     """(canonical id, mint) for a Solana mint. Base58 is case-sensitive: never lowercased."""
     value = mint.strip()

@@ -16,6 +16,9 @@ the mint / largest-accounts / DAS parsing is reused while every HTTP request goe
   fails fast with `RadarCoolingDownError`. A successful call resets the streak.
 * **Timeouts, transport errors and HTTP 5xx**: retried up to ``max_retries`` with
   exponential backoff and jitter, then reported ``PROVIDER_UNAVAILABLE``.
+* **One unreadable transaction** (an unsupported version, a skipped slot, a malformed or
+  missing record) is a `RadarTxUnavailableError`: the provider works, so callers may skip
+  that transaction alone. Everything else is provider-wide.
 
 The URL can contain an API key: it never appears in an error message.
 """
@@ -37,6 +40,7 @@ from upscale.services.radar.models import (
     RadarCoolingDownError,
     RadarRateLimitedError,
     RadarTimeoutError,
+    RadarTxUnavailableError,
     RadarUnavailableError,
     SignatureInfo,
 )
@@ -46,6 +50,12 @@ from upscale.services.solana_chain import HeliusProvider, SolanaRpcProvider
 Outcome = Literal["ok", "rate_limited", "timeout", "failed"]
 COOLDOWN_KEY = "provider.cooldown_until"
 STREAK_KEY = "provider.consecutive_429"
+MAX_TX_VERSION = 1
+# getTransaction JSON-RPC errors about that one transaction, not the provider: an
+# unsupported transaction version, a skipped slot (also in long-term storage) and an
+# invalid signature. "Block not available" (-32004) is left provider-wide: a lagging node
+# returns it for every recent transaction, and skipping those would leave a gap.
+TX_ERROR_CODES = frozenset({-32015, -32007, -32009, -32602})
 
 
 class RequestLedger(Protocol):
@@ -56,6 +66,14 @@ class RequestLedger(Protocol):
     def get_meta(self, key: str) -> str | None: ...
 
     def set_meta(self, key: str, value: str) -> None: ...
+
+
+class _RpcError(RadarUnavailableError):
+    """A JSON-RPC error body, with its code (callers decide whether it's per request)."""
+
+    def __init__(self, message: str, code: object):
+        super().__init__(message)
+        self.code = code
 
 
 class _Retryable(Exception):
@@ -218,7 +236,7 @@ class _RadarRpc:
                 raise RadarRateLimitedError(f"{self.name} rate limit reached")
             if "not a Token mint" in message or "Invalid param" in message:
                 raise AssetNotFoundError(f"{method}: {message}")
-            raise RadarUnavailableError(f"{self.name} {method} failed: {message}")
+            raise _RpcError(f"{self.name} {method} failed: {message}", error.get("code"))
         if "result" not in body:
             raise RadarUnavailableError(f"{self.name} returned no result")
         return body["result"]
@@ -243,22 +261,30 @@ class _RadarRpc:
         return parse_signatures(result)
 
     async def get_transaction(self, signature: str) -> dict[str, Any] | None:
-        """The jsonParsed transaction, or None when the provider has no record of it."""
-        result = await self._call(
-            "getTransaction",
-            [
-                signature,
-                {
-                    "encoding": "jsonParsed",
-                    "maxSupportedTransactionVersion": 0,
-                    "commitment": "confirmed",
-                },
-            ],
-        )
+        """The jsonParsed transaction, or None when the provider has no record of it.
+        Raises `RadarTxUnavailableError` when only this transaction is unreadable."""
+        try:
+            result = await self._call(
+                "getTransaction",
+                [
+                    signature,
+                    {
+                        "encoding": "jsonParsed",
+                        "maxSupportedTransactionVersion": MAX_TX_VERSION,
+                        "commitment": "confirmed",
+                    },
+                ],
+            )
+        except _RpcError as exc:
+            if exc.code in TX_ERROR_CODES or "Transaction version" in str(exc):
+                raise RadarTxUnavailableError(str(exc)) from None
+            raise
+        except AssetNotFoundError as exc:  # "Invalid param": a bad signature, not the provider
+            raise RadarTxUnavailableError(f"{self.name} getTransaction: {exc}") from None
         if result is None:
             return None
         if not isinstance(result, dict):
-            raise RadarUnavailableError(f"{self.name} returned a malformed transaction")
+            raise RadarTxUnavailableError(f"{self.name} returned a malformed transaction")
         return result
 
 

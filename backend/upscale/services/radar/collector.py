@@ -9,7 +9,12 @@ Steps (all through Radar's own guarded provider):
    balance of every owner that was large in the previous holder snapshot.
 2. **Activity**: the pool's new signatures since the stored cursor (one page by default),
    then at most ``max_tx_per_snapshot`` successful transactions, newest first. Anything
-   beyond the caps makes the scan ``PARTIAL``.
+   beyond the caps makes the scan ``PARTIAL``. A transaction that can't be read on its own
+   (unsupported version, malformed, unknown to the provider) is skipped with its reason
+   and the batch goes on; a provider-wide failure (rate limit, auth, timeout, outage, budget)
+   aborts it. The cursor only advances when the batch finished: after an abort it stays
+   put, so the next scan lists the unhandled signatures again (already-stored ones are
+   filtered out, and storage is idempotent).
 3. **Early history** (once per target): page the pool's signatures back to its first
    transaction within ``early_max_sig_pages``. If reached, the first ``early_max_tx``
    successful transactions are parsed and the oldest one's fee payer is stored as the
@@ -31,6 +36,7 @@ from upscale.services.market_data import AssetNotFoundError, MarketDataError
 from upscale.services.radar.config import RadarSettings
 from upscale.services.radar.models import (
     ParsedTx,
+    RadarTxUnavailableError,
     RadarUnavailableError,
     SignatureInfo,
     Status,
@@ -113,10 +119,16 @@ class Collector:
         raw = await self.provider.get_transaction(sig.signature)
         if raw is None:
             return None
-        return parse_transaction(
-            raw, target.mint, target.pool_address, self.known_pools,
-            self.settings.known_intermediaries,
-        )  # fmt: skip
+        try:
+            tx = parse_transaction(
+                raw, target.mint, target.pool_address, self.known_pools,
+                self.settings.known_intermediaries,
+            )  # fmt: skip
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+            raise RadarTxUnavailableError(f"malformed transaction ({exc!r})") from None
+        if tx is not None and tx.signature != sig.signature:
+            raise RadarTxUnavailableError("the provider returned a different transaction")
+        return tx
 
     def early_cutoff(self, target: Target) -> float | None:
         """End of the early window, when the pool's creation time is known."""
@@ -247,17 +259,29 @@ class Collector:
             if x.failed:  # no balance change; recorded without a request
                 self._store(target, ParsedTx(x.signature, x.slot, x.block_time, None, True, (),
                                              False, 0), scan_id, cutoff)  # fmt: skip
-        parsed, failure = await self._parse_many(target, chosen, scan_id, cutoff)
+        parsed, unreadable, failure = await self._parse_many(target, chosen, scan_id, cutoff)
+        if unreadable:
+            skipped += len(unreadable)
+            reasons.append(
+                f"{len(unreadable)} transaction(s) couldn't be read and were skipped: "
+                + "; ".join(f"{sig} ({why})" for sig, why in unreadable)
+            )
         if failure is not None:
-            reasons.append(f"stopped early: {failure[1]}")
-            skipped += len(chosen) - parsed
+            unhandled = len(chosen) - parsed - len(unreadable)
+            skipped += unhandled
+            reasons.append(
+                f"stopped early: {failure[1]}; {unhandled} selected transaction(s) were left "
+                "unprocessed, and the cursor wasn't advanced so the next scan retries them"
+            )
         status: Status = "AVAILABLE" if not reasons else "PARTIAL"
         if failure is not None and parsed == 0 and chosen:
             status = failure[0]
         times = [x.block_time for x in sigs if x.block_time is not None]
         self._finish_scan(scan_id, status, parsed, skipped, listing.complete and target.last_signature is None,
                           (min(times) if times else None, max(times) if times else None), reasons)  # fmt: skip
-        if sigs and (failure is None or parsed > 0 or not chosen):
+        # Only a finished batch moves the cursor: past it, the next listing can't reach
+        # anything older, so an aborted batch's unhandled signatures would be lost.
+        if sigs and failure is None:
             self.repo.advance_cursor(target.canonical_id, sigs[0].signature, self._t())
         return StepResult(status, reasons, self._used() - start)
 
@@ -268,18 +292,25 @@ class Collector:
 
     async def _parse_many(
         self, target: Target, sigs: list[SignatureInfo], scan_id: int, cutoff: float | None
-    ) -> tuple[int, tuple[Status, str] | None]:
+    ) -> tuple[int, list[tuple[str, str]], tuple[Status, str] | None]:
+        """(stored, [(signature, reason) skipped on their own], provider-wide failure).
+        One unreadable transaction is skipped; a provider-wide failure stops the batch."""
         parsed = 0
+        unreadable: list[tuple[str, str]] = []
         for x in sigs:
             try:
                 tx = await self._fetch_parse(target, x)
+            except RadarTxUnavailableError as exc:
+                unreadable.append((x.signature, str(exc)))
+                continue
             except MarketDataError as exc:
-                return parsed, (failure_status(exc), str(exc))
+                return parsed, unreadable, (failure_status(exc), str(exc))
             if tx is None:
+                unreadable.append((x.signature, "the provider has no usable record of it"))
                 continue
             self._store(target, tx, scan_id, cutoff)
             parsed += 1
-        return parsed, None
+        return parsed, unreadable, None
 
     def _finish_scan(
         self,

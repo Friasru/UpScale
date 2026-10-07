@@ -175,7 +175,13 @@ class RadarService:
         """Snapshot up to `limit` active targets (least recently scanned first). One
         target failing is reported and never stops the batch."""
         out: list[SnapshotResult | tuple[str, str]] = []
-        for target in self.repo.targets("ACTIVE")[:limit]:
+        # Never scanned first, then the oldest finished activity scan (a quiet scan counts);
+        # ties keep selection order.
+        queue = sorted(
+            self.repo.targets("ACTIVE"),
+            key=lambda t: (t.last_scan_at is not None, t.last_scan_at or 0.0),
+        )
+        for target in queue[:limit]:
             if self.guard.remaining_today() <= 0:
                 out.append((target.canonical_id, "NOT_COLLECTED: daily request budget spent"))
                 continue

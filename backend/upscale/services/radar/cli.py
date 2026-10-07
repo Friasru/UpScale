@@ -184,7 +184,7 @@ def snapshot_text(body: dict[str, Any]) -> str:
         f"=== RADAR SNAPSHOT {body['schema_version']} ===",
         f"{body['identity']['canonical_id']}  pool {body['identity']['pool_address']} "
         f"({body['identity']['dex'] or '?'})",
-        f"observed_at: {body['observed_at']}  coverage: {body['coverage']['overall']}  "
+        f"observed_at: {body['observed_at']}  headline coverage: {body['coverage']['overall']}  "
         f"holder source: {h['source'] or '-'}",
         f"holder_count: {_metric(h['holder_count'])}",
         f"top1_pct: {_metric(h['top1_pct'])}   top10_pct: {_metric(h['top10_pct'])}",
@@ -224,7 +224,7 @@ def _result_dict(r: SnapshotResult) -> dict[str, Any]:
 
 def _result_text(r: SnapshotResult) -> str:
     steps = ", ".join(f"{k}={v.status}({v.requests})" for k, v in r.steps.items())
-    head = (f"provider requests: {r.requests}  steps: {steps or 'none (local preview)'}  "
+    head = (f"provider requests: {r.requests}  collection steps: {steps or 'none (local preview)'}  "
             f"saved: {r.saved}")  # fmt: skip
     return head + "\n" + snapshot_text(r.body)
 

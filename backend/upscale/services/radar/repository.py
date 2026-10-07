@@ -458,7 +458,7 @@ class RadarRepository:
 
     _TARGET_COLS = (
         "canonical_id, chain, mint, pool_address, dex, pool_created_at, pool_created_source, "
-        "source, selected_at, status, last_signature, early_status, snapshots_taken"
+        "source, selected_at, status, last_signature, early_status, snapshots_taken, last_scan_at"
     )
 
     @staticmethod

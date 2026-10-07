@@ -61,6 +61,10 @@ from upscale.services.solana_chain import (
 
 @dataclass
 class StepResult:
+    """How one collection step went in this run (``coverage.run``): an execution status,
+    not feature availability. AVAILABLE means the step ran or was rightly skipped without
+    error (e.g. "already determined (UNAVAILABLE)"); each metric carries its own status."""
+
     status: Status
     reasons: list[str] = field(default_factory=list)
     requests: int = 0
@@ -280,9 +284,12 @@ class Collector:
         self._finish_scan(scan_id, status, parsed, skipped, listing.complete and target.last_signature is None,
                           (min(times) if times else None, max(times) if times else None), reasons)  # fmt: skip
         # Only a finished batch moves the cursor: past it, the next listing can't reach
-        # anything older, so an aborted batch's unhandled signatures would be lost.
-        if sigs and failure is None:
-            self.repo.advance_cursor(target.canonical_id, sigs[0].signature, self._t())
+        # anything older, so an aborted batch's unhandled signatures would be lost. A finished
+        # scan that listed nothing new still counts as a recent scan (last_scan_at) but keeps
+        # the cursor; an aborted one is neither, so it's retried first.
+        if failure is None:
+            newest = sigs[0].signature if sigs else None
+            self.repo.advance_cursor(target.canonical_id, newest, self._t())
         return StepResult(status, reasons, self._used() - start)
 
     def _store(self, target: Target, tx: ParsedTx, scan_id: int, cutoff: float | None) -> int:

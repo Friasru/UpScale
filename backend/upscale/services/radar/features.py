@@ -629,13 +629,23 @@ def _wallet_history(inp: Inputs, settings: RadarSettings, roles: Roles) -> dict[
     }
 
 
+# `coverage.overall` covers these headline metrics only, never feature-level coverage.
+OVERALL_BASIS = ("holders.holder_count", "holders.top10_pct", "activity.interacting_wallets")
+OVERALL_NOTE = (
+    "headline metrics for this snapshot window only; inspect each feature's own status "
+    "for feature-level coverage"
+)
+
+
 def overall_coverage(body: Mapping[str, Any]) -> str:
-    """COMPLETE (every headline metric AVAILABLE), PARTIAL, or EMPTY (none valued)."""
-    heads = [
-        body["holders"]["holder_count"], body["holders"]["top10_pct"],
-        body["activity"]["interacting_wallets"],
-    ]  # fmt: skip
-    statuses = [h["status"] for h in heads]
+    """Headline coverage of `body`, from exactly ``OVERALL_BASIS``: holders.holder_count,
+    holders.top10_pct and activity.interacting_wallets (this snapshot's window).
+
+    COMPLETE when all three are AVAILABLE, PARTIAL when any is valued, EMPTY when none is.
+    It says nothing about other features: COMPLETE coexists with UNAVAILABLE early
+    activity, PARTIAL large-wallet metrics or NOT_COLLECTED funding clusters."""
+    statuses = [body[section][key]["status"] for section, key in
+                (path.split(".") for path in OVERALL_BASIS)]  # fmt: skip
     if all(s == "AVAILABLE" for s in statuses):
         return "COMPLETE"
     return "PARTIAL" if any(s in VALUED for s in statuses) else "EMPTY"
@@ -678,6 +688,7 @@ def build_snapshot(
         "observed_at": iso(as_of),
         "coverage": {
             "provider": provider,
+            # Collection-step execution status for this run, not feature availability.
             "run": {k: run[k] for k in sorted(run)},
             "holder_source": holders["source"],
             "activity_scans": len(_scan_window(inp, "activity")),
@@ -708,4 +719,6 @@ def build_snapshot(
         "limitations": list(LIMITATIONS),
     }
     body["coverage"]["overall"] = overall_coverage(body)
+    body["coverage"]["overall_basis"] = list(OVERALL_BASIS)
+    body["coverage"]["overall_note"] = OVERALL_NOTE
     return body

@@ -360,3 +360,52 @@ def test_unknown_excluded_from_wallet_features_until_proven(tmp_path: Any) -> No
     # ...but never before that: the decision-time features at T1 are unchanged.
     run = {k: v.as_dict() for k, v in s1.steps.items()}
     assert svc.build(CID, s1.observed_at, run) == b
+
+
+# --- coverage.overall is headline coverage, not feature coverage ------------------------------
+
+
+def test_complete_headline_coverage_coexists_with_incomplete_features(tmp_path: Any) -> None:
+    from upscale.services.radar.cli import snapshot_text
+    from upscale.services.radar.features import OVERALL_BASIS, OVERALL_NOTE
+
+    H = addr("HoLderUnk")  # a large holder that never signs: never a proven wallet
+    chain = base_chain()
+    chain.holders[H] = 20_000
+    # As in the live run: trading starts days after the pool was created, and a 2-signature
+    # history cap means the pool's first transaction is never reached.
+    clock = Clock()
+    svc = make_service(tmp_path, chain, clock, signature_page_size=2, early_max_sig_pages=1)
+    svc.add_target(MINT, POOL, "pumpswap", CREATED - timedelta(days=3))
+    first = asyncio.run(svc.snapshot(CID)).body
+    assert first["coverage"]["overall"] == "PARTIAL"  # the capped first activity scan
+    clock.advance(3600)
+    r = asyncio.run(svc.snapshot(CID))  # quiet pool, unchanged holders
+    b = r.body
+    assert b["coverage"]["overall"] == "COMPLETE"
+    for path in OVERALL_BASIS:
+        section, key = path.split(".")
+        assert b[section][key]["status"] == "AVAILABLE"
+    assert b["activity"]["signatures_listed"] == 0
+    # ...while other features are not complete.
+    assert b["early_activity"]["early_wallet_count"]["status"] == "UNAVAILABLE"
+    assert b["coverage"]["early_status"] == "UNAVAILABLE"
+    for k in ("large_wallet_accumulation_count", "large_wallet_reduction_count",
+              "large_wallet_exit_count"):  # fmt: skip
+        assert b["large_holders"][k]["status"] == "PARTIAL"
+    assert b["large_holders"]["large_holder_accumulation_count"]["status"] == "AVAILABLE"
+    assert b["clusters"]["funding"]["count"]["status"] == "NOT_COLLECTED"
+    # The basis is stated in the body, and the DB column keeps the same value.
+    assert b["coverage"]["overall_basis"] == [
+        "holders.holder_count", "holders.top10_pct", "activity.interacting_wallets"
+    ]  # fmt: skip
+    assert b["coverage"]["overall_note"] == OVERALL_NOTE
+    assert "feature-level coverage" in OVERALL_NOTE
+    assert b["schema_version"] == "radar.snapshot.v1"
+    with sqlite3.connect(svc.settings.db_path) as conn:
+        stored = conn.execute("SELECT coverage FROM radar_snapshots ORDER BY id").fetchall()
+    assert stored == [("PARTIAL",), ("COMPLETE",)]
+    assert "headline coverage: COMPLETE" in snapshot_text(b)
+    # Run steps are execution status: a skipped step is AVAILABLE though its data isn't.
+    assert b["coverage"]["run"]["early"]["status"] == "AVAILABLE"
+    assert b["coverage"]["run"]["early"]["reasons"] == ["early history already collected"]

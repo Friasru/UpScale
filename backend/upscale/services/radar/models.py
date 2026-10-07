@@ -173,6 +173,7 @@ class Target:
     last_signature: str | None  # newest pool signature already listed (activity cursor)
     early_status: str | None
     snapshots_taken: int
+    last_scan_at: float | None = None  # last activity scan that finished (not aborted)
 
 
 @dataclass(frozen=True)

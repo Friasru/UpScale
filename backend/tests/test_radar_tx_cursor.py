@@ -272,3 +272,78 @@ def test_snapshot_parsed_and_skipped_counts_stay_truthful(tmp_path: Any) -> None
     assert counted(b) == (7, 3, 2)
     assert cursor(svc) == "sig6"
     assert stored(svc) == ["sig2", "sig3", "sig4", "sig6", "sig9"]
+
+
+# --- 10-13: last_scan_at marks finished scans, quiet ones included ----------------------
+
+
+def scanned_at(svc: RadarService, cid: str = CID) -> float | None:
+    target = svc.repo.get_target(cid)
+    assert target is not None
+    return target.last_scan_at
+
+
+def test_quiet_scan_updates_last_scan_at_and_keeps_the_cursor(tmp_path: Any) -> None:
+    svc, clock, chain = setup(tmp_path, 1, 2, 3)
+    activity(svc, clock)
+    first = scanned_at(svc)
+    assert cursor(svc) == "sig3" and first == clock.now().timestamp()
+    clock.advance(600)
+    chain.params.clear()
+    r = activity(svc, clock)
+    assert r.status == "AVAILABLE" and r.reasons == []
+    assert [p[1]["until"] for m, p in chain.params if m == "getSignaturesForAddress"] == ["sig3"]
+    assert last_scan(svc) == ("AVAILABLE", 0, 0, 0)
+    assert cursor(svc) == "sig3"  # nothing new: the cursor stays
+    assert scanned_at(svc) == clock.now().timestamp() == first + 600  # type: ignore[operator]
+
+
+def test_scan_with_new_signatures_updates_last_scan_at_and_cursor(tmp_path: Any) -> None:
+    svc, clock, chain = setup(tmp_path, 1, 2, 3)
+    activity(svc, clock)
+    clock.advance(600)
+    chain.add(POOL, pool_tx(4), pool_tx(5))
+    assert activity(svc, clock).status == "AVAILABLE"
+    assert cursor(svc) == "sig5"
+    assert scanned_at(svc) == clock.now().timestamp()
+
+
+@pytest.mark.parametrize("method", ["getTransaction", "getSignaturesForAddress"])
+def test_aborted_scan_is_not_a_recent_scan_and_keeps_the_cursor(tmp_path: Any, method: str) -> None:
+    svc, clock, chain = setup(tmp_path, 1, 2, 3)
+    activity(svc, clock)
+    before = scanned_at(svc)
+    clock.advance(600)
+    chain.add(POOL, pool_tx(4), pool_tx(5))
+    chain.fail = lambda m: 503 if m == method else None
+    r = activity(svc, clock)
+    assert r.status == "PROVIDER_UNAVAILABLE"
+    assert cursor(svc) == "sig3"
+    assert scanned_at(svc) == before  # not marked as successfully scanned
+    # A first scan that aborts leaves the target never scanned.
+    svc2, clock2, chain2 = setup(tmp_path / "fresh", 1, 2, 3)
+    chain2.fail = lambda m: 503 if m == method else None
+    activity(svc2, clock2)
+    assert cursor(svc2) is None and scanned_at(svc2) is None
+
+
+def test_snapshot_active_rotates_past_a_quiet_target(tmp_path: Any) -> None:
+    mint2, pool2 = addr("MintBBB"), addr("PooLBBB")
+    cid2 = f"solana:{mint2}"
+    svc, clock, chain = setup(tmp_path, 1, 2, verify_deployer=False, early_max_sig_pages=0)
+    clock.advance(1)
+    svc.add_target(mint2, pool2, "pumpswap", CREATED)  # selected after the quiet target
+
+    def batch() -> str:
+        clock.advance(60)
+        [r] = asyncio.run(svc.snapshot_active(1))
+        assert not isinstance(r, tuple), r
+        return r.canonical_id
+
+    assert batch() == CID  # neither scanned yet: selection order
+    assert batch() == cid2  # never scanned beats scanned
+    # CID's pool stays quiet (zero new signatures) yet its scan still counts, so the two
+    # targets take turns instead of the earliest-selected one winning every batch.
+    assert [batch() for _ in range(4)] == [CID, cid2, CID, cid2]
+    assert last_scan(svc)[1] == 0  # the latest scans listed nothing new
+    assert cursor(svc) == "sig2"

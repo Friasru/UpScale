@@ -62,6 +62,10 @@ class RadarCausalityError(RadarError):
     """An input was fetched after the moment a snapshot claims to describe."""
 
 
+class RadarSchemaError(RadarError):
+    """The Radar database was created by an incompatible Radar version."""
+
+
 class RadarUnavailableError(MarketDataUnavailableError):
     """Radar's own guard refused or the provider failed (never production's limits)."""
 
@@ -114,6 +118,20 @@ def ts(value: datetime) -> float:
     if value.tzinfo is None:
         raise ValueError("Radar timestamps must be timezone-aware")
     return value.timestamp()
+
+
+# Chain time (``blockTime``: whole seconds, a stake-weighted validator estimate) and Radar's
+# local clock (``fetched_at``) are different clocks. A block time at most this far ahead of
+# ``fetched_at`` is stored as-is with ``chain_clock_ahead_s``; anything further raises
+# `RadarCausalityError`. Fixed on purpose: never a setting, never above 2 s.
+CHAIN_CLOCK_TOLERANCE_S = 2.0
+
+
+def effective_time(block_time: float | None, known_at: float) -> float | None:
+    """The event time features use: the chain's block time, but never later than when Radar
+    learned it (`known_at`), so a tolerated chain-clock lead can't put an event after its own
+    evidence. The raw block time stays stored for provenance."""
+    return min(block_time, known_at) if block_time is not None else None
 
 
 def dt(value: float | None) -> datetime | None:

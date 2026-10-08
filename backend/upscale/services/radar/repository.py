@@ -3,8 +3,11 @@ databases). Only normalized rows and provenance are stored: raw transaction JSON
 
 Time columns (UTC epoch seconds):
 
-* ``block_time``: when something happened on chain (from the provider).
-* ``fetched_at``: when Radar learned it. ``block_time <= fetched_at`` is a CHECK.
+* ``block_time``: when something happened on chain (from the provider), stored raw.
+* ``fetched_at``: when Radar learned it (local clock). Chain and local clocks differ, so
+  the CHECK is ``block_time - fetched_at <= CHAIN_CLOCK_TOLERANCE_S`` (2 s); a block time
+  ahead of ``fetched_at`` is stored with ``chain_clock_ahead_s`` (NULL otherwise), and
+  features use ``min(block_time, fetched_at)`` (`effective_time`) as the event time.
 * ``observed_at``: the moment a holder snapshot or Radar snapshot describes. Every input
   of a snapshot satisfies ``fetched_at <= observed_at`` (`load_inputs` only reads such
   rows and re-checks them).
@@ -13,7 +16,9 @@ Time columns (UTC epoch seconds):
 Tables:
 
 * ``radar_targets``: tracked tokens (canonical id, mint, pool) plus the activity cursor.
-* ``radar_scans``: one row per bounded scan (activity / early), with its coverage.
+* ``radar_scans``: one row per bounded scan (activity / early), with its coverage. A scan
+  is ``RUNNING`` only while it runs (snapshots never read one); an exception inside it
+  finishes it ``ABORTED`` with the reason.
 * ``radar_tx``: normalized transactions (signature, slot, block time, fee payer).
 * ``radar_wallet_flows``: per wallet, per transaction ``TOKEN_INFLOW`` / ``TOKEN_OUTFLOW``.
 * ``radar_wallet_entries``: long-lived roll-up per (participant, token) for
@@ -43,9 +48,12 @@ from typing import Any
 
 from upscale.services.radar.config import DB_SCHEMA_VERSION, SNAPSHOT_SCHEMA
 from upscale.services.radar.models import (
+    CHAIN_CLOCK_TOLERANCE_S,
     ParsedTx,
     RadarCausalityError,
+    RadarSchemaError,
     Target,
+    effective_time,
 )
 from upscale.services.radar.provider import Outcome
 
@@ -96,8 +104,9 @@ CREATE TABLE IF NOT EXISTS radar_tx (
     failed INTEGER NOT NULL,
     scan_id INTEGER,
     provider TEXT NOT NULL,
+    chain_clock_ahead_s REAL,
     PRIMARY KEY (canonical_id, signature),
-    CHECK (block_time IS NULL OR block_time <= fetched_at)
+    {CLOCK_CHECKS}
 );
 CREATE INDEX IF NOT EXISTS radar_tx_by_fetch ON radar_tx (fetched_at);
 CREATE TABLE IF NOT EXISTS radar_wallet_flows (
@@ -115,8 +124,9 @@ CREATE TABLE IF NOT EXISTS radar_wallet_flows (
     is_early INTEGER,
     scan_id INTEGER,
     provider TEXT NOT NULL,
+    chain_clock_ahead_s REAL,
     UNIQUE (canonical_id, signature, wallet),
-    CHECK (block_time IS NULL OR block_time <= fetched_at)
+    {CLOCK_CHECKS}
 );
 CREATE INDEX IF NOT EXISTS radar_flows_by_target ON radar_wallet_flows (canonical_id, fetched_at);
 CREATE INDEX IF NOT EXISTS radar_flows_by_wallet ON radar_wallet_flows (wallet, block_time);
@@ -213,6 +223,12 @@ CREATE TABLE IF NOT EXISTS radar_requests (
     PRIMARY KEY (day, method)
 );
 """
+# Chain time may lead the local clock by at most the tolerance, and exactly then
+# chain_clock_ahead_s holds the lead (the same subtraction `record_tx` checks).
+_CLOCK_CHECKS = f"""CHECK (block_time IS NULL OR block_time - fetched_at <= {CHAIN_CLOCK_TOLERANCE_S!r}),
+    CHECK ((block_time IS NOT NULL AND block_time > fetched_at) = (chain_clock_ahead_s IS NOT NULL)),
+    CHECK (chain_clock_ahead_s IS NULL OR chain_clock_ahead_s = block_time - fetched_at)"""
+_SCHEMA = _SCHEMA.replace("{CLOCK_CHECKS}", _CLOCK_CHECKS)
 TABLES = (
     "radar_meta", "radar_targets", "radar_scans", "radar_tx", "radar_wallet_flows",
     "radar_wallet_entries", "radar_holder_snapshots", "radar_holder_balances",
@@ -254,6 +270,12 @@ class FlowRow:
     is_early: bool | None
     participant: str = "NORMAL_WALLET"
     signer: bool = True
+    chain_clock_ahead_s: float | None = None  # raw block time's lead over fetched_at
+
+    @property
+    def event_time(self) -> float | None:
+        """The block time features use (never after `fetched_at`; see `effective_time`)."""
+        return effective_time(self.block_time, self.fetched_at)
 
 
 @dataclass(frozen=True)
@@ -324,6 +346,13 @@ class Inputs:
     profiles: dict[str, WalletProfile] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class StoredTx:
+    inserted: bool  # False for a transaction already stored (nothing written)
+    flows: int  # new flows
+    chain_clock_ahead_s: float | None  # set when the tolerance was used for this row
+
+
 def _marks(n: int) -> str:
     return ",".join("?" * n)
 
@@ -336,6 +365,25 @@ def _chunks(items: Sequence[str], size: int = 500) -> Iterable[list[str]]:
 def encode_body(body: dict[str, Any]) -> tuple[str, bytes, str]:
     text = json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return text, zlib.compress(text.encode(), 9), hashlib.sha256(text.encode()).hexdigest()
+
+
+def _require_compatible(conn: sqlite3.Connection, path: str) -> None:
+    """Refuse a Radar database another schema version created (no migration: Radar isn't
+    deployed, and an old CHECK would otherwise fail later as an IntegrityError mid-scan)."""
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if not names & set(TABLES):
+        return  # a new database
+    found = None
+    if "radar_meta" in names:
+        row = conn.execute("SELECT value FROM radar_meta WHERE key = 'schema_version'").fetchone()
+        found = row[0] if row else None
+    if found != str(DB_SCHEMA_VERSION):
+        raise RadarSchemaError(
+            f"{path} is a Radar database with schema version {found or 'unknown'}; this Radar "
+            f"needs version {DB_SCHEMA_VERSION} (chain-clock tolerance columns and checks). "
+            "It isn't migrated: start a fresh Radar database (UPSCALE_RADAR_DB) and keep the "
+            "old file for reference."
+        )
 
 
 class RadarRepository:
@@ -356,6 +404,11 @@ class RadarRepository:
         if self._conn is None:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self.path, check_same_thread=False)
+            try:
+                _require_compatible(conn, self.path)
+            except RadarSchemaError:
+                conn.close()
+                raise
             conn.execute("PRAGMA foreign_keys = ON")
             conn.executescript(_SCHEMA)
             with conn:
@@ -638,8 +691,9 @@ class RadarRepository:
         with self._lock, self.db() as conn:
             conn.execute(
                 "UPDATE radar_wallet_entries SET early_fetched_at = ? WHERE canonical_id = ? "
-                "AND early_fetched_at IS NULL "
-                "AND COALESCE(revised_block_time, first_block_time) <= ?",
+                "AND early_fetched_at IS NULL AND CASE WHEN revised_at IS NOT NULL "
+                "THEN MIN(revised_block_time, revised_at) "
+                "ELSE MIN(first_block_time, first_fetched_at) END <= ?",
                 (at, canonical_id, cutoff),
             )
 
@@ -651,18 +705,28 @@ class RadarRepository:
         provider: str,
         scan_id: int | None,
         early_cutoff: float | None,
-    ) -> int:
+    ) -> StoredTx:
         """Store one normalized transaction, its flows and the wallet-entry roll-up in one
-        transaction. Returns the number of new flows (0 for a repeat)."""
+        transaction (nothing for a repeat). A block time ahead of `fetched_at` by at most
+        ``CHAIN_CLOCK_TOLERANCE_S`` is stored raw with ``chain_clock_ahead_s``; further ahead
+        raises `RadarCausalityError`."""
+        ahead: float | None = None
         if tx.block_time is not None and tx.block_time > fetched_at:
-            raise RadarCausalityError(f"{tx.signature}: block time is after fetch time")
+            ahead = tx.block_time - fetched_at
+            if ahead > CHAIN_CLOCK_TOLERANCE_S:
+                raise RadarCausalityError(
+                    f"{tx.signature}: block time {tx.block_time} is {ahead:.3f}s after fetch "
+                    f"time {fetched_at} (chain-clock tolerance {CHAIN_CLOCK_TOLERANCE_S}s)"
+                )
+        event_time = effective_time(tx.block_time, fetched_at)
         is_early: int | None = None
-        if early_cutoff is not None and tx.block_time is not None:
-            is_early = int(tx.block_time <= early_cutoff)
+        if early_cutoff is not None and event_time is not None:
+            is_early = int(event_time <= early_cutoff)
         with self._lock, self.db() as conn:
             cur = conn.execute(
                 "INSERT OR IGNORE INTO radar_tx (canonical_id, signature, slot, block_time, "
-                "fetched_at, fee_payer, failed, scan_id, provider) VALUES (?,?,?,?,?,?,?,?,?)",
+                "fetched_at, fee_payer, failed, scan_id, provider, chain_clock_ahead_s) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     canonical_id,
                     tx.signature,
@@ -673,23 +737,25 @@ class RadarRepository:
                     int(tx.failed),
                     scan_id,
                     provider,
+                    ahead,
                 ),  # fmt: skip
             )
             if cur.rowcount == 0:
-                return 0
+                return StoredTx(False, 0, None)
             for f in tx.flows:
                 conn.execute(
                     "INSERT OR IGNORE INTO radar_wallet_flows (canonical_id, signature, wallet, "
                     "direction, amount_raw, counterparty, participant, signer, block_time, "
-                    "fetched_at, is_early, scan_id, provider) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "fetched_at, is_early, scan_id, provider, chain_clock_ahead_s) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (canonical_id, tx.signature, f.wallet, f.direction, str(f.amount_raw),
                      f.counterparty, f.participant, int(f.signer), tx.block_time, fetched_at,
-                     is_early, scan_id, provider),
+                     is_early, scan_id, provider, ahead),
                 )  # fmt: skip
                 if f.participant in ENTRY_PARTICIPANTS:
                     self._roll_up(conn, canonical_id, f.wallet, f.direction, f.participant,
                                   tx.block_time, fetched_at, is_early == 1)  # fmt: skip
-            return len(tx.flows)
+            return StoredTx(True, len(tx.flows), ahead)
 
     # --- holders --------------------------------------------------------------------------
 
@@ -885,12 +951,13 @@ class RadarRepository:
 
     @staticmethod
     def _resolve_entry(r: Sequence[Any], as_of: float) -> tuple[float | None, str, float]:
-        """(block time, direction, when Radar learned it) as known at `as_of`: the revision
-        only once ``revised_at <= as_of``, otherwise the first-learned values."""
+        """(effective block time, direction, when Radar learned it) as known at `as_of`: the
+        revision only once ``revised_at <= as_of``, otherwise the first-learned values. The
+        block time is capped at when Radar learned it (`effective_time`)."""
         first_bt, first_dir, first_at, rev_bt, rev_dir, rev_at = r[2], r[3], r[4], r[5], r[6], r[7]
         if rev_at is not None and rev_at <= as_of:
-            return rev_bt, rev_dir, rev_at
-        return first_bt, first_dir, first_at
+            return effective_time(rev_bt, rev_at), rev_dir, rev_at
+        return effective_time(first_bt, first_at), first_dir, first_at
 
     def _entries(self, sql_where: str, args: Sequence[Any], as_of: float) -> list[EntryRow]:
         rows = (
@@ -938,10 +1005,12 @@ class RadarRepository:
                     None if r[7] is None else bool(r[7]),
                     r[8],
                     bool(r[9]),
+                    r[10],
                 )  # fmt: skip
                 for r in conn.execute(
                     "SELECT signature, wallet, direction, amount_raw, counterparty, block_time, "
-                    "fetched_at, is_early, participant, signer FROM radar_wallet_flows WHERE "
+                    "fetched_at, is_early, participant, signer, chain_clock_ahead_s FROM "
+                    "radar_wallet_flows WHERE "
                     "canonical_id = ? AND fetched_at <= ? ORDER BY block_time, signature, wallet",
                     (canonical_id, as_of),
                 )
@@ -965,7 +1034,7 @@ class RadarRepository:
                     "SELECT id, kind, started_at, fetched_at, status, signatures_listed, "
                     "txs_parsed, txs_skipped, reached_oldest, window_from, window_to, "
                     "reasons_json FROM radar_scans WHERE canonical_id = ? AND fetched_at <= ? "
-                    "ORDER BY fetched_at, id",
+                    "AND status != 'RUNNING' ORDER BY fetched_at, id",  # unfinished: never read
                     (canonical_id, as_of),
                 )
             ]

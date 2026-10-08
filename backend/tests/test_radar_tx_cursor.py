@@ -234,7 +234,8 @@ def test_retry_recovers_unprocessed_signatures_without_duplicates(tmp_path: Any)
     # A retry that re-reads already-stored transactions (cursor lost) stores nothing new.
     parsed = parse_transaction(pool_tx(7), MINT, POOL)
     assert parsed is not None
-    assert svc.repo.record_tx(CID, parsed, clock.now().timestamp(), "Helius", None, None) == 0
+    again = svc.repo.record_tx(CID, parsed, clock.now().timestamp(), "Helius", None, None)
+    assert not again.inserted and again.flows == 0
     conn = sqlite3.connect(svc.settings.db_path)
     with conn:
         conn.execute("UPDATE radar_targets SET last_signature = NULL")

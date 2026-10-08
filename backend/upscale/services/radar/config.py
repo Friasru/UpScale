@@ -33,7 +33,8 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SNAPSHOT_SCHEMA = "radar.snapshot.v1"
-DB_SCHEMA_VERSION = 1
+# 2: chain_clock_ahead_s and the chain-clock tolerance CHECKs (1 is refused, not migrated).
+DB_SCHEMA_VERSION = 2
 
 # Retention floors: an override below these is raised to the floor.
 TX_RETENTION_FLOOR_DAYS = 3

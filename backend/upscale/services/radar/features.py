@@ -21,6 +21,12 @@ Rules that keep it honest:
   liquidity actions are ``NOT_SUPPORTED`` in V1.
 * Cross-token comparisons (repeated wallets, groups) only cover tokens Radar tracked, so
   they are lower bounds with that selection bias stated.
+* Event times are ``min(block_time, fetched_at)`` (`FlowRow.event_time`): a chain clock
+  ahead of Radar's (within ``CHAIN_CLOCK_TOLERANCE_S``) never puts an event after the
+  moment Radar learned it. Raw block times stay in storage; ``activity.chain_clock_lead``
+  reports when the tolerance was used.
+* ``RUNNING`` scans are never inputs. An ``ABORTED`` scan makes activity ``PARTIAL`` but
+  its listed / skipped counts aren't added (the retry lists the same signatures again).
 """
 
 from collections import defaultdict
@@ -29,12 +35,14 @@ from typing import Any
 
 from upscale.services.radar.config import SNAPSHOT_SCHEMA, RadarSettings
 from upscale.services.radar.models import (
+    CHAIN_CLOCK_TOLERANCE_S,
     VALUED,
     Metric,
     RadarCausalityError,
     Status,
     Target,
     available,
+    effective_time,
     iso,
     missing,
     partial,
@@ -349,7 +357,9 @@ def _activity(inp: Inputs, run: Mapping[str, Any], roles: Roles) -> dict[str, An
                   and f.counterparty == "TRACKED_POOL_COUNTERPARTY"}  # fmt: skip
     matched_out = {f.wallet for f in flows if f.direction == "TOKEN_OUTFLOW"
                    and f.counterparty == "TRACKED_POOL_COUNTERPARTY"}  # fmt: skip
-    times = [f.block_time for f in window if f.block_time is not None]
+    times = [t for f in window if (t := f.event_time) is not None]
+    leads = [f.chain_clock_ahead_s for f in window if f.chain_clock_ahead_s is not None]
+    counted = [s for s in scans if s.status != "ABORTED"]
     net = (
         available(len(inflow) - len(outflow))
         if status == "AVAILABLE"
@@ -362,9 +372,16 @@ def _activity(inp: Inputs, run: Mapping[str, Any], roles: Roles) -> dict[str, An
         "window_since": iso(inp.previous_snapshot_at),
         "first_block_time": iso(min(times)) if times else None,
         "last_block_time": iso(max(times)) if times else None,
-        "signatures_listed": sum(s.signatures_listed for s in scans),
+        "signatures_listed": sum(s.signatures_listed for s in counted),
         "transactions_parsed": sum(s.txs_parsed for s in scans),
-        "transactions_skipped": sum(s.txs_skipped for s in scans),
+        "transactions_skipped": sum(s.txs_skipped for s in counted),
+        "chain_clock_lead": {
+            "flows": len(leads),
+            "max_ahead_s": _round(max(leads)) if leads else None,
+            "tolerance_s": CHAIN_CLOCK_TOLERANCE_S,
+            "note": "chain clock ahead of local observation clock within tolerance; event "
+            "times use min(block_time, fetched_at)",
+        },
         "participants": roles.summary(window),
         "interacting_wallets": _m(_count(status, len(inflow | outflow), why)),
         "token_inflow_wallets": _m(_count(status, len(inflow), why)),
@@ -389,7 +406,9 @@ def _early_cutoff(target: Target, inp: Inputs, settings: RadarSettings) -> float
     start = target.pool_created_at
     if start is None:
         cand = inp.creators.get("POOL_CREATOR_CANDIDATE")
-        start = cand.block_time if cand and cand.identity else None
+        start = (
+            effective_time(cand.block_time, cand.determined_at) if cand and cand.identity else None
+        )
     return start + settings.early_window_minutes * 60 if start is not None else None
 
 
@@ -401,7 +420,7 @@ def _early(target: Target, inp: Inputs, settings: RadarSettings, roles: Roles) -
     if cutoff is None:
         why = "the pool's creation time is unknown"
         return {"window_end": None, **{k: _m(missing("UNAVAILABLE", why)) for k in keys}}
-    in_window = [f for f in inp.flows if f.block_time is not None and f.block_time <= cutoff]
+    in_window = [f for f in inp.flows if (t := f.event_time) is not None and t <= cutoff]
     early = roles.eligible(in_window)
     early_scans = [s for s in inp.scans if s.kind == "early"]
     covered = [s for s in inp.scans if s.reached_oldest]
@@ -473,8 +492,8 @@ def timing_clusters(
     kept when at least `min_wallets` distinct wallets fall in [start, start + window].
     Returns (start block time, distinct wallets), oldest first. Deterministic."""
     events = sorted(
-        (f.block_time, f.wallet) for f in flows
-        if f.direction == "TOKEN_INFLOW" and f.block_time is not None
+        (t, f.wallet) for f in flows
+        if f.direction == "TOKEN_INFLOW" and (t := f.event_time) is not None
     )  # fmt: skip
     out: list[tuple[float, int]] = []
     i = 0

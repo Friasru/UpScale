@@ -14,7 +14,9 @@ Steps (all through Radar's own guarded provider):
    and the batch goes on; a provider-wide failure (rate limit, auth, timeout, outage, budget)
    aborts it. The cursor only advances when the batch finished: after an abort it stays
    put, so the next scan lists the unhandled signatures again (already-stored ones are
-   filtered out, and storage is idempotent).
+   filtered out, and storage is idempotent). An exception inside a scan (e.g. a
+   `RadarCausalityError`) finishes it ``ABORTED`` with the reason, leaves the cursor and
+   ``last_scan_at`` alone and propagates, so no snapshot is saved from that run.
 3. **Early history** (once per target): page the pool's signatures back to its first
    transaction within ``early_max_sig_pages``. If reached, the first ``early_max_tx``
    successful transactions are parsed and the oldest one's fee payer is stored as the
@@ -35,17 +37,19 @@ from typing import Any
 from upscale.services.market_data import AssetNotFoundError, MarketDataError
 from upscale.services.radar.config import RadarSettings
 from upscale.services.radar.models import (
+    CHAIN_CLOCK_TOLERANCE_S,
     ParsedTx,
     RadarTxUnavailableError,
     RadarUnavailableError,
     SignatureInfo,
     Status,
     Target,
+    effective_time,
     ts,
 )
 from upscale.services.radar.parsing import classify, first_funder, parse_transaction
 from upscale.services.radar.provider import RadarProvider
-from upscale.services.radar.repository import RadarRepository
+from upscale.services.radar.repository import RadarRepository, StoredTx
 from upscale.services.solana_chain import (
     SYSTEM_PROGRAM,
     AccountRecord,
@@ -78,6 +82,36 @@ def failure_status(exc: MarketDataError) -> Status:
 
 
 @dataclass
+class _ScanTally:
+    """What one scan stored: parsed transactions and chain-clock tolerance use."""
+
+    parsed: int = 0
+    lead_txs: int = 0
+    lead_flows: int = 0
+    lead_max_s: float = 0.0
+
+    def add(self, tx: ParsedTx, stored: StoredTx) -> None:
+        if not stored.inserted:
+            return
+        self.parsed += not tx.failed
+        if stored.chain_clock_ahead_s is not None:
+            self.lead_txs += 1
+            self.lead_flows += stored.flows
+            self.lead_max_s = max(self.lead_max_s, stored.chain_clock_ahead_s)
+
+    def note(self) -> list[str]:
+        """A note, not a failure: the scan's status doesn't change because of it."""
+        if not self.lead_txs:
+            return []
+        return [
+            f"chain clock ahead of local observation clock within {CHAIN_CLOCK_TOLERANCE_S}s "
+            f"tolerance: {self.lead_txs} transaction(s), {self.lead_flows} flow(s), max "
+            f"{self.lead_max_s:.3f}s ahead (raw block times kept; features use "
+            "min(block_time, fetched_at))"
+        ]
+
+
+@dataclass
 class _Listing:
     signatures: list[SignatureInfo]
     pages: int
@@ -98,6 +132,7 @@ class Collector:
         self._now = now
         # Every Radar target's pool: their vault owners are pools, never wallets.
         self.known_pools = frozenset(t.pool_address for t in repo.targets())
+        self._tally = _ScanTally()  # the running scan's
 
     def _t(self) -> float:
         return ts(self._now())
@@ -139,7 +174,11 @@ class Collector:
         start = target.pool_created_at
         if start is None:
             cand = self.repo.creator(target.canonical_id, "POOL_CREATOR_CANDIDATE")
-            start = cand.block_time if cand and cand.identity else None
+            start = (
+                effective_time(cand.block_time, cand.determined_at)
+                if cand and cand.identity
+                else None
+            )
         return start + self.settings.early_window_minutes * 60 if start is not None else None
 
     # --- 1. holders ---------------------------------------------------------------------
@@ -255,10 +294,34 @@ class Collector:
                 f"({s.max_tx_per_snapshot}) were not parsed"
             )
         cutoff = self.early_cutoff(target)
+        times = [x.block_time for x in sigs if x.block_time is not None]
+        window = (min(times) if times else None, max(times) if times else None)
         scan_id = self.repo.record_scan(
             target.canonical_id, "activity", started_at, started_at, self.provider.name,
             "RUNNING", len(sigs), 0, 0, False, (None, None), [],
         )  # fmt: skip
+        self._tally = _ScanTally()
+        try:
+            return await self._activity_batch(target, sigs, listing.complete, fresh, chosen,
+                                              skipped, reasons, cutoff, scan_id, window, start)  # fmt: skip
+        except BaseException as exc:  # never leave the scan RUNNING; the cursor stays put
+            self._abort_scan(scan_id, exc, len(chosen), window)
+            raise
+
+    async def _activity_batch(
+        self,
+        target: Target,
+        sigs: list[SignatureInfo],
+        complete: bool,
+        fresh: list[SignatureInfo],
+        chosen: list[SignatureInfo],
+        skipped: int,
+        reasons: list[str],
+        cutoff: float | None,
+        scan_id: int,
+        window: tuple[float | None, float | None],
+        start: int,
+    ) -> StepResult:
         for x in fresh:
             if x.failed:  # no balance change; recorded without a request
                 self._store(target, ParsedTx(x.signature, x.slot, x.block_time, None, True, (),
@@ -280,9 +343,9 @@ class Collector:
         status: Status = "AVAILABLE" if not reasons else "PARTIAL"
         if failure is not None and parsed == 0 and chosen:
             status = failure[0]
-        times = [x.block_time for x in sigs if x.block_time is not None]
-        self._finish_scan(scan_id, status, parsed, skipped, listing.complete and target.last_signature is None,
-                          (min(times) if times else None, max(times) if times else None), reasons)  # fmt: skip
+        reasons += self._tally.note()
+        self._finish_scan(scan_id, status, parsed, skipped, complete and target.last_signature is None,
+                          window, reasons)  # fmt: skip
         # Only a finished batch moves the cursor: past it, the next listing can't reach
         # anything older, so an aborted batch's unhandled signatures would be lost. A finished
         # scan that listed nothing new still counts as a recent scan (last_scan_at) but keeps
@@ -292,10 +355,30 @@ class Collector:
             self.repo.advance_cursor(target.canonical_id, newest, self._t())
         return StepResult(status, reasons, self._used() - start)
 
-    def _store(self, target: Target, tx: ParsedTx, scan_id: int, cutoff: float | None) -> int:
-        return self.repo.record_tx(
+    def _store(self, target: Target, tx: ParsedTx, scan_id: int, cutoff: float | None) -> StoredTx:
+        stored = self.repo.record_tx(
             target.canonical_id, tx, self._t(), self.provider.name, scan_id, cutoff
         )
+        self._tally.add(tx, stored)
+        return stored
+
+    def _abort_scan(
+        self,
+        scan_id: int,
+        exc: BaseException,
+        selected: int,
+        window: tuple[float | None, float | None],
+    ) -> None:
+        """Finish an interrupted scan ``ABORTED`` (terminal) with its reason. The cursor,
+        ``last_scan_at`` and early status are left alone, so the next run retries; what was
+        stored before the abort stays (storage is idempotent)."""
+        parsed = self._tally.parsed
+        why = (
+            f"aborted: {type(exc).__name__}: {exc}; the cursor wasn't advanced, so the next "
+            "scan retries"
+        )
+        self.repo.finish_scan(scan_id, "ABORTED", parsed, max(selected - parsed, 0), False,
+                              window, [why, *self._tally.note()], self._t())  # fmt: skip
 
     async def _parse_many(
         self, target: Target, sigs: list[SignatureInfo], scan_id: int, cutoff: float | None
@@ -350,6 +433,18 @@ class Collector:
             target.canonical_id, "early", started_at, started_at, self.provider.name, "RUNNING",
             len(listing.signatures), 0, 0, listing.complete, (None, None), [],
         )  # fmt: skip
+        self._tally = _ScanTally()
+        try:
+            return await self._early_batch(target, listing, scan_id, start)
+        except BaseException as exc:  # never leave the scan RUNNING; early status stays unset
+            self._abort_scan(scan_id, exc, min(len(listing.signatures), s.effective_early_max_tx),
+                             (None, None))  # fmt: skip
+            raise
+
+    async def _early_batch(
+        self, target: Target, listing: _Listing, scan_id: int, start: int
+    ) -> StepResult:
+        s, pages = self.settings, self.settings.effective_early_sig_pages
         if not listing.complete:
             why = (
                 f"the pool's first transaction is beyond the history cap "
@@ -384,8 +479,9 @@ class Collector:
                 continue
             if creator is None:
                 creator = tx
-                if cutoff is None and tx.block_time is not None:
-                    cutoff = tx.block_time + s.early_window_minutes * 60
+                first = effective_time(tx.block_time, self._t())
+                if cutoff is None and first is not None:
+                    cutoff = first + s.early_window_minutes * 60
             self._store(target, tx, scan_id, cutoff)
             parsed += 1
         if creator is None:
@@ -413,6 +509,7 @@ class Collector:
         if failure is not None:
             reasons.append(f"stopped early: {failure[1]}")
         status = "AVAILABLE" if not reasons else "PARTIAL"
+        reasons += self._tally.note()
         times = [x.block_time for x in chosen if x.block_time is not None]
         self._finish_scan(scan_id, status, parsed, skipped, True,
                           (min(times) if times else None, max(times) if times else None), reasons)  # fmt: skip
@@ -510,7 +607,7 @@ class Collector:
         cutoff = self.early_cutoff(target)
         early = sorted(
             {f.wallet for f in inp.flows if f.participant == "NORMAL_WALLET"
-             and cutoff is not None and f.block_time is not None and f.block_time <= cutoff}
+             and cutoff is not None and f.event_time is not None and f.event_time <= cutoff}
         )  # fmt: skip
         return list(dict.fromkeys(large + early))
 

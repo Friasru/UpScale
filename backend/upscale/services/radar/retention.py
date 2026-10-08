@@ -8,6 +8,7 @@ neither used nor changed).
 | radar_snapshots, radar_holder_snapshots       | 30 days      |
 | radar_requests                                | 90 days      |
 | radar_targets, radar_wallet_entries, radar_wallets, radar_creators, radar_meta | forever |
+| radar_activity_gaps (open and closed: signature-coverage history) | forever |
 
 Protections (never deleted, whatever their age):
 

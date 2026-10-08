@@ -16,6 +16,7 @@ Environment (all optional):
   ``UPSCALE_RADAR_MAX_RETRIES`` (2), ``UPSCALE_RADAR_COOLDOWN_SECONDS`` (900),
   ``UPSCALE_RADAR_MAX_COOLDOWN_SECONDS`` (7200)
 * ``UPSCALE_RADAR_HOLDER_MAX_PAGES`` (2), ``UPSCALE_RADAR_MAX_TX_PER_SNAPSHOT`` (40),
+  ``UPSCALE_RADAR_ACTIVITY_CATCHUP_MAX_PAGES`` (2; 0 disables catch-up, gaps stay reported),
   ``UPSCALE_RADAR_EARLY_MAX_SIG_PAGES`` (1), ``UPSCALE_RADAR_EARLY_MAX_TX`` (20),
   ``UPSCALE_RADAR_VERIFY_DEPLOYER`` (1), ``UPSCALE_RADAR_DEPLOYER_MAX_SIG_PAGES`` (1)
 * ``UPSCALE_RADAR_DEEP_BACKFILL`` (0), ``UPSCALE_RADAR_WALLET_AGE`` (0),
@@ -33,8 +34,10 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SNAPSHOT_SCHEMA = "radar.snapshot.v1"
-# 2: chain_clock_ahead_s and the chain-clock tolerance CHECKs (1 is refused, not migrated).
-DB_SCHEMA_VERSION = 2
+# 2: chain_clock_ahead_s and the chain-clock tolerance CHECKs.
+# 3: radar_activity_gaps and structured listing coverage on radar_scans.
+# Older versions are refused, not migrated.
+DB_SCHEMA_VERSION = 3
 
 # Retention floors: an override below these is raised to the floor.
 TX_RETENTION_FLOOR_DAYS = 3
@@ -69,6 +72,8 @@ class RadarSettings(BaseModel):
     owner_lookups: int = Field(default=30, ge=0, le=100)
     signature_page_size: int = Field(default=1000, ge=1, le=1000)
     activity_max_sig_pages: int = Field(default=1, ge=1, le=10)
+    # Extra signature pages per scan spent traversing open activity gaps (oldest first).
+    activity_catchup_max_pages: int = Field(default=2, ge=0, le=10)
     max_tx_per_snapshot: int = Field(default=40, ge=0, le=1000)
     early_max_sig_pages: int = Field(default=1, ge=0, le=10)
     early_max_tx: int = Field(default=20, ge=0, le=500)
@@ -143,6 +148,7 @@ _INTS = {
     "max_retries": "UPSCALE_RADAR_MAX_RETRIES",
     "holder_max_pages": "UPSCALE_RADAR_HOLDER_MAX_PAGES",
     "max_tx_per_snapshot": "UPSCALE_RADAR_MAX_TX_PER_SNAPSHOT",
+    "activity_catchup_max_pages": "UPSCALE_RADAR_ACTIVITY_CATCHUP_MAX_PAGES",
     "early_max_sig_pages": "UPSCALE_RADAR_EARLY_MAX_SIG_PAGES",
     "early_max_tx": "UPSCALE_RADAR_EARLY_MAX_TX",
     "deployer_max_sig_pages": "UPSCALE_RADAR_DEPLOYER_MAX_SIG_PAGES",

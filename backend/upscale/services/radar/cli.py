@@ -197,6 +197,11 @@ def snapshot_text(body: dict[str, Any]) -> str:
         f"{_metric(lg['large_wallet_exit_count'])}",
         f"activity since {a['window_since'] or 'tracking start'}: {a['transactions_parsed']} tx "
         f"parsed, {a['transactions_skipped']} skipped",
+        f"  signature listing: {'complete' if a['signature_coverage']['incremental_complete'] else 'INCOMPLETE'} "
+        f"({a['signature_coverage']['open_gap_count']} open gap(s), "
+        f"{a['signature_coverage']['catchup_pages_processed']} catch-up page(s)); parse: "
+        f"{'complete' if a['parse_coverage']['complete'] else 'PARTIAL'} "
+        f"({a['parse_coverage']['transactions_beyond_cap']} beyond the cap)",
         f"  interacting_wallets: {_metric(a['interacting_wallets'])}",
         f"  TOKEN_INFLOW wallets: {_metric(a['token_inflow_wallets'])}   TOKEN_OUTFLOW wallets: "
         f"{_metric(a['token_outflow_wallets'])}",

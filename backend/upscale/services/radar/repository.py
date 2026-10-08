@@ -18,7 +18,18 @@ Tables:
 * ``radar_targets``: tracked tokens (canonical id, mint, pool) plus the activity cursor.
 * ``radar_scans``: one row per bounded scan (activity / early), with its coverage. A scan
   is ``RUNNING`` only while it runs (snapshots never read one); an exception inside it
-  finishes it ``ABORTED`` with the reason.
+  finishes it ``ABORTED`` with the reason. Activity scans also record their signature
+  *listing* coverage (did the head listing reach the prior cursor, which gap it opened,
+  catch-up pages, gaps closed / still open; ``listing_reasons_json``) apart from their
+  *parse* coverage (``txs_parsed`` / ``txs_skipped`` / ``txs_beyond_cap``; ``reasons_json``).
+* ``radar_activity_gaps``: pool-signature ranges an incremental head listing couldn't
+  traverse (more new signatures than its page cap): ``OPEN`` with ``before_signature``
+  (the oldest signature accounted for so far, moving older as catch-up pages are
+  accounted) and ``until_signature`` (the head cursor when the gap opened; fixed), then
+  ``CLOSED`` once a catch-up listing reaches ``until_signature`` and a confirmation
+  listing proves it (``before`` = the last accounted signature, ``limit`` 1, no ``until``,
+  returns exactly ``until_signature``; a short or empty page alone never closes a gap). A target may have several
+  open gaps; a gap is never overwritten, reopened or deleted.
 * ``radar_tx``: normalized transactions (signature, slot, block time, fee payer).
 * ``radar_wallet_flows``: per wallet, per transaction ``TOKEN_INFLOW`` / ``TOKEN_OUTFLOW``.
 * ``radar_wallet_entries``: long-lived roll-up per (participant, token) for
@@ -52,6 +63,8 @@ from upscale.services.radar.models import (
     ParsedTx,
     RadarCausalityError,
     RadarSchemaError,
+    RadarStateError,
+    SignatureInfo,
     Target,
     effective_time,
 )
@@ -91,9 +104,53 @@ CREATE TABLE IF NOT EXISTS radar_scans (
     window_from REAL,
     window_to REAL,
     reasons_json TEXT NOT NULL,
-    CHECK (started_at <= fetched_at)
+    head_listing_complete INTEGER,
+    head_reached_cursor INTEGER,
+    gap_opened_id INTEGER,
+    txs_beyond_cap INTEGER NOT NULL DEFAULT 0,
+    catchup_pages_attempted INTEGER NOT NULL DEFAULT 0,
+    catchup_pages_completed INTEGER NOT NULL DEFAULT 0,
+    catchup_signatures_listed INTEGER NOT NULL DEFAULT 0,
+    gaps_closed INTEGER NOT NULL DEFAULT 0,
+    boundary_confirmations_attempted INTEGER NOT NULL DEFAULT 0,
+    boundary_confirmations_succeeded INTEGER NOT NULL DEFAULT 0,
+    gaps_open INTEGER,
+    listing_reasons_json TEXT NOT NULL DEFAULT '[]',
+    CHECK (started_at <= fetched_at),
+    CHECK (catchup_pages_completed <= catchup_pages_attempted),
+    CHECK (boundary_confirmations_succeeded <= boundary_confirmations_attempted),
+    CHECK (boundary_confirmations_attempted <= catchup_pages_attempted)
 );
 CREATE INDEX IF NOT EXISTS radar_scans_by_target ON radar_scans (canonical_id, fetched_at);
+CREATE TABLE IF NOT EXISTS radar_activity_gaps (
+    id INTEGER PRIMARY KEY,
+    canonical_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED')),
+    opened_at REAL NOT NULL,
+    opened_scan_id INTEGER NOT NULL,
+    updated_at REAL NOT NULL,
+    closed_at REAL,
+    closed_scan_id INTEGER,
+    before_signature TEXT NOT NULL,
+    before_block_time REAL,
+    until_signature TEXT NOT NULL,
+    until_block_time REAL,
+    pages_processed INTEGER NOT NULL DEFAULT 0,
+    signatures_accounted INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL,
+    UNIQUE (canonical_id, until_signature),
+    CHECK (updated_at >= opened_at),
+    CHECK ((status = 'CLOSED') = (closed_at IS NOT NULL)),
+    CHECK ((status = 'CLOSED') = (closed_scan_id IS NOT NULL)),
+    CHECK (closed_at IS NULL OR closed_at = updated_at)
+);
+CREATE INDEX IF NOT EXISTS radar_gaps_by_target
+    ON radar_activity_gaps (canonical_id, status, opened_at);
+CREATE TRIGGER IF NOT EXISTS radar_activity_gaps_final BEFORE UPDATE ON radar_activity_gaps
+WHEN OLD.status = 'CLOSED' OR NEW.canonical_id != OLD.canonical_id
+    OR NEW.until_signature != OLD.until_signature OR NEW.opened_at != OLD.opened_at
+    OR NEW.opened_scan_id != OLD.opened_scan_id
+BEGIN SELECT RAISE(ABORT, 'radar_activity_gaps: a closed gap and a gap''s bounds are final'); END;
 CREATE TABLE IF NOT EXISTS radar_tx (
     canonical_id TEXT NOT NULL,
     signature TEXT NOT NULL,
@@ -230,7 +287,8 @@ _CLOCK_CHECKS = f"""CHECK (block_time IS NULL OR block_time - fetched_at <= {CHA
     CHECK (chain_clock_ahead_s IS NULL OR chain_clock_ahead_s = block_time - fetched_at)"""
 _SCHEMA = _SCHEMA.replace("{CLOCK_CHECKS}", _CLOCK_CHECKS)
 TABLES = (
-    "radar_meta", "radar_targets", "radar_scans", "radar_tx", "radar_wallet_flows",
+    "radar_meta", "radar_targets", "radar_scans", "radar_activity_gaps", "radar_tx",
+    "radar_wallet_flows",
     "radar_wallet_entries", "radar_holder_snapshots", "radar_holder_balances",
     "radar_creators", "radar_wallets", "radar_snapshots", "radar_requests",
 )  # fmt: skip
@@ -291,7 +349,70 @@ class ScanRow:
     reached_oldest: bool
     window_from: float | None
     window_to: float | None
-    reasons: list[str]
+    reasons: list[str]  # parse / collection reasons (never signature-gap state)
+    # Signature listing coverage (activity scans; None / 0 for early scans).
+    head_listing_complete: bool | None = None
+    head_reached_cursor: bool | None = None  # None: no prior cursor (a first scan)
+    gap_opened_id: int | None = None
+    txs_beyond_cap: int = 0
+    catchup_pages_attempted: int = 0
+    catchup_pages_completed: int = 0
+    catchup_signatures_listed: int = 0
+    gaps_closed: int = 0
+    gaps_open: int | None = None  # open gaps of the target when the scan finished
+    boundary_confirmations_attempted: int = 0
+    boundary_confirmations_succeeded: int = 0
+    listing_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ListingCoverage:
+    """One activity scan's signature-listing coverage, kept apart from its parse coverage:
+    listing continuity says which signatures were traversed, never that they were parsed."""
+
+    head_listing_complete: bool = True  # the head listing ended on a short page
+    head_reached_cursor: bool | None = None  # None: there was no prior cursor
+    txs_beyond_cap: int = 0  # successful transactions listed but not parsed (cap)
+    catchup_pages_attempted: int = 0
+    catchup_pages_completed: int = 0  # accounted for, so their gap moved or closed
+    catchup_signatures_listed: int = 0
+    gaps_closed: int = 0
+    # Gap closure proofs: one request per short catch-up page; a gap closes only on success.
+    boundary_confirmations_attempted: int = 0
+    boundary_confirmations_succeeded: int = 0
+    listing_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class NewGap:
+    """The range a capped incremental head listing left untraversed."""
+
+    before: SignatureInfo  # the head listing's oldest signature
+    until: str  # the prior head cursor
+    reason: str
+
+
+@dataclass(frozen=True)
+class GapRow:
+    """An open gap's current state (collection only; snapshots read `GapAsOf`)."""
+
+    id: int
+    opened_at: float
+    before_signature: str
+    until_signature: str
+    pages_processed: int
+    signatures_accounted: int
+
+
+@dataclass(frozen=True)
+class GapAsOf:
+    """A gap as known at a read time: only its immutable fields and when it closed."""
+
+    id: int
+    opened_at: float
+    closed_at: float | None  # None while still open at the read time
+    until_block_time: float | None  # block time of the gap's older bound, when stored
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -341,6 +462,7 @@ class Inputs:
     scans: list[ScanRow] = field(default_factory=list)
     creators: dict[str, CreatorRow] = field(default_factory=dict)
     previous_snapshot_at: float | None = None
+    gaps: list[GapAsOf] = field(default_factory=list)  # opened at or before as_of
     entries: list[EntryRow] = field(default_factory=list)  # this token
     other_entries: list[EntryRow] = field(default_factory=list)  # other tokens, same wallets
     profiles: dict[str, WalletProfile] = field(default_factory=dict)
@@ -380,7 +502,7 @@ def _require_compatible(conn: sqlite3.Connection, path: str) -> None:
     if found != str(DB_SCHEMA_VERSION):
         raise RadarSchemaError(
             f"{path} is a Radar database with schema version {found or 'unknown'}; this Radar "
-            f"needs version {DB_SCHEMA_VERSION} (chain-clock tolerance columns and checks). "
+            f"needs version {DB_SCHEMA_VERSION} (activity gaps and listing coverage). "
             "It isn't migrated: start a fresh Radar database (UPSCALE_RADAR_DB) and keep the "
             "old file for reference."
         )
@@ -540,14 +662,6 @@ class RadarRepository:
             rows = self.db().execute(sql + " ORDER BY selected_at, canonical_id", args).fetchall()
         return [self._target(r) for r in rows]
 
-    def advance_cursor(self, canonical_id: str, signature: str | None, at: float) -> None:
-        with self._lock, self.db() as conn:
-            conn.execute(
-                "UPDATE radar_targets SET last_signature = COALESCE(?, last_signature), "
-                "last_scan_at = ? WHERE canonical_id = ?",
-                (signature, at, canonical_id),
-            )
-
     def set_early_status(self, canonical_id: str, status: str, at: float) -> None:
         with self._lock, self.db() as conn:
             conn.execute(
@@ -622,24 +736,159 @@ class RadarRepository:
         window: tuple[float | None, float | None],
         reasons: Sequence[str],
         fetched_at: float,
+        listing: ListingCoverage | None = None,
     ) -> None:
         with self._lock, self.db() as conn:
+            self._finish(conn, scan_id, status, parsed, skipped, reached_oldest, window,
+                         reasons, fetched_at, listing, None)  # fmt: skip
+
+    def finish_activity_scan(
+        self,
+        canonical_id: str,
+        scan_id: int,
+        status: str,
+        parsed: int,
+        skipped: int,
+        reached_oldest: bool,
+        window: tuple[float | None, float | None],
+        reasons: Sequence[str],
+        fetched_at: float,
+        listing: ListingCoverage,
+        head: str | None,
+        gap: NewGap | None,
+    ) -> int | None:
+        """Finish a scan whose head batch was accounted for, in one transaction: open `gap`
+        (if any), advance the head cursor to `head` (kept when None) and ``last_scan_at``, and
+        record the scan. The cursor never moves without its gap. Returns the new gap's id."""
+        with self._lock, self.db() as conn:
+            gap_id: int | None = None
+            if gap is not None:
+                row = conn.execute(
+                    "SELECT block_time FROM radar_tx WHERE canonical_id = ? AND signature = ?",
+                    (canonical_id, gap.until),
+                ).fetchone()
+                cur = conn.execute(
+                    "INSERT INTO radar_activity_gaps (canonical_id, status, opened_at, "
+                    "opened_scan_id, updated_at, before_signature, before_block_time, "
+                    "until_signature, until_block_time, reason) "
+                    "VALUES (?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (canonical_id, fetched_at, scan_id, fetched_at, gap.before.signature,
+                     gap.before.block_time, gap.until, row[0] if row else None, gap.reason),
+                )  # fmt: skip
+                gap_id = int(cur.lastrowid or 0)
             conn.execute(
-                "UPDATE radar_scans SET status = ?, txs_parsed = ?, txs_skipped = ?, "
-                "reached_oldest = ?, window_from = ?, window_to = ?, reasons_json = ?, "
-                "fetched_at = ? WHERE id = ?",
-                (
-                    status,
-                    parsed,
-                    skipped,
-                    int(reached_oldest),
-                    window[0],
-                    window[1],
-                    json.dumps(list(reasons)),
-                    fetched_at,
-                    scan_id,
-                ),  # fmt: skip
+                "UPDATE radar_targets SET last_signature = COALESCE(?, last_signature), "
+                "last_scan_at = ? WHERE canonical_id = ?",
+                (head, fetched_at, canonical_id),
             )
+            self._finish(conn, scan_id, status, parsed, skipped, reached_oldest, window,
+                         reasons, fetched_at, listing, gap_id)  # fmt: skip
+        return gap_id
+
+    @staticmethod
+    def _finish(
+        conn: sqlite3.Connection,
+        scan_id: int,
+        status: str,
+        parsed: int,
+        skipped: int,
+        reached_oldest: bool,
+        window: tuple[float | None, float | None],
+        reasons: Sequence[str],
+        fetched_at: float,
+        listing: ListingCoverage | None,
+        gap_id: int | None,
+    ) -> None:
+        cov = listing or ListingCoverage()
+
+        def flag(value: bool | None) -> int | None:
+            return None if listing is None or value is None else int(value)
+
+        conn.execute(
+            "UPDATE radar_scans SET status = ?, txs_parsed = ?, txs_skipped = ?, "
+            "reached_oldest = ?, window_from = ?, window_to = ?, reasons_json = ?, "
+            "fetched_at = ?, head_listing_complete = ?, head_reached_cursor = ?, "
+            "gap_opened_id = ?, txs_beyond_cap = ?, catchup_pages_attempted = ?, "
+            "catchup_pages_completed = ?, catchup_signatures_listed = ?, gaps_closed = ?, "
+            "boundary_confirmations_attempted = ?, boundary_confirmations_succeeded = ?, "
+            "listing_reasons_json = ?, gaps_open = CASE WHEN kind = 'activity' THEN (SELECT "
+            "COUNT(*) FROM radar_activity_gaps g WHERE g.canonical_id = radar_scans.canonical_id "
+            "AND g.status = 'OPEN') END WHERE id = ?",
+            (
+                status,
+                parsed,
+                skipped,
+                int(reached_oldest),
+                window[0],
+                window[1],
+                json.dumps(list(reasons)),
+                fetched_at,
+                flag(cov.head_listing_complete),
+                flag(cov.head_reached_cursor),
+                gap_id,
+                cov.txs_beyond_cap,
+                cov.catchup_pages_attempted,
+                cov.catchup_pages_completed,
+                cov.catchup_signatures_listed,
+                cov.gaps_closed,
+                cov.boundary_confirmations_attempted,
+                cov.boundary_confirmations_succeeded,
+                json.dumps(list(cov.listing_reasons)),
+                scan_id,
+            ),  # fmt: skip
+        )
+
+    # --- activity gaps --------------------------------------------------------------------
+
+    def open_gaps(self, canonical_id: str) -> list[GapRow]:
+        """The target's open gaps, oldest opened first (catch-up order)."""
+        with self._lock:
+            rows = (
+                self.db()
+                .execute(
+                    "SELECT id, opened_at, before_signature, until_signature, pages_processed, "
+                    "signatures_accounted FROM radar_activity_gaps WHERE canonical_id = ? AND "
+                    "status = 'OPEN' ORDER BY opened_at, id",
+                    (canonical_id,),
+                )
+                .fetchall()
+            )
+        return [GapRow(*r) for r in rows]
+
+    def record_gap_page(
+        self,
+        gap: GapRow,
+        signatures: int,
+        oldest: SignatureInfo | None,
+        at: float,
+        scan_id: int,
+    ) -> None:
+        """Record one accounted-for catch-up page of `gap` (listed with ``before`` =
+        ``gap.before_signature``): a full page moves ``before_signature`` to its `oldest`
+        signature and keeps the gap open; a short one (`oldest` None) closes it. Refuses a
+        gap that is no longer open at that boundary, so a page is never applied twice."""
+        with self._lock, self.db() as conn:
+            if oldest is None:
+                cur = conn.execute(
+                    "UPDATE radar_activity_gaps SET status = 'CLOSED', closed_at = ?, "
+                    "closed_scan_id = ?, updated_at = ?, pages_processed = pages_processed + 1, "
+                    "signatures_accounted = signatures_accounted + ? "
+                    "WHERE id = ? AND status = 'OPEN' AND before_signature = ?",
+                    (at, scan_id, at, signatures, gap.id, gap.before_signature),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE radar_activity_gaps SET before_signature = ?, before_block_time = ?, "
+                    "updated_at = ?, pages_processed = pages_processed + 1, "
+                    "signatures_accounted = signatures_accounted + ? "
+                    "WHERE id = ? AND status = 'OPEN' AND before_signature = ?",
+                    (oldest.signature, oldest.block_time, at, signatures, gap.id,
+                     gap.before_signature),
+                )  # fmt: skip
+            if cur.rowcount != 1:
+                raise RadarStateError(
+                    f"activity gap {gap.id} is no longer open at {gap.before_signature}"
+                )
 
     @staticmethod
     def _roll_up(
@@ -1029,12 +1278,41 @@ class RadarRepository:
                     r[9],
                     r[10],
                     json.loads(r[11]),
+                    None if r[12] is None else bool(r[12]),
+                    None if r[13] is None else bool(r[13]),
+                    r[14],
+                    r[15],
+                    r[16],
+                    r[17],
+                    r[18],
+                    r[19],
+                    r[20],
+                    r[22],
+                    r[23],
+                    json.loads(r[21]),
                 )  # fmt: skip
                 for r in conn.execute(
                     "SELECT id, kind, started_at, fetched_at, status, signatures_listed, "
                     "txs_parsed, txs_skipped, reached_oldest, window_from, window_to, "
-                    "reasons_json FROM radar_scans WHERE canonical_id = ? AND fetched_at <= ? "
+                    "reasons_json, head_listing_complete, head_reached_cursor, gap_opened_id, "
+                    "txs_beyond_cap, catchup_pages_attempted, catchup_pages_completed, "
+                    "catchup_signatures_listed, gaps_closed, gaps_open, listing_reasons_json, "
+                    "boundary_confirmations_attempted, boundary_confirmations_succeeded "
+                    "FROM radar_scans WHERE canonical_id = ? AND fetched_at <= ? "
                     "AND status != 'RUNNING' ORDER BY fetched_at, id",  # unfinished: never read
+                    (canonical_id, as_of),
+                )
+            ]
+            # Gaps mutate as catch-up advances them; only what was true at as_of is read:
+            # when a gap opened, whether it had closed by as_of, and its fixed older bound.
+            inp.gaps = [
+                GapAsOf(
+                    r[0], r[1], r[2] if r[2] is not None and r[2] <= as_of else None, r[3], r[4]
+                )  # fmt: skip
+                for r in conn.execute(
+                    "SELECT id, opened_at, closed_at, until_block_time, reason FROM "
+                    "radar_activity_gaps WHERE canonical_id = ? AND opened_at <= ? "
+                    "ORDER BY opened_at, id",
                     (canonical_id, as_of),
                 )
             ]
@@ -1066,6 +1344,8 @@ class RadarRepository:
             [f.fetched_at for f in inp.flows]
             + [h.observed_at for h in inp.holders]
             + [s.fetched_at for s in inp.scans]
+            + [g.opened_at for g in inp.gaps]
+            + [g.closed_at for g in inp.gaps if g.closed_at is not None]
             + [c.determined_at for c in inp.creators.values()]
             + [e.first_fetched_at for e in inp.entries + inp.other_entries]
             + [e.block_time_known_at for e in inp.entries + inp.other_entries]

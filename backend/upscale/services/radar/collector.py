@@ -7,16 +7,30 @@ Steps (all through Radar's own guarded provider):
    ``holder_max_pages``), analyzed by `solana_chain.analyze` (pure; no evidence emitted).
    Owners at or above ``large_holder_min_pct`` of supply are stored, plus the current
    balance of every owner that was large in the previous holder snapshot.
-2. **Activity**: the pool's new signatures since the stored cursor (one page by default),
-   then at most ``max_tx_per_snapshot`` successful transactions, newest first. Anything
-   beyond the caps makes the scan ``PARTIAL``. A transaction that can't be read on its own
-   (unsupported version, malformed, unknown to the provider) is skipped with its reason
-   and the batch goes on; a provider-wide failure (rate limit, auth, timeout, outage, budget)
-   aborts it. The cursor only advances when the batch finished: after an abort it stays
-   put, so the next scan lists the unhandled signatures again (already-stored ones are
-   filtered out, and storage is idempotent). An exception inside a scan (e.g. a
-   `RadarCausalityError`) finishes it ``ABORTED`` with the reason, leaves the cursor and
-   ``last_scan_at`` alone and propagates, so no snapshot is saved from that run.
+2. **Activity**: the pool's new signatures since the stored head cursor (one page by
+   default), then at most ``max_tx_per_snapshot`` successful transactions, newest first.
+   Anything beyond the caps makes the scan ``PARTIAL``. A transaction that can't be read on
+   its own (unsupported version, malformed, unknown to the provider) is skipped with its
+   reason and the batch goes on; a provider-wide failure (rate limit, auth, timeout,
+   outage, budget) aborts it. The cursor only advances when the batch finished: after an
+   abort it stays put, so the next scan lists the unhandled signatures again
+   (already-stored ones are filtered out, and storage is idempotent). An exception inside a
+   scan (e.g. a `RadarCausalityError`) finishes it ``ABORTED`` with the reason, leaves the
+   cursor and ``last_scan_at`` alone and propagates, so no snapshot is saved from that run.
+
+   **Listing continuity.** When an incremental head listing (a prior cursor exists) fills
+   its page cap without reaching that cursor, the untraversed range becomes an ``OPEN``
+   activity gap (``before`` = the oldest listed signature, ``until`` = the prior cursor),
+   stored in the same transaction that advances the cursor, so the cursor never leaves a
+   range behind silently. A first scan's bounded history never opens a gap. After the head
+   batch, at most ``activity_catchup_max_pages`` pages are spent on open gaps, oldest
+   opened first; a page is accounted for like a head batch (sharing its parse budget, so
+   the transaction cap is never exceeded) before its gap's ``before`` moves (full page). A
+   short page closes the gap only when one confirmation listing (``limit`` 1, no ``until``)
+   right after it returns exactly the gap's ``until``: providers answer an unknown
+   ``before`` with an empty page, so a short page alone is no proof. A failed catch-up or
+   confirmation request never closes a gap. Listing continuity is reported apart from parse coverage: a closed gap
+   doesn't make capped transactions parsed.
 3. **Early history** (once per target): page the pool's signatures back to its first
    transaction within ``early_max_sig_pages``. If reached, the first ``early_max_tx``
    successful transactions are parsed and the oldest one's fee payer is stored as the
@@ -30,7 +44,7 @@ Steps (all through Radar's own guarded provider):
 """
 
 from collections.abc import Callable, Collection
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -49,7 +63,7 @@ from upscale.services.radar.models import (
 )
 from upscale.services.radar.parsing import classify, first_funder, parse_transaction
 from upscale.services.radar.provider import RadarProvider
-from upscale.services.radar.repository import RadarRepository, StoredTx
+from upscale.services.radar.repository import ListingCoverage, NewGap, RadarRepository, StoredTx
 from upscale.services.solana_chain import (
     SYSTEM_PROGRAM,
     AccountRecord,
@@ -86,6 +100,7 @@ class _ScanTally:
     """What one scan stored: parsed transactions and chain-clock tolerance use."""
 
     parsed: int = 0
+    selected: int = 0  # successful transactions chosen for parsing (head + catch-up)
     lead_txs: int = 0
     lead_flows: int = 0
     lead_max_s: float = 0.0
@@ -109,6 +124,16 @@ class _ScanTally:
             f"{self.lead_max_s:.3f}s ahead (raw block times kept; features use "
             "min(block_time, fetched_at))"
         ]
+
+
+@dataclass
+class _CatchUp:
+    """What one scan's catch-up added (its listing coverage goes to `ListingCoverage`)."""
+
+    parsed: int = 0
+    skipped: int = 0
+    still_open: int = 0  # open gaps after catch-up (not counting one the head opens)
+    reasons: list[str] = field(default_factory=list)  # parse-coverage reasons
 
 
 @dataclass
@@ -276,18 +301,31 @@ class Collector:
         except MarketDataError as exc:
             return StepResult(failure_status(exc), [str(exc)], self._used() - start)
         sigs = listing.signatures
-        if not listing.complete:
+        prior = target.last_signature
+        cov = ListingCoverage(
+            head_listing_complete=listing.complete,
+            head_reached_cursor=None if prior is None else listing.complete,
+        )
+        gap: NewGap | None = None
+        if prior is not None and not listing.complete:
+            why = (
+                f"more than {len(sigs)} new pool signatures since the last scan (listing cap "
+                f"{s.activity_max_sig_pages} page(s)): the older ones weren't traversed and are "
+                "kept as an open activity gap for catch-up"
+            )
+            gap = NewGap(sigs[-1], prior, why)
+            cov.listing_reasons.append(why)
+        elif not listing.complete:  # a first scan: bounded history, never a gap
             reasons.append(
                 f"more than {len(sigs)} new pool signatures since the last scan "
                 f"(listing cap {s.activity_max_sig_pages} page(s)); older ones are skipped"
             )
-        if target.last_signature is None and not listing.complete:
             reasons.append("first scan: only the most recent pool activity is covered")
         known = self.repo.known_signatures(target.canonical_id, [x.signature for x in sigs])
         fresh = [x for x in sigs if x.signature not in known]
         ok = [x for x in fresh if not x.failed]
         chosen = ok[: s.max_tx_per_snapshot]
-        skipped = len(ok) - len(chosen)
+        skipped = cov.txs_beyond_cap = len(ok) - len(chosen)
         if skipped:
             reasons.append(
                 f"{skipped} successful transactions beyond the per-snapshot cap "
@@ -300,12 +338,13 @@ class Collector:
             target.canonical_id, "activity", started_at, started_at, self.provider.name,
             "RUNNING", len(sigs), 0, 0, False, (None, None), [],
         )  # fmt: skip
-        self._tally = _ScanTally()
+        self._tally = _ScanTally(selected=len(chosen))
         try:
             return await self._activity_batch(target, sigs, listing.complete, fresh, chosen,
-                                              skipped, reasons, cutoff, scan_id, window, start)  # fmt: skip
+                                              skipped, reasons, cov, gap, cutoff, scan_id,
+                                              window, start)  # fmt: skip
         except BaseException as exc:  # never leave the scan RUNNING; the cursor stays put
-            self._abort_scan(scan_id, exc, len(chosen), window)
+            self._abort_scan(scan_id, exc, window, cov)
             raise
 
     async def _activity_batch(
@@ -317,11 +356,14 @@ class Collector:
         chosen: list[SignatureInfo],
         skipped: int,
         reasons: list[str],
+        cov: ListingCoverage,
+        gap: NewGap | None,
         cutoff: float | None,
         scan_id: int,
         window: tuple[float | None, float | None],
         start: int,
     ) -> StepResult:
+        s = self.settings
         for x in fresh:
             if x.failed:  # no balance change; recorded without a request
                 self._store(target, ParsedTx(x.signature, x.slot, x.block_time, None, True, (),
@@ -333,6 +375,7 @@ class Collector:
                 f"{len(unreadable)} transaction(s) couldn't be read and were skipped: "
                 + "; ".join(f"{sig} ({why})" for sig, why in unreadable)
             )
+        reached_oldest = complete and target.last_signature is None
         if failure is not None:
             unhandled = len(chosen) - parsed - len(unreadable)
             skipped += unhandled
@@ -340,20 +383,167 @@ class Collector:
                 f"stopped early: {failure[1]}; {unhandled} selected transaction(s) were left "
                 "unprocessed, and the cursor wasn't advanced so the next scan retries them"
             )
-        status: Status = "AVAILABLE" if not reasons else "PARTIAL"
-        if failure is not None and parsed == 0 and chosen:
-            status = failure[0]
+            # The head isn't accounted for: no cursor move, no new gap, no catch-up.
+            cov.listing_reasons = []
+            if still_open := len(self.repo.open_gaps(target.canonical_id)):
+                cov.listing_reasons.append(
+                    f"{still_open} activity signature gap(s) still open: catch-up didn't run "
+                    "because the head batch stopped early"
+                )
+            status: Status = failure[0] if parsed == 0 and chosen else "PARTIAL"
+            reasons += self._tally.note()
+            self._finish_scan(scan_id, status, parsed, skipped, reached_oldest, window,
+                              reasons, cov)  # fmt: skip
+            return StepResult(status, cov.listing_reasons + reasons, self._used() - start)
+        catch = await self._catch_up(target, scan_id, cutoff, s.max_tx_per_snapshot - len(chosen), cov)  # fmt: skip
+        parsed += catch.parsed
+        skipped += catch.skipped
+        reasons += catch.reasons
+        if still_open := catch.still_open + (gap is not None):
+            pages = s.activity_catchup_max_pages
+            cov.listing_reasons.append(
+                f"{still_open} activity signature gap(s) open: older pool signatures between "
+                "scans aren't traversed yet; "
+                + (f"catch-up lists at most {pages} page(s) per scan" if pages else
+                   "catch-up is off (UPSCALE_RADAR_ACTIVITY_CATCHUP_MAX_PAGES=0)")
+            )  # fmt: skip
+        status = "AVAILABLE" if not reasons and not cov.listing_reasons else "PARTIAL"
         reasons += self._tally.note()
-        self._finish_scan(scan_id, status, parsed, skipped, complete and target.last_signature is None,
-                          window, reasons)  # fmt: skip
-        # Only a finished batch moves the cursor: past it, the next listing can't reach
-        # anything older, so an aborted batch's unhandled signatures would be lost. A finished
-        # scan that listed nothing new still counts as a recent scan (last_scan_at) but keeps
-        # the cursor; an aborted one is neither, so it's retried first.
-        if failure is None:
-            newest = sigs[0].signature if sigs else None
-            self.repo.advance_cursor(target.canonical_id, newest, self._t())
-        return StepResult(status, reasons, self._used() - start)
+        # The head batch (and every catch-up page recorded above) is accounted for: the cursor
+        # moves to the newest listed signature together with the gap it leaves behind, so
+        # nothing older becomes unreachable. A scan that listed nothing new keeps the cursor
+        # but still counts as a recent scan (last_scan_at); an aborted one is neither.
+        self.repo.finish_activity_scan(
+            target.canonical_id, scan_id, status, parsed, skipped, reached_oldest, window,
+            reasons, self._t(), cov, sigs[0].signature if sigs else None, gap,
+        )  # fmt: skip
+        return StepResult(status, cov.listing_reasons + reasons, self._used() - start)
+
+    async def _catch_up(
+        self,
+        target: Target,
+        scan_id: int,
+        cutoff: float | None,
+        budget: int,
+        cov: ListingCoverage,
+    ) -> "_CatchUp":
+        """Spend at most ``activity_catchup_max_pages`` signature pages on the target's open
+        gaps, oldest opened first. Each page is accounted for exactly like a head batch
+        (failed transactions stored, at most `budget` successful ones parsed in total, the
+        rest counted beyond the cap) before its gap moves or closes. A provider failure
+        stops catch-up and leaves that gap where it was.
+
+        A full page moves the gap. A short page (possibly empty) only closes it when one
+        confirmation request, ``before`` = the page's oldest signature (or the gap's
+        ``before`` for an empty page), ``limit`` 1 and no ``until``, returns exactly the gap's
+        ``until``; otherwise a non-empty page still moves the gap and it stays open. So a scan
+        makes at most ``activity_catchup_max_pages`` traversal requests plus as many
+        confirmation requests (at most one per short page)."""
+        s, out = self.settings, _CatchUp()
+        gaps = self.repo.open_gaps(target.canonical_id)
+        out.still_open = len(gaps)
+        pages, size = s.activity_catchup_max_pages, s.signature_page_size
+        beyond = 0
+        unreadable: list[tuple[str, str]] = []
+        failure: str | None = None
+        for gap in gaps:
+            while pages > 0 and failure is None:
+                pages -= 1
+                cov.catchup_pages_attempted += 1
+                try:
+                    page = await self.provider.get_signatures(
+                        target.pool_address, limit=size, before=gap.before_signature,
+                        until=gap.until_signature,
+                    )  # fmt: skip
+                except MarketDataError as exc:
+                    cov.listing_reasons.append(
+                        f"catch-up stopped: {exc}; activity gap {gap.id} wasn't moved, so the "
+                        "next scan retries it"
+                    )
+                    pages = 0
+                    break
+                known = self.repo.known_signatures(target.canonical_id, [x.signature for x in page])
+                fresh = [x for x in page if x.signature not in known]
+                ok = [x for x in fresh if not x.failed]
+                chosen = ok[: max(budget, 0)]
+                budget -= len(chosen)
+                beyond += len(ok) - len(chosen)
+                cov.txs_beyond_cap += len(ok) - len(chosen)
+                out.skipped += len(ok) - len(chosen)
+                self._tally.selected += len(chosen)
+                for x in fresh:
+                    if x.failed:
+                        self._store(target, ParsedTx(x.signature, x.slot, x.block_time, None,
+                                                     True, (), False, 0), scan_id, cutoff)  # fmt: skip
+                parsed, bad, failed = await self._parse_many(target, chosen, scan_id, cutoff)
+                out.parsed += parsed
+                out.skipped += len(bad)
+                unreadable += bad
+                if failed is not None:
+                    unhandled = len(chosen) - parsed - len(bad)
+                    out.skipped += unhandled
+                    failure = (
+                        f"catch-up stopped early: {failed[1]}; {unhandled} selected "
+                        f"transaction(s) were left unprocessed, and activity gap {gap.id} wasn't "
+                        "moved so the next scan retries its page"
+                    )
+                    break
+                if len(page) >= size:  # full page: the gap moves and stays open
+                    self.repo.record_gap_page(gap, len(page), page[-1], self._t(), scan_id)
+                    cov.catchup_pages_completed += 1
+                    cov.catchup_signatures_listed += len(page)
+                    gap = replace(gap, before_signature=page[-1].signature)
+                    continue
+                # A short page alone proves nothing (an unknown `before` is answered with an
+                # empty page): close only once plain backward paging from the last accounted
+                # signature returns exactly the gap's `until`. One confirmation per short page.
+                anchor = page[-1].signature if page else gap.before_signature
+                cov.boundary_confirmations_attempted += 1
+                try:
+                    probe = await self.provider.get_signatures(
+                        target.pool_address, limit=1, before=anchor
+                    )
+                except MarketDataError as exc:
+                    probe, why = None, f"the confirmation request failed ({exc})"
+                    pages = 0  # the provider is failing: no more catch-up this scan
+                else:
+                    why = "backward paging after it returned " + (
+                        probe[0].signature if probe else "no signature"
+                    )
+                if probe is not None and [x.signature for x in probe] == [gap.until_signature]:
+                    self.repo.record_gap_page(gap, len(page), None, self._t(), scan_id)
+                    cov.boundary_confirmations_succeeded += 1
+                    cov.catchup_pages_completed += 1
+                    cov.catchup_signatures_listed += len(page)
+                    cov.gaps_closed += 1
+                    out.still_open -= 1
+                    break
+                if page:  # keep the accounted progress; the boundary is retried from there
+                    self.repo.record_gap_page(gap, len(page), page[-1], self._t(), scan_id)
+                    cov.catchup_pages_completed += 1
+                    cov.catchup_signatures_listed += len(page)
+                cov.listing_reasons.append(
+                    f"activity gap {gap.id} boundary not confirmed: a short catch-up page "
+                    f"({len(page)} signature(s)) wasn't followed by {gap.until_signature} in "
+                    f"{why}; the gap stays open "
+                    + ("from that page's oldest signature" if page else "and unmoved")
+                )
+                break
+            if pages == 0 or failure is not None:
+                break
+        if beyond:
+            out.reasons.append(
+                f"{beyond} successful catch-up transactions beyond the per-snapshot cap "
+                f"({s.max_tx_per_snapshot}) were not parsed (their signatures were traversed)"
+            )
+        if unreadable:
+            out.reasons.append(
+                f"{len(unreadable)} catch-up transaction(s) couldn't be read and were skipped: "
+                + "; ".join(f"{sig} ({why})" for sig, why in unreadable)
+            )
+        if failure is not None:
+            out.reasons.append(failure)
+        return out
 
     def _store(self, target: Target, tx: ParsedTx, scan_id: int, cutoff: float | None) -> StoredTx:
         stored = self.repo.record_tx(
@@ -366,19 +556,22 @@ class Collector:
         self,
         scan_id: int,
         exc: BaseException,
-        selected: int,
         window: tuple[float | None, float | None],
+        listing: ListingCoverage | None = None,
     ) -> None:
         """Finish an interrupted scan ``ABORTED`` (terminal) with its reason. The cursor,
-        ``last_scan_at`` and early status are left alone, so the next run retries; what was
-        stored before the abort stays (storage is idempotent)."""
+        ``last_scan_at``, early status and the gap the head would have opened are left alone,
+        so the next run retries; what was stored before the abort stays (storage is
+        idempotent), and so does every catch-up page already recorded."""
         parsed = self._tally.parsed
         why = (
             f"aborted: {type(exc).__name__}: {exc}; the cursor wasn't advanced, so the next "
             "scan retries"
         )
-        self.repo.finish_scan(scan_id, "ABORTED", parsed, max(selected - parsed, 0), False,
-                              window, [why, *self._tally.note()], self._t())  # fmt: skip
+        if listing is not None:
+            listing.listing_reasons = []  # the scan's gap state never took effect
+        self.repo.finish_scan(scan_id, "ABORTED", parsed, max(self._tally.selected - parsed, 0),
+                              False, window, [why, *self._tally.note()], self._t(), listing)  # fmt: skip
 
     async def _parse_many(
         self, target: Target, sigs: list[SignatureInfo], scan_id: int, cutoff: float | None
@@ -411,9 +604,10 @@ class Collector:
         reached_oldest: bool,
         window: tuple[float | None, float | None],
         reasons: list[str],
+        listing: ListingCoverage | None = None,
     ) -> None:
         self.repo.finish_scan(
-            scan_id, status, parsed, skipped, reached_oldest, window, reasons, self._t()
+            scan_id, status, parsed, skipped, reached_oldest, window, reasons, self._t(), listing
         )
 
     # --- 3. early history ----------------------------------------------------------------
@@ -433,12 +627,11 @@ class Collector:
             target.canonical_id, "early", started_at, started_at, self.provider.name, "RUNNING",
             len(listing.signatures), 0, 0, listing.complete, (None, None), [],
         )  # fmt: skip
-        self._tally = _ScanTally()
+        self._tally = _ScanTally(selected=min(len(listing.signatures), s.effective_early_max_tx))
         try:
             return await self._early_batch(target, listing, scan_id, start)
         except BaseException as exc:  # never leave the scan RUNNING; early status stays unset
-            self._abort_scan(scan_id, exc, min(len(listing.signatures), s.effective_early_max_tx),
-                             (None, None))  # fmt: skip
+            self._abort_scan(scan_id, exc, (None, None))
             raise
 
     async def _early_batch(

@@ -66,6 +66,10 @@ class RadarSchemaError(RadarError):
     """The Radar database was created by an incompatible Radar version."""
 
 
+class RadarStateError(RadarError):
+    """Stored collection state (e.g. an activity gap) changed underneath a scan."""
+
+
 class RadarUnavailableError(MarketDataUnavailableError):
     """Radar's own guard refused or the provider failed (never production's limits)."""
 

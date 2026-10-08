@@ -180,7 +180,9 @@ class FakeChain:
             address, opts = params
             txs = list(reversed(self.history.get(address, [])))  # newest first
             sigs = [t["transaction"]["signatures"][0] for t in txs]
-            start = sigs.index(opts["before"]) + 1 if opts.get("before") in sigs else 0
+            if opts.get("before") and opts["before"] not in sigs:
+                return []  # like Helius: an unknown `before` is a successful empty page
+            start = sigs.index(opts["before"]) + 1 if opts.get("before") else 0
             end = sigs.index(opts["until"]) if opts.get("until") in sigs else len(sigs)
             rows = [
                 {"signature": t["transaction"]["signatures"][0], "slot": t["slot"],

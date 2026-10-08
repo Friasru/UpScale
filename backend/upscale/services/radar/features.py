@@ -27,6 +27,11 @@ Rules that keep it honest:
   reports when the tolerance was used.
 * ``RUNNING`` scans are never inputs. An ``ABORTED`` scan makes activity ``PARTIAL`` but
   its listed / skipped counts aren't added (the retry lists the same signatures again).
+* Signature *listing* continuity and transaction *parse* coverage are reported apart
+  (``activity.signature_coverage`` / ``activity.parse_coverage``). An activity gap open at
+  ``as_of`` keeps activity and since-tracking wallet counts ``PARTIAL``; a gap closed by
+  ``as_of`` stops being a reason, while capped / skipped transactions still are. Gap state
+  is read as of ``as_of`` (when it opened, whether it had closed), never its current state.
 """
 
 from collections import defaultdict
@@ -47,9 +52,10 @@ from upscale.services.radar.models import (
     missing,
     partial,
 )
-from upscale.services.radar.repository import FlowRow, HolderRow, Inputs, ScanRow
+from upscale.services.radar.repository import FlowRow, GapAsOf, HolderRow, Inputs, ScanRow
 
 NEW_WALLET_MAX_AGE_HOURS = 24.0
+MAX_GAPS_SHOWN = 5
 LIMITATIONS = (
     "Solana only; activity is read from the tracked pool's transactions only",
     "flows are wallet token balance changes (TOKEN_INFLOW / TOKEN_OUTFLOW), not buys or sells",
@@ -311,16 +317,84 @@ def _large(
     }
 
 
-def _activity_status(scans: Sequence[ScanRow], run: Mapping[str, Any]) -> tuple[Status, str | None]:
+def open_gaps(inp: Inputs) -> list[GapAsOf]:
+    """Activity gaps still open at ``inp.as_of``, oldest opened first."""
+    return [g for g in inp.gaps if g.closed_at is None]
+
+
+def _gap_reason(gaps: Sequence[GapAsOf]) -> str:
+    return (
+        f"{len(gaps)} activity signature gap(s) open (oldest since {iso(gaps[0].opened_at)}): "
+        "pool signatures between scans aren't all traversed yet"
+    )
+
+
+def _activity_status(
+    scans: Sequence[ScanRow], run: Mapping[str, Any], gaps: Sequence[GapAsOf]
+) -> tuple[Status, str | None]:
     step = run.get("activity")
     if not scans:
         if step is not None and step.get("status") not in VALUED:
             return step["status"], "; ".join(step.get("reasons") or []) or None
         return "NOT_COLLECTED", "no activity scan in this snapshot's window"
     reasons = [r for s in scans for r in s.reasons]
-    if any(s.status != "AVAILABLE" for s in scans):
+    if gaps:
+        reasons.append(_gap_reason(gaps))
+    # A scan short only on listing grounds (its listing_reasons) is judged by the gaps' state
+    # at as_of instead: a gap closed since then is no longer a reason.
+    incomplete = [
+        s for s in scans if s.reasons or (s.status != "AVAILABLE" and not s.listing_reasons)
+    ]
+    if incomplete or gaps:
         return "PARTIAL", "; ".join(reasons) or "an activity scan was incomplete"
     return "AVAILABLE", None
+
+
+def _signature_coverage(
+    inp: Inputs, scans: Sequence[ScanRow], settings: RadarSettings
+) -> dict[str, Any]:
+    """Listing continuity only: which pool signatures were traversed, not parsed."""
+    lo, gaps = inp.previous_snapshot_at, open_gaps(inp)
+    finished = [s for s in inp.scans if s.kind == "activity" and s.status != "ABORTED"]
+    reached = [s.head_reached_cursor for s in scans
+               if s.status != "ABORTED" and s.head_reached_cursor is not None]  # fmt: skip
+    return {
+        "incremental_complete": bool(finished) and not gaps,
+        "head_reached_prior_cursor": all(reached) if reached else None,
+        "open_gap_count": len(gaps),
+        "oldest_open_gap_opened_at": iso(gaps[0].opened_at) if gaps else None,
+        "open_gaps": [
+            {"opened_at": iso(g.opened_at), "older_bound_block_time": iso(g.until_block_time)}
+            for g in gaps[:MAX_GAPS_SHOWN]
+        ],
+        "gaps_opened": sum(lo is None or g.opened_at > lo for g in inp.gaps),
+        "gaps_closed": sum(
+            g.closed_at is not None and (lo is None or g.closed_at > lo) for g in inp.gaps
+        ),
+        "catchup_pages_attempted": sum(s.catchup_pages_attempted for s in scans),
+        "catchup_pages_processed": sum(s.catchup_pages_completed for s in scans),
+        "catchup_signatures_listed": sum(s.catchup_signatures_listed for s in scans),
+        "catchup_max_pages_per_scan": settings.activity_catchup_max_pages,
+        "boundary_confirmations_attempted": sum(s.boundary_confirmations_attempted for s in scans),
+        "boundary_confirmations_succeeded": sum(s.boundary_confirmations_succeeded for s in scans),
+        "reasons": [_gap_reason(gaps)] if gaps else [],
+        "note": "signature listing continuity since tracking began (history before the first "
+        "scan is bounded and never a gap); listed transactions beyond the parse cap are "
+        "traversed but not parsed: see parse_coverage",
+    }
+
+
+def _parse_coverage(scans: Sequence[ScanRow], settings: RadarSettings) -> dict[str, Any]:
+    counted = [s for s in scans if s.status != "ABORTED"]
+    return {
+        "complete": bool(scans)
+        and len(counted) == len(scans)
+        and all(s.txs_skipped == 0 for s in counted),
+        "transactions_beyond_cap": sum(s.txs_beyond_cap for s in counted),
+        "max_tx_per_snapshot": settings.max_tx_per_snapshot,
+        "note": "transactions read for flows; a complete signature listing doesn't make "
+        "capped or skipped transactions parsed",
+    }
 
 
 def _count(status: Status, value: int, why: str | None) -> Metric:
@@ -345,9 +419,11 @@ def _counterparty(flows: Sequence[FlowRow], status: Status, why: str | None, n: 
     return _count(status, n, why)
 
 
-def _activity(inp: Inputs, run: Mapping[str, Any], roles: Roles) -> dict[str, Any]:
+def _activity(
+    inp: Inputs, run: Mapping[str, Any], roles: Roles, settings: RadarSettings
+) -> dict[str, Any]:
     scans = _scan_window(inp, "activity")
-    status, why = _activity_status(scans, run)
+    status, why = _activity_status(scans, run, open_gaps(inp))
     window = _window_flows(inp)
     status, why = _with_unknown(status, why, len(roles.unknown(window)))
     flows = roles.eligible(window)
@@ -372,9 +448,13 @@ def _activity(inp: Inputs, run: Mapping[str, Any], roles: Roles) -> dict[str, An
         "window_since": iso(inp.previous_snapshot_at),
         "first_block_time": iso(min(times)) if times else None,
         "last_block_time": iso(max(times)) if times else None,
-        "signatures_listed": sum(s.signatures_listed for s in counted),
+        "signatures_listed": sum(
+            s.signatures_listed + s.catchup_signatures_listed for s in counted
+        ),  # fmt: skip
         "transactions_parsed": sum(s.txs_parsed for s in scans),
         "transactions_skipped": sum(s.txs_skipped for s in counted),
+        "signature_coverage": _signature_coverage(inp, scans, settings),
+        "parse_coverage": _parse_coverage(scans, settings),
         "chain_clock_lead": {
             "flows": len(leads),
             "max_ahead_s": _round(max(leads)) if leads else None,
@@ -399,7 +479,9 @@ def _activity(inp: Inputs, run: Mapping[str, Any], roles: Roles) -> dict[str, An
 def _since_tracking(inp: Inputs) -> tuple[Status, str]:
     if not inp.scans:
         return "NOT_COLLECTED", "no activity collected yet"
-    return "PARTIAL", "bounded scans: activity before tracking or beyond caps is missing"
+    why = "bounded scans: activity before tracking or beyond caps is missing"
+    gaps = open_gaps(inp)
+    return "PARTIAL", f"{why}; {_gap_reason(gaps)}" if gaps else why
 
 
 def _early_cutoff(target: Target, inp: Inputs, settings: RadarSettings) -> float | None:
@@ -691,6 +773,8 @@ def build_snapshot(
         [f.fetched_at for f in inp.flows]
         + [h.observed_at for h in inp.holders]
         + [s.fetched_at for s in inp.scans]
+        + [g.opened_at for g in inp.gaps]
+        + [g.closed_at for g in inp.gaps if g.closed_at is not None]
         + [c.determined_at for c in inp.creators.values()]
     )
     if any(t > as_of for t in stamps) or target.selected_at > as_of:
@@ -731,7 +815,7 @@ def build_snapshot(
         },
         "holders": holders,
         "large_holders": large,
-        "activity": _activity(inp, run, roles),
+        "activity": _activity(inp, run, roles, settings),
         "since_tracking": {
             "interacting_wallets": _m(
                 _count(tracked, len({f.wallet for f in roles.eligible(inp.flows)}), why)

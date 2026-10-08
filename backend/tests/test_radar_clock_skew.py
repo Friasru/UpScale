@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from tests.radar_fakes import MINT, POOL, T0, Clock, FakeChain, addr, make_service, tx
-from upscale.services.radar.config import load_settings
+from upscale.services.radar.config import DB_SCHEMA_VERSION, load_settings
 from upscale.services.radar.features import build_snapshot, timing_clusters
 from upscale.services.radar.models import (
     CHAIN_CLOCK_TOLERANCE_S,
@@ -324,9 +324,9 @@ def test_new_and_current_databases_open(tmp_path: Any) -> None:
     path = tmp_path / "radar.sqlite3"
     sqlite3.connect(str(path)).close()  # an empty file is a new database
     repo = RadarRepository(path)
-    assert repo.get_meta("schema_version") == "2"
+    assert repo.get_meta("schema_version") == str(DB_SCHEMA_VERSION)
     repo.close()
-    assert RadarRepository(path).get_meta("schema_version") == "2"  # reopens fine
+    assert RadarRepository(path).get_meta("schema_version") == str(DB_SCHEMA_VERSION)  # reopens
 
 
 def test_service_observed_at_is_never_before_its_inputs(tmp_path: Any) -> None:

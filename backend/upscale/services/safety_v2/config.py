@@ -16,8 +16,11 @@ Environment (all optional):
   accounts each) one holder collection may read; past it the scan is PARTIAL.
 * ``UPSCALE_SAFETY_V2_HOLDER_OWNER_LOOKUPS`` (30): largest owners whose own accounts are
   read (one ``getMultipleAccounts``) to tell program-owned owners apart.
-* ``UPSCALE_SAFETY_V2_RADAR_DB`` (unset): a Radar database read **read-only** for positive
-  wallet proof (a signer). Unset, missing or incompatible: no owner is proven a wallet.
+* ``UPSCALE_SAFETY_V2_RADAR_DB`` (unset): a Radar database read **read-only, during
+  collection only**; the evidence used (positive wallet proof, creator / deployer rows,
+  creator-role TOKEN_OUTFLOW flows, activity coverage) is captured into Safety's own
+  append-only tables. Snapshots and rebuilds never read Radar. Unset, missing or
+  incompatible: nothing is captured and the capture status says why.
 
 * ``UPSCALE_SAFETY_V2_DEX_URL`` (unset): the DEX Screener API base URL (e.g.
   ``https://api.dexscreener.com``). Unset: market evidence is NOT_COLLECTED, so nothing
@@ -39,9 +42,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 SNAPSHOT_SCHEMA = "safety.snapshot.v2"
 # 1: Phase 1 tables. 2: + safety_target_pools, safety_holder_observations,
 # safety_holder_balances. 3: + safety_market_observations, safety_market_pools,
-# safety_pool_account_observations. A database of another version is refused, never
-# migrated.
-DB_SCHEMA_VERSION = 3
+# safety_pool_account_observations. 4: + durable Radar evidence capture
+# (safety_radar_captures, safety_radar_wallet_proofs, safety_radar_creator_evidence,
+# safety_radar_flow_evidence, safety_radar_activity_coverage). A database of another
+# version is refused, never migrated.
+DB_SCHEMA_VERSION = 4
 # Bump whenever a rule's logic, threshold or wording changes: a snapshot built under
 # another rules version is never claimed to be an exact reproduction.
 # "2": Phase 2 holder rules (concentration, few holders, large unknown / program owners)

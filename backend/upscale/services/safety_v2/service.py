@@ -56,7 +56,12 @@ from upscale.services.safety_v2.provider import (
 )
 from upscale.services.safety_v2.registry import RAYDIUM_AMM_V4
 from upscale.services.safety_v2.repository import SafetyRepository, encode_body
-from upscale.services.safety_v2.sources import radar_wallet_proofs
+from upscale.services.safety_v2.sources import (
+    NOT_CONSULTED,
+    ProofStatus,
+    WalletProofs,
+    read_radar_capture,
+)
 
 NO_PROVIDER = "no Solana provider configured (UPSCALE_HELIUS_API_KEY / UPSCALE_SOLANA_RPC_URL)"
 NO_DEX = "no market provider configured (UPSCALE_SAFETY_V2_DEX_URL)"
@@ -76,6 +81,8 @@ class Collected:
     market_observation_id: int | None = None
     market_outcome: str | None = None
     pool_account_outcome: str | None = None
+    radar_capture_status: str | None = None
+    radar_new_facts: int = 0
 
 
 @dataclass
@@ -249,6 +256,21 @@ class SafetyService:
                     reasons.append(f"market: {mobs.reason}")
                 if account is not None and account.reason:
                     reasons.append(f"pool account: {account.reason}")
+            # Durable Radar capture (read-only, no network): one transaction, after the
+            # holder observation so this collection's owners can get wallet proof.
+            captured_at = ts(self._now())
+            latest = self.repo.latest_holder_observation(canonical_id, captured_at)
+            owners = (
+                [b.owner for b in self.repo.holder_balances(latest.id) if b.owner is not None]
+                if latest is not None and latest.outcome == "COLLECTED"
+                else []
+            )
+            cap = read_radar_capture(self.settings.radar_db_path, canonical_id, owners)
+            _, radar_new, _ = self.repo.record_radar_capture(
+                canonical_id, collection, captured_at, cap
+            )
+            if cap.reason:
+                reasons.append(f"radar: {cap.reason}")
             used = self.guard.used_this_run - before
             self.repo.finish_collection(collection, "DONE", ts(self._now()), used, reasons)
         except BaseException as exc:
@@ -260,7 +282,27 @@ class SafetyService:
         return Collected(collection, oid, obs.outcome, used, hid,
                          hobs.outcome if hobs else None, mid,
                          mobs.outcome if mobs else None,
-                         account.outcome if account else None)  # fmt: skip
+                         account.outcome if account else None, cap.status,
+                         radar_new)  # fmt: skip
+
+    def wallet_proofs(self, canonical_id: str, wallets: list[str], as_of: float) -> WalletProofs:
+        """Positive wallet proof from Safety's captured Radar evidence only (never live
+        Radar): usable when ``source_time <= as_of`` and ``captured_at <= as_of``. The
+        status is the latest capture attempt at or before `as_of`."""
+        if not wallets:
+            return NOT_CONSULTED
+        run = self.repo.latest_radar_capture(canonical_id, as_of)
+        proofs = self.repo.captured_wallet_proofs(canonical_id, wallets, as_of)
+        if run is None:
+            return WalletProofs("NOT_CONFIGURED", "no Radar capture at or before as_of", proofs)
+        rid, status, reason = run
+        mapped: ProofStatus = (
+            "AVAILABLE" if status == "CAPTURED"
+            else "NOT_CONFIGURED" if status == "NOT_CONFIGURED"
+            else "INCOMPATIBLE" if status == "INCOMPATIBLE"
+            else "UNAVAILABLE"
+        )  # fmt: skip
+        return WalletProofs(mapped, reason, proofs, rid)
 
     def holder_inputs(self, canonical_id: str, as_of: float) -> HolderInputs:
         """Stored holder evidence, pool pins and Radar wallet proofs known at `as_of`."""
@@ -268,8 +310,8 @@ class SafetyService:
         if obs is None:
             return HolderInputs(None)
         balances = tuple(self.repo.holder_balances(obs.id))
-        wallets = [b.owner for b in balances if b.owner is not None]
-        proofs = radar_wallet_proofs(self.settings.radar_db_path, wallets, as_of)
+        wallets = sorted({b.owner for b in balances if b.owner is not None})
+        proofs = self.wallet_proofs(canonical_id, wallets, as_of)
         pools = tuple(self.repo.pool_pins(canonical_id, as_of))
         return HolderInputs(obs, balances, pools, proofs)
 

@@ -87,7 +87,12 @@ from upscale.services.safety_v2.rules import (
     evaluate_market,
     is_meaningful,
 )
-from upscale.services.safety_v2.sources import NOT_CONSULTED, WalletProof, WalletProofs
+from upscale.services.safety_v2.sources import (
+    NOT_CONSULTED,
+    RADAR_SCHEMA_VERSION,
+    WalletProof,
+    WalletProofs,
+)
 from upscale.services.solana_chain import SYSTEM_PROGRAM
 
 _PACKAGE = Path(__file__).resolve().parent
@@ -387,8 +392,14 @@ def _check_holder_inputs(canonical_id: str, as_of: float, h: HolderInputs) -> li
                 f"Radar wallet proof for {proof.wallet} was learned at {iso(proof.fetched_at)}, "
                 f"after as_of {iso(as_of)}"
             )
+        if proof.captured_at is not None and proof.captured_at > as_of:
+            raise SafetyCausalityError(
+                f"wallet proof for {proof.wallet} was captured at {iso(proof.captured_at)}, "
+                f"after as_of {iso(as_of)}"
+            )
     out.append({"component": "wallet_proofs", "source": "radar", "status": h.proofs.status,
-                "reason": h.proofs.reason, "proofs": len(h.proofs.proofs)})  # fmt: skip
+                "reason": h.proofs.reason, "proofs": len(h.proofs.proofs),
+                "capture_id": h.proofs.capture_id})  # fmt: skip
     return out
 
 
@@ -447,8 +458,12 @@ def _owner_entry(c: Classified, supply: int) -> dict[str, Any]:
         "amount_raw": str(c.fact.amount_raw), "token_accounts": len(c.fact.accounts),
     }  # fmt: skip
     if c.proof is not None:
-        entry["wallet_proof"] = {"source": "radar", "fetched_at": iso(c.proof.fetched_at),
-                                 "signature": c.proof.signature}  # fmt: skip
+        entry["wallet_proof"] = {
+            "source": "radar", "radar_schema_version": RADAR_SCHEMA_VERSION,
+            "fetched_at": iso(c.proof.fetched_at), "signature": c.proof.signature,
+            "radar_target": c.proof.canonical_id, "source_key": c.proof.source_key,
+            "captured_at": iso(c.proof.captured_at), "capture_row_id": c.proof.capture_row_id,
+        }  # fmt: skip
     return entry
 
 

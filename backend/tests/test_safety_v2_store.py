@@ -42,7 +42,7 @@ def test_new_database_records_schema_versions(tmp_path: Path) -> None:
         repo.set_meta("schema_version", "2")
 
 
-@pytest.mark.parametrize("version", ["0", "1", "2", "4", None])
+@pytest.mark.parametrize("version", ["0", "1", "2", "3", "5", None])
 def test_unknown_schema_version_is_refused(tmp_path: Path, version: str | None) -> None:
     path = tmp_path / "s.sqlite3"
     with sqlite3.connect(path) as conn:
@@ -57,11 +57,15 @@ def test_unknown_schema_version_is_refused(tmp_path: Path, version: str | None) 
 PHASE_2_TABLES = ("safety_holder_balances", "safety_holder_observations", "safety_target_pools")
 PHASE_3_TABLES = ("safety_pool_account_observations", "safety_market_pools",
                   "safety_market_observations")  # fmt: skip
+PHASE_4_TABLES = ("safety_radar_wallet_proofs", "safety_radar_creator_evidence",
+                  "safety_radar_flow_evidence", "safety_radar_activity_coverage",
+                  "safety_radar_captures")  # fmt: skip
 
 
 @pytest.mark.parametrize(("version", "missing"), [
-    ("1", PHASE_3_TABLES + PHASE_2_TABLES),  # a Phase 1 database
-    ("2", PHASE_3_TABLES),  # a Phase 2 database
+    ("1", PHASE_4_TABLES + PHASE_3_TABLES + PHASE_2_TABLES),  # a Phase 1 database
+    ("2", PHASE_4_TABLES + PHASE_3_TABLES),  # a Phase 2 database
+    ("3", PHASE_4_TABLES),  # a Phase 3 database
 ])  # fmt: skip
 def test_an_older_phase_database_is_refused_before_any_mutation(
     tmp_path: Path, version: str, missing: tuple[str, ...]
@@ -84,7 +88,7 @@ def test_an_older_phase_database_is_refused_before_any_mutation(
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
     assert not names & set(missing)
-    assert DB_SCHEMA_VERSION == 3
+    assert DB_SCHEMA_VERSION == 4
 
 
 def test_safety_tables_without_meta_are_refused(tmp_path: Path) -> None:

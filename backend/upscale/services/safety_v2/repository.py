@@ -14,7 +14,20 @@ mutation, never migrated and never given the new tables):
   what the owner's own account looked like. Classification is never stored: it is derived
   per snapshot ``as_of``.
 
-Phase 3 tables (schema version 3; a version-2 database is refused the same way):
+Phase 4A tables (schema version 4; a version-3 database is refused the same way): durable,
+append-only copies of the Radar evidence Safety used, so snapshots and rebuilds never read
+Radar (which overwrites creator rows and deletes flows / scans by retention).
+
+* ``safety_radar_captures``: one row per capture attempt in a collection (CAPTURED /
+  NOT_CONFIGURED / UNAVAILABLE / INCOMPATIBLE), with what was new and what was a repeat.
+* ``safety_radar_wallet_proofs``, ``safety_radar_creator_evidence``,
+  ``safety_radar_flow_evidence``, ``safety_radar_activity_coverage``: captured facts. Each
+  keeps Radar's stable ``source_key`` (unique per target: re-ingesting a fact is a no-op),
+  Radar's knowledge time (``source_time``), Safety's ``captured_at`` and the capture id.
+  A fact is usable as of ``as_of`` only when ``source_time <= as_of AND captured_at <=
+  as_of``.
+
+Phase 3 tables (schema version 3):
 
 * ``safety_market_observations``: one DEX-provider market read (POOLS / NO_POOLS /
   PROVIDER_FAILED / NOT_COLLECTED), with the collection-time primary (audit only: the
@@ -66,6 +79,10 @@ from upscale.services.safety_v2.provider import (
     PoolAccountObservation,
     RequestOutcome,
 )
+from upscale.services.safety_v2.sources import (
+    RadarCapture,
+    WalletProof,
+)
 from upscale.services.solana_chain import TOKEN_2022_PROGRAM, TOKEN_PROGRAM
 
 _OUTCOMES = ",".join(repr(o) for o in MINT_OUTCOMES)
@@ -77,6 +94,35 @@ MARKET_ORIGIN = "safety_v2.collect_market"
 _MARKET_OUTCOMES = ",".join(repr(o) for o in MARKET_OUTCOMES)
 _IDENTITIES = ",".join(repr(o) for o in POOL_IDENTITIES)
 _ACCOUNT_OUTCOMES = ",".join(repr(o) for o in POOL_ACCOUNT_OUTCOMES)
+
+
+def _radar_fact_table(name: str, columns: str) -> str:
+    """A captured-Radar-fact table: append-only, unique per (target, source key), written
+    only by a CAPTURED capture of a RUNNING collection of the same target."""
+    return f"""CREATE TABLE IF NOT EXISTS {name} (
+    id INTEGER PRIMARY KEY,
+    canonical_id TEXT NOT NULL REFERENCES safety_targets(canonical_id),
+    capture_id INTEGER NOT NULL REFERENCES safety_radar_captures(id),
+    collection_id INTEGER NOT NULL REFERENCES safety_collections(id),
+    captured_at REAL NOT NULL,
+    source_system TEXT NOT NULL CHECK (source_system = 'radar'),
+    radar_schema_version TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    source_time REAL NOT NULL,{columns}
+    UNIQUE (canonical_id, source_key)
+);
+CREATE TRIGGER IF NOT EXISTS {name}_from_capture BEFORE INSERT ON {name}
+WHEN NOT EXISTS (SELECT 1 FROM safety_radar_captures r JOIN safety_collections c
+    ON c.id = r.collection_id WHERE r.id = NEW.capture_id AND r.status = 'CAPTURED'
+    AND r.canonical_id = NEW.canonical_id AND r.collection_id = NEW.collection_id
+    AND r.captured_at = NEW.captured_at AND c.status = 'RUNNING')
+BEGIN SELECT RAISE(ABORT, '{name}: needs a CAPTURED capture of a RUNNING collection'); END;
+CREATE TRIGGER IF NOT EXISTS {name}_no_update BEFORE UPDATE ON {name}
+BEGIN SELECT RAISE(ABORT, '{name} rows are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS {name}_no_delete BEFORE DELETE ON {name}
+BEGIN SELECT RAISE(ABORT, '{name} rows are append-only'); END;"""
+
+
 _RUNNING = """WHEN NOT EXISTS (SELECT 1 FROM safety_collections c WHERE c.id = NEW.collection_id
     AND c.status = 'RUNNING' AND c.canonical_id = NEW.canonical_id
     AND c.started_at <= NEW.fetched_at)"""
@@ -344,6 +390,84 @@ BEGIN SELECT RAISE(ABORT, 'safety_pool_account_observations rows are append-only
 CREATE TRIGGER IF NOT EXISTS safety_pool_accounts_no_delete
 BEFORE DELETE ON safety_pool_account_observations
 BEGIN SELECT RAISE(ABORT, 'safety_pool_account_observations rows are append-only'); END;
+CREATE TABLE IF NOT EXISTS safety_radar_captures (
+    id INTEGER PRIMARY KEY,
+    canonical_id TEXT NOT NULL REFERENCES safety_targets(canonical_id),
+    collection_id INTEGER NOT NULL REFERENCES safety_collections(id),
+    captured_at REAL NOT NULL,
+    fetched_at REAL NOT NULL,
+    source_system TEXT NOT NULL CHECK (source_system = 'radar'),
+    status TEXT NOT NULL
+        CHECK (status IN ('CAPTURED', 'NOT_CONFIGURED', 'UNAVAILABLE', 'INCOMPATIBLE')),
+    reason TEXT,
+    radar_schema_version TEXT,
+    new_facts INTEGER NOT NULL DEFAULT 0 CHECK (new_facts >= 0),
+    repeated_facts INTEGER NOT NULL DEFAULT 0 CHECK (repeated_facts >= 0),
+    CHECK (fetched_at = captured_at),
+    CHECK ((status = 'CAPTURED') = (reason IS NULL)),
+    CHECK ((status = 'CAPTURED') = (radar_schema_version IS NOT NULL)),
+    CHECK (status = 'CAPTURED' OR (new_facts = 0 AND repeated_facts = 0))
+);
+CREATE TRIGGER IF NOT EXISTS safety_radar_captures_in_collection
+BEFORE INSERT ON safety_radar_captures {_RUNNING}
+BEGIN SELECT RAISE(ABORT, 'safety_radar_captures: needs a RUNNING collection of the same target started at or before fetched_at'); END;
+CREATE TRIGGER IF NOT EXISTS safety_radar_captures_no_update BEFORE UPDATE ON safety_radar_captures
+BEGIN SELECT RAISE(ABORT, 'safety_radar_captures rows are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS safety_radar_captures_no_delete BEFORE DELETE ON safety_radar_captures
+BEGIN SELECT RAISE(ABORT, 'safety_radar_captures rows are append-only'); END;
+{
+    _radar_fact_table(
+        "safety_radar_wallet_proofs",
+        '''
+    wallet TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('SIGNER_FLOW', 'WALLET_ENTRY')),
+    radar_canonical_id TEXT NOT NULL,
+    signature TEXT,
+    CHECK ((kind = 'SIGNER_FLOW') = (signature IS NOT NULL)),''',
+    )
+}
+{
+    _radar_fact_table(
+        "safety_radar_creator_evidence",
+        '''
+    role TEXT NOT NULL CHECK (role IN ('POOL_CREATOR_CANDIDATE', 'TOKEN_DEPLOYER')),
+    status TEXT NOT NULL CHECK (status IN ('CANDIDATE', 'VERIFIED', 'UNAVAILABLE')),
+    address TEXT,
+    method TEXT NOT NULL,
+    signature TEXT,
+    block_time REAL,
+    radar_provider TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    CHECK (status != 'VERIFIED' OR role = 'TOKEN_DEPLOYER'),
+    CHECK (status != 'CANDIDATE' OR role = 'POOL_CREATOR_CANDIDATE'),
+    CHECK ((status = 'UNAVAILABLE') = (address IS NULL)),''',
+    )
+}
+{
+    _radar_fact_table(
+        "safety_radar_flow_evidence",
+        '''
+    wallet TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction = 'TOKEN_OUTFLOW'),
+    amount_raw TEXT NOT NULL CHECK (amount_raw != '' AND amount_raw NOT GLOB '*[^0-9]*'),
+    block_time REAL,
+    signer INTEGER NOT NULL CHECK (signer IN (0, 1)),
+    participant TEXT NOT NULL,
+    counterparty TEXT NOT NULL,
+    radar_scan_id INTEGER,''',
+    )
+}
+{
+    _radar_fact_table(
+        "safety_radar_activity_coverage",
+        '''
+    kind TEXT NOT NULL CHECK (kind IN ('SCAN', 'GAP')),
+    radar_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status != 'RUNNING'),
+    facts_json TEXT NOT NULL,''',
+    )
+}
 CREATE TABLE IF NOT EXISTS safety_snapshots (
     id INTEGER PRIMARY KEY,
     canonical_id TEXT NOT NULL REFERENCES safety_targets(canonical_id),
@@ -367,7 +491,9 @@ TABLES = (
     "safety_meta", "safety_targets", "safety_requests", "safety_collections",
     "safety_mint_observations", "safety_snapshots", "safety_target_pools",
     "safety_holder_observations", "safety_holder_balances", "safety_market_observations",
-    "safety_market_pools", "safety_pool_account_observations",
+    "safety_market_pools", "safety_pool_account_observations", "safety_radar_captures",
+    "safety_radar_wallet_proofs", "safety_radar_creator_evidence", "safety_radar_flow_evidence",
+    "safety_radar_activity_coverage",
 )  # fmt: skip
 _OUTCOME_COLUMN = {"ok": "ok", "rate_limited": "rate_limited", "timeout": "timeouts",
                    "failed": "failures"}  # fmt: skip
@@ -963,6 +1089,125 @@ class SafetyRepository:
                 .fetchall()
             )
         return [AccountCheck(*r) for r in rows]
+
+    # --- captured Radar evidence (Phase 4A) ------------------------------------------------
+
+    def record_radar_capture(
+        self, canonical_id: str, collection_id: int, captured_at: float, cap: RadarCapture
+    ) -> tuple[int, int, int]:
+        """The capture run and every fact, in **one** transaction (a failure leaves
+        nothing). Facts already captured for this target (same source key) are skipped.
+        (capture id, new facts, repeated facts)."""
+        base = "canonical_id, capture_id, collection_id, captured_at, source_system, " \
+            "radar_schema_version, source_key, source_time"  # fmt: skip
+        tables: list[tuple[str, str, list[tuple[str, float, tuple[Any, ...]]]]] = [
+            ("safety_radar_wallet_proofs", "wallet, kind, radar_canonical_id, signature",
+             [(p.source_key, p.source_time, (p.wallet, p.kind, p.radar_canonical_id,
+                                             p.signature)) for p in cap.proofs]),
+            ("safety_radar_creator_evidence",
+             "role, status, address, method, signature, block_time, radar_provider, "
+             "provenance_json",
+             [(c.source_key, c.source_time,
+               (c.role, c.status, c.address, c.method, c.signature, c.block_time, c.provider,
+                json.dumps(c.provenance, sort_keys=True, default=str))) for c in cap.creators]),
+            ("safety_radar_flow_evidence",
+             "wallet, signature, direction, amount_raw, block_time, signer, participant, "
+             "counterparty, radar_scan_id",
+             [(f.source_key, f.source_time,
+               (f.wallet, f.signature, f.direction, f.amount_raw, f.block_time, int(f.signer),
+                f.participant, f.counterparty, f.radar_scan_id)) for f in cap.flows]),
+            ("safety_radar_activity_coverage", "kind, radar_id, status, facts_json",
+             [(v.source_key, v.source_time,
+               (v.kind, v.radar_id, v.status, json.dumps(v.facts, sort_keys=True, default=str)))
+              for v in cap.coverage]),
+        ]  # fmt: skip
+        with self._lock, self.db() as conn:
+            # Count first, so the capture row is written once and never updated.
+            fresh: list[tuple[str, str, list[tuple[str, float, tuple[Any, ...]]]]] = []
+            new = repeated = 0
+            for table, columns, rows in tables:
+                seen = {r[0] for r in conn.execute(
+                    f"SELECT source_key FROM {table} WHERE canonical_id = ?", (canonical_id,)
+                )}  # fmt: skip
+                keep = []
+                for row in rows:
+                    if row[0] in seen:
+                        repeated += 1
+                    else:
+                        seen.add(row[0])
+                        keep.append(row)
+                new += len(keep)
+                fresh.append((table, columns, keep))
+            cur = conn.execute(
+                "INSERT INTO safety_radar_captures (canonical_id, collection_id, captured_at, "
+                "fetched_at, source_system, status, reason, radar_schema_version, new_facts, "
+                "repeated_facts) VALUES (?, ?, ?, ?, 'radar', ?, ?, ?, ?, ?)",
+                (canonical_id, collection_id, captured_at, captured_at, cap.status, cap.reason,
+                 cap.radar_schema_version, new, repeated),
+            )  # fmt: skip
+            cid = cur.lastrowid
+            assert cid is not None
+            common = (canonical_id, cid, collection_id, captured_at, "radar",
+                      cap.radar_schema_version)  # fmt: skip
+            for table, columns, rows in fresh:
+                n = len(columns.split(","))
+                conn.executemany(
+                    f"INSERT INTO {table} ({base}, {columns}) VALUES ({','.join('?' * (8 + n))})",
+                    [(*common, key, at, *values) for key, at, values in rows],
+                )
+        return cid, new, repeated
+
+    def latest_radar_capture(
+        self, canonical_id: str, as_of: float
+    ) -> tuple[int, str, str | None] | None:
+        """(id, status, reason) of the newest capture attempt at or before `as_of`."""
+        with self._lock:
+            row = (
+                self.db()
+                .execute(
+                    "SELECT id, status, reason FROM safety_radar_captures WHERE canonical_id = ? "
+                    "AND captured_at <= ? ORDER BY captured_at DESC, id DESC LIMIT 1",
+                    (canonical_id, as_of),
+                )
+                .fetchone()
+            )
+        return (row[0], row[1], row[2]) if row else None
+
+    def captured_wallet_proofs(
+        self, canonical_id: str, wallets: list[str], as_of: float
+    ) -> dict[str, WalletProof]:
+        """Per wallet, the earliest captured positive proof usable at `as_of`
+        (``source_time <= as_of`` and ``captured_at <= as_of``)."""
+        out: dict[str, WalletProof] = {}
+        with self._lock:
+            conn = self.db()
+            for i in range(0, len(wallets), 500):
+                chunk = wallets[i : i + 500]
+                marks = ",".join("?" * len(chunk))
+                for w, at, sig, rcid, cap_at, rid, key in conn.execute(
+                    "SELECT wallet, source_time, signature, radar_canonical_id, captured_at, id, "
+                    "source_key FROM safety_radar_wallet_proofs WHERE canonical_id = ? AND "
+                    f"source_time <= ? AND captured_at <= ? AND wallet IN ({marks}) "
+                    "ORDER BY wallet, source_time, id",
+                    (canonical_id, as_of, as_of, *chunk),
+                ):
+                    if w not in out:
+                        out[w] = WalletProof(w, at, sig, rcid, cap_at, rid, key)
+        return out
+
+    def captured_facts(self, table: str, canonical_id: str, as_of: float) -> list[dict[str, Any]]:
+        """Captured rows of a Radar-fact table usable at `as_of`, in capture order."""
+        if table not in ("safety_radar_creator_evidence", "safety_radar_flow_evidence",
+                         "safety_radar_activity_coverage", "safety_radar_wallet_proofs"):  # fmt: skip
+            raise ValueError(table)
+        with self._lock:
+            cur = self.db().execute(
+                f"SELECT * FROM {table} WHERE canonical_id = ? AND source_time <= ? AND "
+                "captured_at <= ? ORDER BY source_time, id",
+                (canonical_id, as_of, as_of),
+            )
+            names = [d[0] for d in cur.description]
+            return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
 
     # --- snapshots ------------------------------------------------------------------------
 

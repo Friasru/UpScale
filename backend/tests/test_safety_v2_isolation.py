@@ -41,7 +41,17 @@ ALLOWED = (
     "upscale.services.market_data",
     "upscale.services.solana_chain",
     "upscale.services.safety_v2",
+    # Phase 3: pure pool models / selection and DEX row parsing only (see below).
+    "upscale.services.solana_dex",
+    "upscale.services.dexscreener",
 )
+# The only names Safety V2 may take from solana_dex / dexscreener: never their caching,
+# evidence-archiving services or their HTTP provider.
+DEX_NAMES = {
+    "upscale.services.solana_dex": {"DexPool", "PoolSelection", "PoolSelectionConfig",
+                                    "TokenRef", "WindowStats", "select_primary_pool"},
+    "upscale.services.dexscreener": {"parse_pair"},
+}  # fmt: skip
 
 
 def _imports(path: Path) -> list[str]:
@@ -58,7 +68,8 @@ def _imports(path: Path) -> list[str]:
 
 def _sources() -> list[Path]:
     files = sorted(SAFETY.glob("*.py"))
-    assert len(files) == 12, [f.name for f in files]  # Phase 2: registry.py, sources.py
+    # Phase 2: registry.py, sources.py; Phase 3: market.py
+    assert len(files) == 13, [f.name for f in files]
     return files
 
 
@@ -69,6 +80,22 @@ def test_safety_v2_imports_no_decision_learning_execution_or_radar_module() -> N
             if mod.startswith("upscale"):
                 assert not any(w in mod for w in FORBIDDEN_WORDS), (f, mod)
                 assert any(mod == a or mod.startswith(a + ".") for a in ALLOWED), (f, mod)
+
+
+def test_safety_v2_takes_only_pure_dex_helpers() -> None:
+    for f in _sources():
+        tree = ast.parse(f.read_text(), str(f))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                assert not any(a.name in DEX_NAMES for a in node.names), f
+            if isinstance(node, ast.ImportFrom) and node.module in DEX_NAMES:
+                names = {a.name for a in node.names}
+                assert names <= DEX_NAMES[node.module], (f, names - DEX_NAMES[node.module])
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        banned = {"DexMarketService", "SolanaDexService", "DexScreenerProvider",
+                  "build_snapshot", "get_snapshot"}  # fmt: skip
+        assert not used & banned, (f, used & banned)
 
 
 def test_safety_v2_never_uses_production_safety_or_evidence_paths() -> None:

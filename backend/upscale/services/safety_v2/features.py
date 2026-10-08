@@ -46,6 +46,13 @@ from pathlib import Path
 from typing import Any
 
 from upscale.services.safety_v2.config import RULES_VERSION, SNAPSHOT_SCHEMA
+from upscale.services.safety_v2.market import (
+    AccountCheck,
+    ObservedMarket,
+    market_view,
+    pool_record,
+    with_selection,
+)
 from upscale.services.safety_v2.models import (
     DEFERRED_RULES,
     EXCLUDED_CLASSES,
@@ -67,11 +74,17 @@ from upscale.services.safety_v2.repository import HolderRow, MintRow, PoolPin, o
 from upscale.services.safety_v2.rules import (
     HOLDER_RULE_IDS,
     LARGE_OWNER_PCT,
+    LIQUIDITY_WINDOW_S,
+    MARKET_NOT_REPORTED_MIN_DURATION_S,
+    MARKET_NOT_REPORTED_MIN_MISSES,
+    MARKET_RULE_IDS,
     MEANINGFUL_HOLDER_FRACTION,
     HolderFacts,
+    MarketFacts,
     assess,
     evaluate,
     evaluate_holders,
+    evaluate_market,
     is_meaningful,
 )
 from upscale.services.safety_v2.sources import NOT_CONSULTED, WalletProof, WalletProofs
@@ -79,9 +92,13 @@ from upscale.services.solana_chain import SYSTEM_PROGRAM
 
 _PACKAGE = Path(__file__).resolve().parent
 # The Safety V2 modules whose code decides a body (parsing, fields, rules, encoding).
-FINGERPRINTED = ("config.py", "features.py", "models.py", "provider.py", "registry.py",
-                 "repository.py", "rules.py", "sources.py")  # fmt: skip
+FINGERPRINTED = ("config.py", "features.py", "market.py", "models.py", "provider.py",
+                 "registry.py", "repository.py", "rules.py", "sources.py")  # fmt: skip
 SOLANA_CHAIN = _PACKAGE.parent / "solana_chain.py"
+# Pool eligibility and primary selection (`select_primary_pool`) and DEX row parsing
+# (`parse_pair`) decide market feature values, so both are fingerprinted.
+SOLANA_DEX = _PACKAGE.parent / "solana_dex.py"
+DEXSCREENER = _PACKAGE.parent / "dexscreener.py"
 # A mint observation that isn't MINT: what its authority fields are (never "revoked").
 _UNREAD_STATUS: dict[str, Status] = {
     "NOT_COLLECTED": "NOT_COLLECTED", "PROVIDER_FAILED": "PROVIDER_UNAVAILABLE",
@@ -115,6 +132,8 @@ def code_fingerprints() -> dict[str, str]:
         "rules_version": RULES_VERSION,
         "safety_v2_source": _digest(*(_PACKAGE / f for f in FINGERPRINTED)),
         "solana_chain_source": _digest(SOLANA_CHAIN),
+        "solana_dex_source": _digest(SOLANA_DEX),
+        "dexscreener_source": _digest(DEXSCREENER),
     }
 
 
@@ -181,10 +200,11 @@ def build_body(
     mint_row: MintRow | None,
     fingerprints: Mapping[str, str],
     holders: "HolderInputs | None" = None,
+    market: "MarketInputs | None" = None,
 ) -> dict[str, Any]:
     """The ``safety.snapshot.v2`` body for one exact identity as of `as_of`. Without a
-    holder observation at or before `as_of`, the holder rules are out of scope (listed in
-    ``coverage.out_of_scope``, never counted toward coverage)."""
+    holder (market) observation at or before `as_of`, the holder (market) rules are out of
+    scope (listed in ``coverage.out_of_scope``, never counted toward coverage)."""
     if canonical_id != f"solana:{mint}":
         raise SafetyIdentityError(f"{canonical_id} isn't the identity of mint {mint}")
     inputs: list[dict[str, Any]] = []
@@ -215,6 +235,9 @@ def build_body(
     hin = holders or HolderInputs(None)
     inputs += _check_holder_inputs(canonical_id, as_of, hin)
     section, facts = holder_section(as_of, hin)
+    min_ = market or MarketInputs()
+    inputs += _check_market_inputs(canonical_id, as_of, min_)
+    msection, mfacts = market_section(mint, as_of, min_)
 
     authority = authority_fields(mint_row)
     status, why = token_identity(mint_row)
@@ -226,13 +249,24 @@ def build_body(
         authority,
     )
     in_scope = hin.observation is not None
+    market_scope = bool(min_.observations)
+    out_of_scope: list[dict[str, str]] = []
     if in_scope:
-        results = sorted(results + evaluate_holders(facts), key=lambda r: r.id)
+        results += evaluate_holders(facts)
+    if market_scope:
+        results += evaluate_market(mfacts)
+        if not mfacts.closure_applicable:
+            out_of_scope.append({"id": "MARKET_CLOSED_ON_CHAIN",
+                                 "reason": mfacts.closure_reason or str(mfacts.reason)})  # fmt: skip
+    results = sorted(results, key=lambda r: r.id)
     assessment, coverage, coverage_reasons = assess(results, status, why)
-    deferred_why = "not collected yet in Safety V2"
-    notes = {k: deferred_why for k in ("creator", "market")}
+    notes = {"creator": "not collected yet in Safety V2"}
     if not in_scope:
         notes["holders"] = HOLDERS_OUT_OF_SCOPE
+        out_of_scope += [{"id": r, "reason": HOLDERS_OUT_OF_SCOPE} for r in HOLDER_RULE_IDS]
+    if not market_scope:
+        notes["market"] = MARKET_OUT_OF_SCOPE
+        out_of_scope += [{"id": r, "reason": MARKET_OUT_OF_SCOPE} for r in MARKET_RULE_IDS]
     return {
         "schema_version": SNAPSHOT_SCHEMA,
         "rules_version": RULES_VERSION,
@@ -243,16 +277,12 @@ def build_body(
             "mint": mint,
             "address_format": "VALID_SOLANA_BASE58",
             "token_mint": {"status": status, "reason": why},
-            "pool_match": {
-                "status": "UNVERIFIED",
-                "evidence": missing(
-                    "NOT_COLLECTED", "pool / market collection is a later phase"
-                ).as_dict(),
-            },
+            "pool_match": pool_match(min_, msection),
         },
         "provenance": {"inputs": inputs, "fingerprints": dict(sorted(fingerprints.items()))},
         "authority": {k: v.as_dict() for k, v in authority.items()},
         "holders": section,
+        "market": msection,
         "flags": [r.model_dump(mode="json", exclude={"needs"}) for r in results],
         "undetermined": [
             {"id": r.id, "needs": r.needs, "reason": r.reason}
@@ -267,14 +297,12 @@ def build_body(
             "components": {
                 "mint_account": _mint_component(mint_row),
                 "holders": section["status"],
-                "market": "NOT_SUPPORTED",
+                "market": msection["status"],
                 "creator": "NOT_SUPPORTED",
             },
             "component_notes": dict(sorted(notes.items())),
             "not_supported": [{"id": k, "reason": v} for k, v in sorted(DEFERRED_RULES.items())],
-            "out_of_scope": []
-            if in_scope
-            else [{"id": r, "reason": HOLDERS_OUT_OF_SCOPE} for r in HOLDER_RULE_IDS],
+            "out_of_scope": sorted(out_of_scope, key=lambda r: r["id"]),
         },
     }
 
@@ -565,4 +593,237 @@ def holder_section(as_of: float, h: HolderInputs) -> tuple[dict[str, Any], Holde
         unidentified_program_large=tuple(c.fact.key for c in program_large if not c.identified),
         unresolved_large=tuple(c.fact.key for c in large if c.cls == "UNRESOLVED"),
     )
+    return section, facts
+
+
+# --- market (Phase 3) ----------------------------------------------------------------------
+
+MARKET_OUT_OF_SCOPE = (
+    "no market observation of this identity at or before as_of: market rules are out of scope"
+)
+PROVIDER_REPORTED = "PROVIDER_REPORTED"
+MARKET_FIELDS = ("primary_pool", "primary_dex", "primary_liquidity_usd", "pool_age_hours",
+                 "primary_clear", "liquidity_change_pct_24h", "volume_24h", "txns_24h",
+                 "price_usd")  # fmt: skip
+
+
+@dataclass(frozen=True)
+class MarketInputs:
+    """Every market observation, the pool pins and the pool-account checks, all <= as_of."""
+
+    observations: tuple[ObservedMarket, ...] = ()
+    pins: tuple[PoolPin, ...] = ()
+    accounts: tuple[AccountCheck, ...] = ()
+
+
+def _check_market_inputs(canonical_id: str, as_of: float, m: MarketInputs) -> list[dict[str, Any]]:
+    """Re-check causality of every market input; their provenance entries."""
+    if not m.observations:
+        return []
+    for o in m.observations:
+        if o.fetched_at > as_of:
+            raise SafetyCausalityError(
+                f"market observation {o.id} was fetched at {iso(o.fetched_at)}, after as_of "
+                f"{iso(as_of)}"
+            )
+        bad = [p.pair_address for p in o.pools
+               if p.identity == "EXACT_BASE" and f"solana:{p.base_mint}" != canonical_id]  # fmt: skip
+        if bad:
+            raise SafetyIdentityError(f"market observation {o.id} has pools of another mint")
+    for a in m.accounts:
+        if a.fetched_at > as_of:
+            raise SafetyCausalityError(
+                f"pool account observation {a.id} was fetched at {iso(a.fetched_at)}, after "
+                f"as_of {iso(as_of)}"
+            )
+    for pin in m.pins:
+        if pin.canonical_id != canonical_id:
+            raise SafetyIdentityError(f"pool pin {pin.id} belongs to {pin.canonical_id}")
+        if pin.pinned_at > as_of:
+            raise SafetyCausalityError(
+                f"pool pin {pin.id} was learned at {iso(pin.pinned_at)}, after as_of {iso(as_of)}"
+            )
+    latest = m.observations[-1]
+    if any(o.fetched_at > latest.fetched_at for o in m.observations):
+        raise SafetyStateError("market observations must be ordered oldest first")
+    return [{
+        "component": "market",
+        "observation_id": latest.id,
+        "collection_id": latest.collection_id,
+        "fetched_at": iso(latest.fetched_at),
+        "provider": latest.provider,
+        "outcome": latest.outcome,
+        "history_observations": len(m.observations),
+        "pool_account_checks": len(m.accounts),
+    }]  # fmt: skip
+
+
+def _empty_market(status: Status, why: str) -> tuple[dict[str, Any], MarketFacts]:
+    fields = {k: missing(status, why).as_dict() for k in MARKET_FIELDS}
+    section: dict[str, Any] = {
+        "status": status, "reason": why, "basis": PROVIDER_REPORTED, "fetched_at": None,
+        **fields, "pool_presence": {"state": "UNAVAILABLE" if status != "NOT_COLLECTED"
+                                    else "NOT_COLLECTED", "reason": why},
+        "alternative_eligible_pools": [], "pinned_pools": [], "other_pools": [],
+        "not_reported": None, "pool_account": None, "ambiguity": [],
+        "closure_check": {"applicable": False, "reason": why},
+    }  # fmt: skip
+    return section, MarketFacts(status=status, reason=why)
+
+
+def pool_match(m: MarketInputs, section: dict[str, Any]) -> dict[str, Any]:
+    """Whether a provider-reported pool has this exact mint as its base (never on-chain
+    verification: the status stays UNVERIFIED)."""
+    if not m.observations:
+        return {"status": "UNVERIFIED", "evidence": missing("NOT_COLLECTED",
+                MARKET_OUT_OF_SCOPE).as_dict()}  # fmt: skip
+    presence = section["pool_presence"]["state"]
+    if presence == "REPORTED":
+        ev = available({"pool": section["primary_pool"]["value"]["address"],
+                        "basis": "the provider reports this exact mint as the pool's base"})  # fmt: skip
+    else:
+        ev = missing("UNAVAILABLE", f"no exact pool is reported ({presence})")
+    return {"status": "UNVERIFIED", "evidence": ev.as_dict()}
+
+
+def market_section(mint: str, as_of: float, m: MarketInputs) -> tuple[dict[str, Any], MarketFacts]:
+    """The body's ``market`` section and the facts the market rules read."""
+    if not m.observations:
+        return _empty_market("UNAVAILABLE", MARKET_OUT_OF_SCOPE)
+    pins = sorted(m.pins, key=lambda p: (p.pinned_at, p.id))
+    view = market_view(mint, m.observations, [(p.pool_address, p.dex, p.pinned_at) for p in pins],
+                       m.accounts)  # fmt: skip
+    latest = view.latest
+    ok = latest.successful
+    status: Status = (
+        "AVAILABLE" if ok
+        else "NOT_COLLECTED" if latest.outcome == "NOT_COLLECTED"
+        else "PROVIDER_UNAVAILABLE"
+    )  # fmt: skip
+    reason = None if ok else f"market observation {latest.id} is {latest.outcome}: {latest.reason}"
+    if not ok:
+        section, _ = _empty_market(status, str(reason))
+    else:
+        section = {"status": status, "reason": None}
+    section |= {"basis": PROVIDER_REPORTED, "fetched_at": iso(latest.fetched_at),
+                "pool_presence": {"state": view.presence, "reason": view.presence_reason}}  # fmt: skip
+
+    reported = view.reported
+    no_pool = f"the tracked pool isn't reported ({view.presence})"
+    if not ok:
+        tracked_why = str(reason)
+    elif view.anchor is None:
+        tracked_why = "no exact-mint pool is known for this token"
+    else:
+        tracked_why = no_pool
+
+    def pool_field(value: Any) -> Evidence:
+        if reported is None:
+            return missing("UNAVAILABLE" if ok else status, tracked_why)
+        if value is None:
+            return missing("UNAVAILABLE", "the provider didn't report this field")
+        return available(value)
+
+    if view.anchor is not None:
+        section["primary_pool"] = available({"address": view.anchor, "dex": view.anchor_dex,
+                                             "anchor": view.anchor_source}).as_dict()  # fmt: skip
+        section["primary_dex"] = (available(view.anchor_dex) if view.anchor_dex
+                                  else missing("UNAVAILABLE", "no DEX known")).as_dict()  # fmt: skip
+    else:
+        for k in ("primary_pool", "primary_dex"):
+            section[k] = missing("UNAVAILABLE" if ok else status, tracked_why).as_dict()
+
+    liquidity = pool_field(reported.liquidity_usd if reported else None)
+    section["primary_liquidity_usd"] = liquidity.as_dict()
+    for k, attr in (("volume_24h", "volume_24h"), ("txns_24h", "txns_24h"),
+                    ("price_usd", "price_usd")):  # fmt: skip
+        section[k] = pool_field(getattr(reported, attr) if reported else None).as_dict()
+
+    # Pool age: as_of - provider pair_created_at, never negative.
+    age_s: float | None = None
+    if reported is None:
+        age = missing("UNAVAILABLE" if ok else status, tracked_why)
+    elif reported.pair_created_at is None:
+        age = missing("UNAVAILABLE", "the provider reported no pool creation time")
+    elif reported.pair_created_at > as_of:
+        age = missing("UNKNOWN", "the provider-reported creation time is after as_of")
+    else:
+        age_s = as_of - reported.pair_created_at
+        age = available(round(age_s / 3600, 6))
+    section["pool_age_hours"] = age.as_dict()
+
+    # Liquidity change: the same exact pool, latest vs its 24 h high (never bridged).
+    window_max: float | None = None
+    if reported is None or reported.liquidity_usd is None:
+        change = missing("UNAVAILABLE" if ok else status, tracked_why)
+    else:
+        points = [
+            p.liquidity_usd for o in m.observations
+            if o is not latest and o.successful
+            and latest.fetched_at - LIQUIDITY_WINDOW_S <= o.fetched_at < latest.fetched_at
+            and (p := o.exact(reported.pair_address)) is not None and p.liquidity_usd is not None
+        ]  # fmt: skip
+        if not points:
+            change = missing("UNAVAILABLE", "fewer than 2 same-pool liquidity observations in "
+                             "the preceding 24 h")  # fmt: skip
+        elif max(points) <= 0:
+            change = missing("UNAVAILABLE", "the same-pool 24 h high is zero")
+        else:
+            window_max = max(points)
+            change = available(round(100 * (reported.liquidity_usd - window_max) / window_max, 6))
+    section["liquidity_change_pct_24h"] = change.as_dict()
+
+    sel = view.selection
+    if not ok:
+        clear = missing(status, str(reason))
+    elif pins:
+        clear = available(len(pins) == 1)
+    elif sel is not None and sel.primary is not None:
+        clear = available(sel.clear)
+    else:
+        clear = missing("UNAVAILABLE", "no eligible exact-mint pool to select from")
+    section["primary_clear"] = clear.as_dict()
+    # Eligibility is re-derived from the stored figures (never trusted from collection).
+    current = with_selection(latest.pools, mint) if ok else ()
+    eligible = [p for p in current if p.identity == "EXACT_BASE" and p.eligible]
+    section["alternative_eligible_pools"] = [pool_record(p) for p in eligible
+                                             if p.pair_address != view.anchor]  # fmt: skip
+    section["pinned_pools"] = list(view.pins)
+    section["other_pools"] = [
+        {"pair_address": p.pair_address, "identity": p.identity, "base_mint": p.base_mint,
+         "base_symbol": p.base_symbol, "reasons": list(p.rejections)}
+        for p in latest.pools if p.identity != "EXACT_BASE"
+    ]  # fmt: skip
+    section["ambiguity"] = list(sel.ambiguity) if sel is not None else []
+    first = view.misses[0].fetched_at if view.misses else None
+    last = view.misses[-1].fetched_at if view.misses else None
+    span = (last - first) if first is not None and last is not None else 0.0
+    section["closure_check"] = {"applicable": view.closure_applicable,
+                                "reason": view.closure_reason}  # fmt: skip
+    section["not_reported"] = {
+        "misses": len(view.misses), "first_miss_at": iso(first), "last_miss_at": iso(last),
+        "min_misses": MARKET_NOT_REPORTED_MIN_MISSES,
+        "min_duration_s": MARKET_NOT_REPORTED_MIN_DURATION_S,
+    }  # fmt: skip
+    a = view.account
+    section["pool_account"] = None if a is None else {
+        "outcome": a.outcome, "fetched_at": iso(a.fetched_at), "program_owner": a.program_owner,
+        "reason": a.reason,
+    }  # fmt: skip
+
+    facts = MarketFacts(
+        status=status, reason=reason, presence=view.presence,
+        presence_reason=view.presence_reason, account_outcome=a.outcome if a else None,
+        anchor=view.anchor,
+        liquidity_usd=reported.liquidity_usd if reported else None,
+        liquidity_reason=str(liquidity.reason or ""),
+        window_max_usd=window_max, change_reason=str(change.reason or ""),
+        age_s=age_s, age_reason=str(age.reason or ""),
+        any_eligible=bool(eligible) if ok else None,
+        pinned=len(pins), has_primary=sel is not None and sel.primary is not None,
+        clear=sel.clear if sel is not None else None,
+        ambiguity=tuple(sel.ambiguity) if sel is not None else (),
+        misses=len(view.misses), miss_span_s=span,
+        closure_applicable=view.closure_applicable, closure_reason=view.closure_reason,
+    )  # fmt: skip
     return section, facts

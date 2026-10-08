@@ -42,7 +42,7 @@ def test_new_database_records_schema_versions(tmp_path: Path) -> None:
         repo.set_meta("schema_version", "2")
 
 
-@pytest.mark.parametrize("version", ["0", "1", "3", None])
+@pytest.mark.parametrize("version", ["0", "1", "2", "4", None])
 def test_unknown_schema_version_is_refused(tmp_path: Path, version: str | None) -> None:
     path = tmp_path / "s.sqlite3"
     with sqlite3.connect(path) as conn:
@@ -54,29 +54,37 @@ def test_unknown_schema_version_is_refused(tmp_path: Path, version: str | None) 
         SafetyRepository(path).db()
 
 
-def test_a_phase_1_schema_1_database_is_refused_before_any_mutation(tmp_path: Path) -> None:
-    """A real Phase 1 layout (no holder tables, schema_version 1) is never migrated, and the
-    Phase 2 tables are never created in it."""
+PHASE_2_TABLES = ("safety_holder_balances", "safety_holder_observations", "safety_target_pools")
+PHASE_3_TABLES = ("safety_pool_account_observations", "safety_market_pools",
+                  "safety_market_observations")  # fmt: skip
+
+
+@pytest.mark.parametrize(("version", "missing"), [
+    ("1", PHASE_3_TABLES + PHASE_2_TABLES),  # a Phase 1 database
+    ("2", PHASE_3_TABLES),  # a Phase 2 database
+])  # fmt: skip
+def test_an_older_phase_database_is_refused_before_any_mutation(
+    tmp_path: Path, version: str, missing: tuple[str, ...]
+) -> None:
+    """A real older layout is never migrated, and newer tables are never created in it."""
     from upscale.services.safety_v2 import repository
 
-    path = tmp_path / "phase1.sqlite3"
+    path = tmp_path / f"phase{version}.sqlite3"
     with sqlite3.connect(path) as conn:
         conn.executescript(repository._SCHEMA)
-        for table in ("safety_holder_balances", "safety_holder_observations",
-                      "safety_target_pools"):  # fmt: skip
+        for table in missing:
             conn.execute(f"DROP TABLE {table}")
-        conn.execute("INSERT INTO safety_meta VALUES ('schema_version', '1')")
+        conn.execute("INSERT INTO safety_meta VALUES ('schema_version', ?)", (version,))
     conn.close()
     before = (path.read_bytes(), path.stat().st_mtime_ns)
-    with pytest.raises(SafetySchemaError, match="schema version 1"):
+    with pytest.raises(SafetySchemaError, match=f"schema version {version}"):
         SafetyRepository(path).db()
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
     with sqlite3.connect(path) as conn:
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
-    assert not names & {"safety_target_pools", "safety_holder_observations",
-                        "safety_holder_balances"}  # fmt: skip
-    assert DB_SCHEMA_VERSION == 2
+    assert not names & set(missing)
+    assert DB_SCHEMA_VERSION == 3
 
 
 def test_safety_tables_without_meta_are_refused(tmp_path: Path) -> None:
@@ -263,7 +271,8 @@ def test_body_and_hash_are_deterministic(tmp_path: Path) -> None:
     body = svc.repo.snapshot(res.snapshot_id or 0).body
     assert body["schema_version"] == SNAPSHOT_SCHEMA and body["rules_version"] == RULES_VERSION
     fp = body["provenance"]["fingerprints"]
-    assert set(fp) == {"rules_version", "safety_v2_source", "solana_chain_source"}
+    assert set(fp) == {"rules_version", "safety_v2_source", "solana_chain_source",
+                       "solana_dex_source", "dexscreener_source"}  # fmt: skip
     assert fp == code_fingerprints()
 
 

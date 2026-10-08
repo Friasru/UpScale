@@ -17,6 +17,9 @@ from upscale.services.solana_chain import TOKEN_2022_PROGRAM, TOKEN_PROGRAM
 
 T0 = datetime(2026, 10, 1, tzinfo=UTC)
 RPC_URL = "https://rpc.invalid/?api-key=SECRETKEY"
+DEX_URL = "https://dex.invalid"
+SOL = "So11111111111111111111111111111111111111112"
+USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 
 def addr(tag: str) -> str:
@@ -161,8 +164,23 @@ class FakeRpc:
     calls: list[str] = field(default_factory=list)
     slot: int = 123
     holders: HolderChain | None = None
+    # DEX Screener token-pairs answer: a list of rows, or an instruction as above. None:
+    # the DEX endpoint must not be called.
+    dex: Any = None
 
     def handle(self, request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET":
+            assert request.url.path == f"/token-pairs/v1/solana/{MINT}", request.url
+            self.calls.append("dex.tokenPairs")
+            assert self.dex is not None, "unexpected DEX request"
+            if isinstance(self.dex, tuple):
+                if self.dex[0] == "http":
+                    return httpx2.Response(self.dex[1], json={})
+                if self.dex[0] == "timeout":
+                    raise httpx2.ConnectTimeout("timed out", request=request)
+                if self.dex[0] == "raw":
+                    return httpx2.Response(200, json=self.dex[1])
+            return httpx2.Response(200, json=self.dex)
         payload = json.loads(request.content)
         method, params = payload["method"], payload["params"]
         self.calls.append(method)
@@ -209,10 +227,13 @@ def make_service(
     provider: bool = True,
     db_name: str = "safety.sqlite3",
     helius: bool = False,
+    dex: bool = False,
     **settings: Any,
 ) -> tuple[SafetyService, Clock, FakeRpc]:
     clock = clock or Clock()
     rpc = rpc if rpc is not None else FakeRpc()
+    if dex:
+        settings.setdefault("dex_url", DEX_URL)
     cfg = SafetySettings(db_path=str(tmp_path / db_name), **settings)
     repo = SafetyRepository(cfg.db_path)
     guard = RequestGuard(cfg, repo, now=clock.now, monotonic=clock.monotonic, sleep=clock.sleep,
@@ -227,3 +248,33 @@ def make_service(
         guard=guard,
     )
     return svc, clock, rpc
+
+
+def pair_row(
+    pair: str,
+    *,
+    base: str = MINT,
+    quote: str = SOL,
+    liquidity: Any = 200_000.0,
+    price: Any = "0.5",
+    txns: int | None = 50,
+    volume: float | None = 10_000.0,
+    created: datetime | None = T0 - timedelta(days=30),
+    chain: str = "solana",
+    dex: str = "raydium",
+    base_symbol: str = "TKN",
+) -> dict[str, Any]:
+    """One DEX Screener pair object."""
+    row: dict[str, Any] = {
+        "chainId": chain, "dexId": dex, "pairAddress": pair,
+        "baseToken": {"address": base, "symbol": base_symbol, "name": "Token"},
+        "quoteToken": {"address": quote, "symbol": "SOL" if quote == SOL else "Q"},
+        "priceUsd": price, "liquidity": {"usd": liquidity},
+    }  # fmt: skip
+    if txns is not None:
+        row["txns"] = {"h24": {"buys": txns, "sells": 0}}
+    if volume is not None:
+        row["volume"] = {"h24": volume}
+    if created is not None:
+        row["pairCreatedAt"] = int(created.timestamp() * 1000)
+    return row

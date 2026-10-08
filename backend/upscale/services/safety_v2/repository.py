@@ -14,6 +14,16 @@ mutation, never migrated and never given the new tables):
   what the owner's own account looked like. Classification is never stored: it is derived
   per snapshot ``as_of``.
 
+Phase 3 tables (schema version 3; a version-2 database is refused the same way):
+
+* ``safety_market_observations``: one DEX-provider market read (POOLS / NO_POOLS /
+  PROVIDER_FAILED / NOT_COLLECTED), with the collection-time primary (audit only: the
+  snapshot re-derives selection per ``as_of``).
+* ``safety_market_pools``: every pool that read returned (parsed), with its identity
+  relative to the exact mint, PROVIDER_REPORTED figures, eligibility and rejection reasons.
+* ``safety_pool_account_observations``: one ``getAccountInfo(pool)``: exact on-chain
+  presence evidence for one pool address.
+
 * Observations and snapshots are append-only (UPDATE / DELETE abort in triggers).
 * A collection is RUNNING until it is finished DONE or ABORTED, and a finished collection
   is final. An observation can only be added to a RUNNING collection of the same target,
@@ -36,18 +46,24 @@ from pathlib import Path
 from typing import Any
 
 from upscale.services.safety_v2.config import DB_SCHEMA_VERSION, RULES_VERSION, SNAPSHOT_SCHEMA
+from upscale.services.safety_v2.market import AccountCheck, MarketPool, ObservedMarket
 from upscale.services.safety_v2.models import (
     HOLDER_OUTCOMES,
     HOLDER_SOURCES,
+    MARKET_OUTCOMES,
     MINT_OUTCOMES,
     OWNER_LOOKUPS,
+    POOL_ACCOUNT_OUTCOMES,
+    POOL_IDENTITIES,
     SafetySchemaError,
     SafetyStateError,
 )
 from upscale.services.safety_v2.provider import (
     HolderObservation,
+    MarketObservation,
     MintObservation,
     OwnerFact,
+    PoolAccountObservation,
     RequestOutcome,
 )
 from upscale.services.solana_chain import TOKEN_2022_PROGRAM, TOKEN_PROGRAM
@@ -57,6 +73,13 @@ _HOLDER_OUTCOMES = ",".join(repr(o) for o in HOLDER_OUTCOMES)
 _HOLDER_SOURCES = ",".join(repr(o) for o in HOLDER_SOURCES)
 _LOOKUPS = ",".join(repr(o) for o in OWNER_LOOKUPS)
 HOLDER_ORIGIN = "safety_v2.collect_holders"
+MARKET_ORIGIN = "safety_v2.collect_market"
+_MARKET_OUTCOMES = ",".join(repr(o) for o in MARKET_OUTCOMES)
+_IDENTITIES = ",".join(repr(o) for o in POOL_IDENTITIES)
+_ACCOUNT_OUTCOMES = ",".join(repr(o) for o in POOL_ACCOUNT_OUTCOMES)
+_RUNNING = """WHEN NOT EXISTS (SELECT 1 FROM safety_collections c WHERE c.id = NEW.collection_id
+    AND c.status = 'RUNNING' AND c.canonical_id = NEW.canonical_id
+    AND c.started_at <= NEW.fetched_at)"""
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS safety_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS safety_targets (
@@ -223,6 +246,104 @@ CREATE TRIGGER IF NOT EXISTS safety_balances_no_update BEFORE UPDATE ON safety_h
 BEGIN SELECT RAISE(ABORT, 'safety_holder_balances rows are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS safety_balances_no_delete BEFORE DELETE ON safety_holder_balances
 BEGIN SELECT RAISE(ABORT, 'safety_holder_balances rows are append-only'); END;
+CREATE TABLE IF NOT EXISTS safety_market_observations (
+    id INTEGER PRIMARY KEY,
+    canonical_id TEXT NOT NULL REFERENCES safety_targets(canonical_id),
+    collection_id INTEGER NOT NULL REFERENCES safety_collections(id),
+    fetched_at REAL NOT NULL,
+    provider TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ({_MARKET_OUTCOMES})),
+    reason TEXT,
+    raw_hash TEXT,
+    rows_returned INTEGER NOT NULL CHECK (rows_returned >= 0),
+    malformed_rows INTEGER NOT NULL CHECK (malformed_rows BETWEEN 0 AND rows_returned),
+    primary_pool TEXT,
+    primary_clear INTEGER CHECK (primary_clear IN (0, 1)),
+    reasons_json TEXT NOT NULL,
+    CHECK ((outcome IN ('POOLS', 'NO_POOLS')) = (raw_hash IS NOT NULL)),
+    CHECK ((outcome IN ('POOLS', 'NO_POOLS')) = (reason IS NULL)),
+    CHECK (outcome IN ('POOLS', 'NO_POOLS') OR (rows_returned = 0 AND malformed_rows = 0)),
+    CHECK (primary_pool IS NULL OR outcome = 'POOLS'),
+    CHECK ((primary_pool IS NULL) = (primary_clear IS NULL))
+);
+CREATE INDEX IF NOT EXISTS safety_market_by_target
+    ON safety_market_observations (canonical_id, fetched_at);
+CREATE TRIGGER IF NOT EXISTS safety_market_in_collection
+BEFORE INSERT ON safety_market_observations {_RUNNING}
+BEGIN SELECT RAISE(ABORT, 'safety_market_observations: needs a RUNNING collection of the same target started at or before fetched_at'); END;
+CREATE TRIGGER IF NOT EXISTS safety_market_no_update BEFORE UPDATE ON safety_market_observations
+BEGIN SELECT RAISE(ABORT, 'safety_market_observations rows are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS safety_market_no_delete BEFORE DELETE ON safety_market_observations
+BEGIN SELECT RAISE(ABORT, 'safety_market_observations rows are append-only'); END;
+CREATE TABLE IF NOT EXISTS safety_market_pools (
+    observation_id INTEGER NOT NULL REFERENCES safety_market_observations(id),
+    rank INTEGER NOT NULL CHECK (rank >= 1),
+    pair_address TEXT NOT NULL,
+    identity TEXT NOT NULL CHECK (identity IN ({_IDENTITIES})),
+    chain TEXT NOT NULL,
+    dex TEXT NOT NULL,
+    base_mint TEXT NOT NULL,
+    base_symbol TEXT,
+    quote_address TEXT NOT NULL,
+    quote_symbol TEXT,
+    quote_kind TEXT NOT NULL,
+    liquidity_usd REAL CHECK (liquidity_usd >= 0),
+    volume_24h REAL CHECK (volume_24h >= 0),
+    txns_24h INTEGER CHECK (txns_24h >= 0),
+    price_usd REAL CHECK (price_usd > 0),
+    pair_created_at REAL,
+    eligible INTEGER NOT NULL CHECK (eligible IN (0, 1)),
+    rejections_json TEXT NOT NULL,
+    PRIMARY KEY (observation_id, pair_address),
+    UNIQUE (observation_id, rank),
+    CHECK (eligible = 0 OR (identity = 'EXACT_BASE' AND rejections_json = '[]'
+        AND liquidity_usd IS NOT NULL AND price_usd IS NOT NULL AND txns_24h IS NOT NULL)),
+    CHECK (identity != 'EXACT_BASE' OR chain = 'solana'),
+    CHECK (identity = 'EXACT_BASE' OR rejections_json != '[]')
+);
+CREATE TRIGGER IF NOT EXISTS safety_market_pools_exact_mint
+BEFORE INSERT ON safety_market_pools
+WHEN NEW.identity = 'EXACT_BASE' AND NOT EXISTS (SELECT 1 FROM safety_market_observations o
+    WHERE o.id = NEW.observation_id AND o.canonical_id = 'solana:' || NEW.base_mint)
+BEGIN SELECT RAISE(ABORT, 'safety_market_pools: an EXACT_BASE pool must have the target mint as its base'); END;
+CREATE TRIGGER IF NOT EXISTS safety_market_pools_in_collection
+BEFORE INSERT ON safety_market_pools
+WHEN NOT EXISTS (SELECT 1 FROM safety_market_observations o JOIN safety_collections c
+    ON c.id = o.collection_id WHERE o.id = NEW.observation_id
+    AND o.outcome IN ('POOLS', 'NO_POOLS') AND c.status = 'RUNNING')
+BEGIN SELECT RAISE(ABORT, 'safety_market_pools: needs a successful observation of a RUNNING collection'); END;
+CREATE TRIGGER IF NOT EXISTS safety_market_pools_no_update BEFORE UPDATE ON safety_market_pools
+BEGIN SELECT RAISE(ABORT, 'safety_market_pools rows are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS safety_market_pools_no_delete BEFORE DELETE ON safety_market_pools
+BEGIN SELECT RAISE(ABORT, 'safety_market_pools rows are append-only'); END;
+CREATE TABLE IF NOT EXISTS safety_pool_account_observations (
+    id INTEGER PRIMARY KEY,
+    canonical_id TEXT NOT NULL REFERENCES safety_targets(canonical_id),
+    collection_id INTEGER NOT NULL REFERENCES safety_collections(id),
+    pool_address TEXT NOT NULL,
+    fetched_at REAL NOT NULL,
+    provider TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ({_ACCOUNT_OUTCOMES})),
+    program_owner TEXT,
+    lamports INTEGER CHECK (lamports >= 0),
+    raw_hash TEXT,
+    reason TEXT,
+    CHECK (canonical_id != 'solana:' || pool_address),
+    CHECK ((outcome = 'EXISTS') = (program_owner IS NOT NULL)),
+    CHECK (outcome = 'EXISTS' OR lamports IS NULL),
+    CHECK ((outcome IN ('EXISTS', 'ACCOUNT_MISSING')) = (raw_hash IS NOT NULL)),
+    CHECK ((outcome IN ('EXISTS', 'ACCOUNT_MISSING')) = (reason IS NULL))
+);
+CREATE TRIGGER IF NOT EXISTS safety_pool_accounts_in_collection
+BEFORE INSERT ON safety_pool_account_observations {_RUNNING}
+BEGIN SELECT RAISE(ABORT, 'safety_pool_account_observations: needs a RUNNING collection of the same target started at or before fetched_at'); END;
+CREATE TRIGGER IF NOT EXISTS safety_pool_accounts_no_update
+BEFORE UPDATE ON safety_pool_account_observations
+BEGIN SELECT RAISE(ABORT, 'safety_pool_account_observations rows are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS safety_pool_accounts_no_delete
+BEFORE DELETE ON safety_pool_account_observations
+BEGIN SELECT RAISE(ABORT, 'safety_pool_account_observations rows are append-only'); END;
 CREATE TABLE IF NOT EXISTS safety_snapshots (
     id INTEGER PRIMARY KEY,
     canonical_id TEXT NOT NULL REFERENCES safety_targets(canonical_id),
@@ -245,7 +366,8 @@ BEGIN SELECT RAISE(ABORT, 'safety_snapshots rows are immutable'); END;
 TABLES = (
     "safety_meta", "safety_targets", "safety_requests", "safety_collections",
     "safety_mint_observations", "safety_snapshots", "safety_target_pools",
-    "safety_holder_observations", "safety_holder_balances",
+    "safety_holder_observations", "safety_holder_balances", "safety_market_observations",
+    "safety_market_pools", "safety_pool_account_observations",
 )  # fmt: skip
 _OUTCOME_COLUMN = {"ok": "ok", "rate_limited": "rate_limited", "timeout": "timeouts",
                    "failed": "failures"}  # fmt: skip
@@ -724,6 +846,123 @@ class SafetyRepository:
             )
         return [OwnerFact(k, o, tuple(json.loads(a)), int(amt), lk, p)
                 for k, o, a, amt, lk, p in rows]  # fmt: skip
+
+    # --- market observations (Phase 3) -----------------------------------------------------
+
+    def record_market_observation(
+        self,
+        canonical_id: str,
+        collection_id: int,
+        fetched_at: float,
+        provider: str,
+        obs: MarketObservation,
+    ) -> int:
+        """The observation and its pools, in one transaction."""
+        clear = None if obs.primary_clear is None else int(obs.primary_clear)
+        with self._lock, self.db() as conn:
+            cur = conn.execute(
+                "INSERT INTO safety_market_observations (canonical_id, collection_id, "
+                "fetched_at, provider, origin, outcome, reason, raw_hash, rows_returned, "
+                "malformed_rows, primary_pool, primary_clear, reasons_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (canonical_id, collection_id, fetched_at, provider, MARKET_ORIGIN, obs.outcome,
+                 obs.reason, obs.raw_hash, obs.rows_returned, obs.malformed_rows,
+                 obs.primary_pool, clear, json.dumps(list(obs.reasons))),
+            )  # fmt: skip
+            oid = cur.lastrowid
+            assert oid is not None
+            conn.executemany(
+                "INSERT INTO safety_market_pools (observation_id, rank, pair_address, identity, "
+                "chain, dex, base_mint, base_symbol, quote_address, quote_symbol, quote_kind, "
+                "liquidity_usd, volume_24h, txns_24h, price_usd, pair_created_at, eligible, "
+                "rejections_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(oid, rank, p.pair_address, p.identity, p.chain, p.dex, p.base_mint,
+                  p.base_symbol, p.quote_address, p.quote_symbol, p.quote_kind, p.liquidity_usd,
+                  p.volume_24h, p.txns_24h, p.price_usd, p.pair_created_at, int(p.eligible),
+                  json.dumps(list(p.rejections)))
+                 for rank, p in enumerate(obs.pools, 1)],
+            )  # fmt: skip
+        return oid
+
+    def market_observations(self, canonical_id: str, as_of: float) -> list[ObservedMarket]:
+        """Every market observation of this identity fetched at or before `as_of`, oldest
+        first, with its pools (in stored rank order)."""
+        with self._lock:
+            conn = self.db()
+            rows = conn.execute(
+                "SELECT id, collection_id, fetched_at, outcome, reason, provider FROM "
+                "safety_market_observations WHERE canonical_id = ? AND fetched_at <= ? "
+                "ORDER BY fetched_at, id",
+                (canonical_id, as_of),
+            ).fetchall()
+            pools: dict[int, list[MarketPool]] = {}
+            if rows:
+                for r in conn.execute(
+                    "SELECT p.observation_id, p.pair_address, p.identity, p.chain, p.dex, "
+                    "p.base_mint, p.base_symbol, p.quote_address, p.quote_symbol, p.quote_kind, "
+                    "p.liquidity_usd, p.volume_24h, p.txns_24h, p.price_usd, p.pair_created_at, "
+                    "p.eligible, p.rejections_json FROM safety_market_pools p "
+                    "JOIN safety_market_observations o ON o.id = p.observation_id "
+                    "WHERE o.canonical_id = ? AND o.fetched_at <= ? "
+                    "ORDER BY p.observation_id, p.rank",
+                    (canonical_id, as_of),
+                ):
+                    pools.setdefault(r[0], []).append(
+                        MarketPool(
+                            pair_address=r[1],
+                            identity=r[2],
+                            chain=r[3],
+                            dex=r[4],
+                            base_mint=r[5],
+                            base_symbol=r[6],
+                            quote_address=r[7],
+                            quote_symbol=r[8],
+                            quote_kind=r[9],
+                            liquidity_usd=r[10],
+                            volume_24h=r[11],
+                            txns_24h=r[12],
+                            price_usd=r[13],
+                            pair_created_at=r[14],
+                            eligible=bool(r[15]),
+                            rejections=tuple(json.loads(r[16])),
+                        )  # fmt: skip
+                    )
+        return [ObservedMarket(i, c, f, o, why, tuple(pools.get(i, ())), prov)
+                for i, c, f, o, why, prov in rows]  # fmt: skip
+
+    def record_pool_account(
+        self,
+        canonical_id: str,
+        collection_id: int,
+        pool_address: str,
+        fetched_at: float,
+        provider: str,
+        obs: PoolAccountObservation,
+    ) -> int:
+        with self._lock, self.db() as conn:
+            cur = conn.execute(
+                "INSERT INTO safety_pool_account_observations (canonical_id, collection_id, "
+                "pool_address, fetched_at, provider, outcome, program_owner, lamports, raw_hash, "
+                "reason) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (canonical_id, collection_id, pool_address, fetched_at, provider, obs.outcome,
+                 obs.program_owner, obs.lamports, obs.raw_hash, obs.reason),
+            )  # fmt: skip
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def pool_accounts(self, canonical_id: str, as_of: float) -> list[AccountCheck]:
+        with self._lock:
+            rows = (
+                self.db()
+                .execute(
+                    "SELECT id, collection_id, pool_address, fetched_at, outcome, program_owner, "
+                    "reason FROM safety_pool_account_observations WHERE canonical_id = ? AND "
+                    "fetched_at <= ? ORDER BY fetched_at, id",
+                    (canonical_id, as_of),
+                )
+                .fetchall()
+            )
+        return [AccountCheck(*r) for r in rows]
 
     # --- snapshots ------------------------------------------------------------------------
 

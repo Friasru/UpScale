@@ -19,9 +19,15 @@ Environment (all optional):
 * ``UPSCALE_SAFETY_V2_RADAR_DB`` (unset): a Radar database read **read-only** for positive
   wallet proof (a signer). Unset, missing or incompatible: no owner is proven a wallet.
 
+* ``UPSCALE_SAFETY_V2_DEX_URL`` (unset): the DEX Screener API base URL (e.g.
+  ``https://api.dexscreener.com``). Unset: market evidence is NOT_COLLECTED, so nothing
+  ever reaches a market provider unless it is configured explicitly.
+
 One holder collection makes at most ``4 + holder_max_pages`` logical requests
 (``getTokenSupply``, ``getTokenLargestAccounts``, one ``getMultipleAccounts`` for those
-accounts, the scan pages, one ``getMultipleAccounts`` for the owners).
+accounts, the scan pages, one ``getMultipleAccounts`` for the owners). One market
+collection makes at most 2: the DEX token-pairs request and, only when a previously
+observed or pinned pool wasn't reported, one ``getAccountInfo(pool)``.
 """
 
 import os
@@ -32,13 +38,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SNAPSHOT_SCHEMA = "safety.snapshot.v2"
 # 1: Phase 1 tables. 2: + safety_target_pools, safety_holder_observations,
-# safety_holder_balances. A database of another version is refused, never migrated.
-DB_SCHEMA_VERSION = 2
+# safety_holder_balances. 3: + safety_market_observations, safety_market_pools,
+# safety_pool_account_observations. A database of another version is refused, never
+# migrated.
+DB_SCHEMA_VERSION = 3
 # Bump whenever a rule's logic, threshold or wording changes: a snapshot built under
 # another rules version is never claimed to be an exact reproduction.
 # "2": Phase 2 holder rules (concentration, few holders, large unknown / program owners)
-# and holder-scoped coverage.
-RULES_VERSION = "2"
+# and holder-scoped coverage. "3": Phase 3 market rules (liquidity, collapse, closure,
+# not-reported history, eligibility, primary clarity, pool age) and market-scoped coverage.
+RULES_VERSION = "3"
 
 ENV_PREFIX = "UPSCALE_SAFETY_V2_"
 
@@ -66,6 +75,9 @@ class SafetySettings(BaseModel):
     holder_owner_lookups: int = Field(default=30, ge=0, le=100)  # one getMultipleAccounts
     radar_db_path: str | None = None  # read-only wallet proof; None: not consulted
 
+    # --- Market collection (Phase 3) ---
+    dex_url: str | None = None  # DEX Screener base URL; None: no market provider
+
     @model_validator(mode="after")
     def _caps(self) -> "SafetySettings":
         if self.max_cooldown_seconds < self.cooldown_seconds:
@@ -86,6 +98,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> SafetySettings:
         values["db_path"] = raw
     if raw := source.get(ENV_PREFIX + "RADAR_DB"):
         values["radar_db_path"] = raw
+    if raw := source.get(ENV_PREFIX + "DEX_URL"):
+        values["dex_url"] = raw
     for name in _INT + _FLOAT:
         raw = source.get(ENV_PREFIX + name.upper())
         if raw is None or not raw.strip():

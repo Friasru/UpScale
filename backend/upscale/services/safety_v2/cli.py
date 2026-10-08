@@ -13,13 +13,16 @@ Local only (no provider request):
 
 Makes Solana provider requests (Safety V2's own daily budget; the count is printed):
 
-    python -m upscale.services.safety_v2 collect --token <mint> [--no-holders] [--json]
-    python -m upscale.services.safety_v2 snapshot --token <mint> [--no-holders] [--no-save]
+    python -m upscale.services.safety_v2 collect --token <mint> [--no-holders] [--no-market]
         [--json]
+    python -m upscale.services.safety_v2 snapshot --token <mint> [--no-holders] [--no-market]
+        [--no-save] [--json]
 
-A collection reads the mint account (1 request) and, unless ``--no-holders``, the holders
-(at most 4 + UPSCALE_SAFETY_V2_HOLDER_MAX_PAGES requests). Wallet proof is read only from
-UPSCALE_SAFETY_V2_RADAR_DB, read-only.
+A collection reads the mint account (1 request), unless ``--no-holders`` the holders (at
+most 4 + UPSCALE_SAFETY_V2_HOLDER_MAX_PAGES requests) and, unless ``--no-market``, the
+market (1 DEX request, only when UPSCALE_SAFETY_V2_DEX_URL is set, plus at most one
+getAccountInfo(pool) when a previously reported pool went missing). Wallet proof is read
+only from UPSCALE_SAFETY_V2_RADAR_DB, read-only.
 """
 
 import argparse
@@ -35,7 +38,7 @@ from upscale.services.safety_v2.config import SafetySettings, load_settings
 from upscale.services.safety_v2.models import SafetyError, solana_identity
 from upscale.services.safety_v2.service import SafetyService, SnapshotResult
 
-PROVIDER_NOTE = "MAKES SOLANA PROVIDER REQUESTS (Safety V2's own daily budget)"
+PROVIDER_NOTE = "MAKES SOLANA RPC AND DEX PROVIDER REQUESTS (Safety V2's own daily budget)"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -56,14 +59,16 @@ def parser() -> argparse.ArgumentParser:
                     "shared vault authority)")  # fmt: skip
     tl = tsub.add_parser("list")
     tl.add_argument("--json", action="store_true")
-    c = sub.add_parser("collect", help=f"one mint + holder observation. {PROVIDER_NOTE}")
+    c = sub.add_parser("collect", help=f"one mint + holder + market observation. {PROVIDER_NOTE}")
     c.add_argument("--token", required=True)
-    c.add_argument("--no-holders", action="store_true", help="mint account only")
+    c.add_argument("--no-holders", action="store_true", help="skip the holder component")
+    c.add_argument("--no-market", action="store_true", help="skip the market component")
     c.add_argument("--json", action="store_true")
     sn = sub.add_parser("snapshot", help=f"collect + snapshot. {PROVIDER_NOTE}")
     sn.add_argument("--token", required=True)
     sn.add_argument("--no-fetch", action="store_true", help="from stored data only: no request")
-    sn.add_argument("--no-holders", action="store_true", help="collect the mint account only")
+    sn.add_argument("--no-holders", action="store_true", help="skip the holder component")
+    sn.add_argument("--no-market", action="store_true", help="skip the market component")
     sn.add_argument("--no-save", action="store_true", help="print the body without storing it")
     sn.add_argument("--json", action="store_true")
     sh = sub.add_parser("show", help="a stored snapshot (local only)")
@@ -112,6 +117,13 @@ def body_text(body: dict[str, Any]) -> str:
             bound = ">=" if v["lower_bound"] else ""
             lines.append(f"  {k}: {v['status']} "
                          f"{bound + str(v['value']) if v['value'] is not None else v['reason']}")  # fmt: skip
+    m = body.get("market")
+    if m:
+        pool = m["primary_pool"]["value"]["address"] if m["primary_pool"]["value"] else None
+        liq = m["primary_liquidity_usd"]
+        lines.append(f"market: {m['status']} pool={pool} presence={m['pool_presence']['state']} "
+                     f"liquidity={liq['value'] if liq['value'] is not None else liq['status']} "
+                     f"({m['basis']})")  # fmt: skip
     for f in body["flags"]:
         lines.append(f"  [{f['outcome']}] {f['id']} ({f['severity']}): {f['reason']}")
     return "\n".join(lines)
@@ -144,6 +156,7 @@ def _run(a: argparse.Namespace, settings: SafetySettings) -> int:
                   "daily_request_budget": settings.daily_request_budget,
                   "holder_max_pages": settings.holder_max_pages,
                   "radar_db_configured": settings.radar_db_path is not None,
+                  "market_provider": svc.dex.name if svc.dex else None,
                   "remaining_today": svc.guard.remaining_today(),
                   "cooldown_until": until.isoformat() if until else None,
                   "requests_today": svc.repo.requests_by_method(svc.guard.day()),
@@ -164,15 +177,18 @@ def _run(a: argparse.Namespace, settings: SafetySettings) -> int:
                 _out(rows, a.json, "\n".join(r["canonical_id"] for r in rows) or "no targets")
         elif a.command == "collect":
             print(f"note: {PROVIDER_NOTE}", file=sys.stderr)
-            got = asyncio.run(svc.collect(_cid(a.token), holders=not a.no_holders))
+            got = asyncio.run(svc.collect(_cid(a.token), holders=not a.no_holders,
+                                          market=not a.no_market))  # fmt: skip
             _out(got.__dict__, a.json, f"{got.outcome} (collection {got.collection_id}, "
                  f"observation {got.observation_id}, holders {got.holder_outcome}, "
+                 f"market {got.market_outcome}, "
                  f"requests {got.requests})")  # fmt: skip
         elif a.command == "snapshot":
             if not a.no_fetch:
                 print(f"note: {PROVIDER_NOTE}", file=sys.stderr)
             res = asyncio.run(svc.snapshot(_cid(a.token), fetch=not a.no_fetch, save=not a.no_save,
-                                           holders=not a.no_holders))  # fmt: skip
+                                           holders=not a.no_holders,
+                                           market=not a.no_market))  # fmt: skip
             _out(_result_dict(res), a.json, body_text(res.body) + f"\nhash: {res.body_hash}")
         elif a.command == "show":
             sid = a.id if a.id is not None else svc.repo.latest_snapshot_id(_cid(a.token))

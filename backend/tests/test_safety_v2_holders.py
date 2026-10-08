@@ -130,7 +130,7 @@ def test_complete_scan_gives_exact_values_and_not_triggered_below_thresholds(
     assert {k: f[k] for k in HOLDER_RULES} == dict.fromkeys(HOLDER_RULES, N)
     assert body["assessment"]["coverage"] == "COMPLETE"
     assert body["coverage"]["components"]["holders"] == "AVAILABLE"
-    assert body["coverage"]["out_of_scope"] == []
+    assert not {o["id"] for o in body["coverage"]["out_of_scope"]} & set(HOLDER_RULES)
     assert set(HOLDER_RULES) <= set(body["coverage"]["decision_rules"])
     # Bounded: supply, largest, their accounts, one page, the owners.
     assert rpc.calls == ["getAccountInfo", "getTokenSupply", "getTokenLargestAccounts",
@@ -672,7 +672,7 @@ def test_holder_provider_failure_keeps_the_mint_component(tmp_path: Path) -> Non
     assert (res.collected.outcome, res.collected.holder_outcome) == ("MINT", "PROVIDER_FAILED")
     assert body["coverage"]["components"] | {} == {
         "mint_account": "AVAILABLE", "holders": "PROVIDER_UNAVAILABLE",
-        "market": "NOT_SUPPORTED", "creator": "NOT_SUPPORTED",
+        "market": "UNAVAILABLE", "creator": "NOT_SUPPORTED",
     }  # fmt: skip
     assert body["authority"]["mint_authority"]["status"] == "AVAILABLE"
     f = flags(body)
@@ -836,7 +836,7 @@ def test_no_holder_observation_keeps_holder_rules_out_of_scope(tmp_path: Path) -
     svc.add_target(MINT)
     body = asyncio.run(svc.snapshot(CID)).body
     assert body["holders"]["status"] == "UNAVAILABLE"
-    assert {o["id"] for o in body["coverage"]["out_of_scope"]} == set(HOLDER_RULES)
+    assert set(HOLDER_RULES) <= {o["id"] for o in body["coverage"]["out_of_scope"]}
     assert not set(HOLDER_RULES) & set(flags(body))
     assert body["assessment"]["coverage"] == "COMPLETE"
 

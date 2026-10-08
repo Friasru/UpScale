@@ -27,14 +27,17 @@ holder evidence can trigger a ``>= threshold`` rule but never yields NOT_TRIGGER
 ``LARGE_UNCLASSIFIED_PROGRAM_OWNER`` (a program-owned account no registry entry identifies)
 are separate conditions and are never conflated.
 
+Market evidence (Phase 3): ``MARKET_CLOSED_ON_CHAIN`` needs an exact pool that was
+previously observed and a *successful* ``getAccountInfo(pool)`` returning no account; a
+provider failure or a DEX miss never means closed. ``MARKET_NOT_REPORTED`` needs repeated
+successful misses of the same pool *and* a minimum elapsed duration: two immediate
+consecutive polls never trigger it. Liquidity, volume and price are PROVIDER_REPORTED,
+never presented as verified on-chain.
+
 Invariants reserved for later phases (not implemented yet; see `DEFERRED_RULES`):
 
 * Holders: a verified deployer *absent* from a PARTIAL holder scan is not 0% (the field is
   UNAVAILABLE); a verified deployer *observed* in a partial scan is a PARTIAL lower bound.
-* Market: ``MARKET_CLOSED_ON_CHAIN`` needs an exact pool that was previously observed and a
-  *successful* current ``getAccountInfo(pool)`` returning no account; a provider failure
-  never means closed. ``MARKET_NOT_REPORTED`` needs repeated misses *and* a configurable
-  minimum elapsed duration: two immediate consecutive polls never trigger it.
 """
 
 from datetime import UTC, datetime
@@ -104,6 +107,27 @@ OWNER_CLASSES: tuple[OwnerClass, ...] = (
 )  # fmt: skip
 EXCLUDED_CLASSES: frozenset[str] = frozenset({"POOL_OR_VAULT", "BURN"})
 
+# What one market (DEX provider) observation established. POOLS: a successful response with
+# at least one exact-mint (base) pool; NO_POOLS: successful, none for this exact mint.
+MarketOutcome = Literal["POOLS", "NO_POOLS", "PROVIDER_FAILED", "NOT_COLLECTED"]
+MARKET_OUTCOMES: tuple[MarketOutcome, ...] = ("POOLS", "NO_POOLS", "PROVIDER_FAILED",
+                                              "NOT_COLLECTED")  # fmt: skip
+# How a returned pool relates to the exact target identity. Only EXACT_BASE pools can be
+# the market; the others are kept for audit with their reason.
+PoolIdentity = Literal["EXACT_BASE", "QUOTE_SIDE", "OTHER_MINT", "OTHER_CHAIN", "MALFORMED"]
+POOL_IDENTITIES: tuple[PoolIdentity, ...] = ("EXACT_BASE", "QUOTE_SIDE", "OTHER_MINT",
+                                             "OTHER_CHAIN", "MALFORMED")  # fmt: skip
+# One getAccountInfo(pool): exact on-chain presence evidence (never inferred from a DEX).
+PoolAccountOutcome = Literal["EXISTS", "ACCOUNT_MISSING", "PROVIDER_FAILED", "NOT_COLLECTED"]
+POOL_ACCOUNT_OUTCOMES: tuple[PoolAccountOutcome, ...] = (
+    "EXISTS", "ACCOUNT_MISSING", "PROVIDER_FAILED", "NOT_COLLECTED",
+)  # fmt: skip
+# The tracked pool's presence as of a snapshot. NOT_REPORTED is a DEX-provider miss and
+# never means closed; CLOSED_ON_CHAIN needs a successful getAccountInfo(pool) returning no
+# account for a pool Safety V2 previously observed.
+PoolPresence = Literal["REPORTED", "NOT_REPORTED", "CLOSED_ON_CHAIN", "UNAVAILABLE",
+                       "NOT_COLLECTED"]  # fmt: skip
+
 # Rules Safety V2 deliberately doesn't evaluate yet. They are reported NOT_SUPPORTED and never
 # count toward coverage (an optional, unsupported rule can't make every snapshot PARTIAL).
 DEFERRED_RULES: dict[str, str] = {
@@ -111,10 +135,6 @@ DEFERRED_RULES: dict[str, str] = {
         "Token-2022 extension semantics (delegates, hooks, fees, pause, default state) need "
         "interpretation beyond the parsed extension list; extensions are reported as evidence"
     ),
-    "LOW_LIQUIDITY": "market collection is a later phase",
-    "LIQUIDITY_COLLAPSE": "market history is a later phase",
-    "MARKET_CLOSED_ON_CHAIN": "market collection is a later phase",
-    "MARKET_NOT_REPORTED": "market history is a later phase",
     "VERIFIED_DEPLOYER_HOLDS_SUPPLY": "creator / deployer evidence is a later phase",
 }
 

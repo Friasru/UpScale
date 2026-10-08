@@ -26,6 +26,13 @@ helpers (`merge_accounts`, `aggregate_owners`, `parse_account`): the token suppl
 largest token accounts and their owners, up to ``max_pages`` DAS pages (Helius only), and
 the largest owners' own accounts. Any failed request fails the whole component (partial
 holder data is never kept); the mint component is unaffected.
+
+`SafetyDexProvider` (Phase 3) makes one guarded DEX Screener ``token-pairs`` request per
+market collection (same budget, limiter, retries and 429 cooldown as the RPC); its rows are
+parsed with `dexscreener.parse_pair` and classified by exact identity (`market`). The
+production `DexMarketService` (which archives evidence) is never used.
+`classify_pool_account` reads one ``getAccountInfo(pool)``: only a successful response with
+a null value is ACCOUNT_MISSING.
 """
 
 import asyncio
@@ -42,13 +49,17 @@ from typing import Any, Literal, Protocol
 import httpx2
 
 from upscale.services.chains import is_solana_address
+from upscale.services.dexscreener import parse_pair
 from upscale.services.market_data import MarketDataError
 from upscale.services.safety_v2.config import SafetySettings
+from upscale.services.safety_v2.market import MarketPool, from_dex_pool, select, with_selection
 from upscale.services.safety_v2.models import (
     HolderOutcome,
     HolderSource,
+    MarketOutcome,
     MintOutcome,
     OwnerLookup,
+    PoolAccountOutcome,
     SafetyBudgetExhaustedError,
     SafetyCoolingDownError,
     SafetyProviderError,
@@ -623,3 +634,153 @@ async def collect_holders(
         reasons=tuple(reasons),
         owners=tuple(owners),
     )
+
+
+# --- market collection (Phase 3) -----------------------------------------------------------
+
+
+class SafetyDexProvider:
+    """Guarded DEX Screener ``GET /token-pairs/v1/solana/{mint}`` (one request)."""
+
+    name = "DEX Screener"
+
+    def __init__(
+        self, guard: RequestGuard, base_url: str, transport: httpx2.AsyncBaseTransport | None = None
+    ):
+        self.guard = guard
+        self._base_url = base_url.rstrip("/")
+        self._transport = transport
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(name={self.name!r})"
+
+    async def token_pairs(self, mint: str) -> list[Any]:
+        """The raw pair rows (any side, any chain); [] for an unknown token (HTTP 404)."""
+        rows = await self.guard.run("dex.tokenPairs", lambda: self._attempt(mint))
+        assert isinstance(rows, list)
+        return rows
+
+    async def _attempt(self, mint: str) -> list[Any]:
+        try:
+            async with httpx2.AsyncClient(
+                base_url=self._base_url, headers={"accept": "application/json"},
+                timeout=self.guard.settings.timeout_seconds, transport=self._transport,
+            ) as client:  # fmt: skip
+                response = await client.get(f"/token-pairs/v1/solana/{mint}")
+        except httpx2.TimeoutException:
+            raise _Retryable(SafetyTimeoutError(f"{self.name} request timed out")) from None
+        except httpx2.HTTPError:
+            raise _Retryable(SafetyProviderError(f"could not reach {self.name}")) from None
+        if response.status_code == 429:
+            raise SafetyRateLimitedError(f"{self.name} rate limit reached")
+        if response.status_code >= 500:
+            raise _Retryable(
+                SafetyProviderError(f"{self.name} returned HTTP {response.status_code}")
+            )
+        if response.status_code == 404:
+            return []
+        if response.status_code != 200:
+            raise SafetyProviderError(f"{self.name} returned HTTP {response.status_code}")
+        try:
+            body = response.json()
+        except ValueError:
+            raise SafetyProviderError(f"{self.name} returned invalid JSON") from None
+        if not isinstance(body, list):
+            raise SafetyProviderError(f"{self.name} returned an unexpected response")
+        return body
+
+
+def build_dex_provider(
+    guard: RequestGuard, base_url: str | None, transport: httpx2.AsyncBaseTransport | None = None
+) -> SafetyDexProvider | None:
+    return SafetyDexProvider(guard, base_url, transport) if base_url else None
+
+
+@dataclass(frozen=True)
+class MarketObservation:
+    outcome: MarketOutcome
+    reason: str | None  # PROVIDER_FAILED / NOT_COLLECTED only
+    raw_hash: str | None = None
+    rows_returned: int = 0
+    malformed_rows: int = 0
+    primary_pool: str | None = None  # selection at collection time (audit; rebuilt per as_of)
+    primary_clear: bool | None = None
+    reasons: tuple[str, ...] = ()
+    pools: tuple[MarketPool, ...] = ()
+
+
+def market_not_observed(exc: SafetyProviderError) -> MarketObservation:
+    outcome: MarketOutcome = "NOT_COLLECTED" if exc.status == "NOT_COLLECTED" else "PROVIDER_FAILED"
+    return MarketObservation(outcome=outcome, reason=str(exc) or type(exc).__name__)
+
+
+def classify_market(mint: str, rows: list[Any]) -> MarketObservation:
+    """Every returned pool classified by exact identity; selection over EXACT_BASE only."""
+    pools: list[MarketPool] = []
+    seen: set[str] = set()
+    malformed = duplicates = 0
+    for row in rows:
+        parsed = parse_pair(row)
+        if parsed is None:
+            malformed += 1
+            continue
+        if parsed.pair_address in seen:
+            duplicates += 1
+            continue
+        seen.add(parsed.pair_address)
+        pools.append(from_dex_pool(parsed, mint))
+    pools = list(with_selection(pools, mint))
+    reasons = []
+    if malformed:
+        reasons.append(f"{malformed} returned rows lacked a pool identity and were dropped")
+    if duplicates:
+        reasons.append(f"{duplicates} duplicate pair addresses were dropped (first kept)")
+    selection = select(pools, mint)
+    primary = selection.primary
+    exact = any(p.identity == "EXACT_BASE" for p in pools)
+    return MarketObservation(
+        outcome="POOLS" if exact else "NO_POOLS",
+        reason=None,
+        raw_hash=raw_hash(rows),
+        rows_returned=len(rows),
+        malformed_rows=malformed,
+        primary_pool=primary.pair_address if primary else None,
+        primary_clear=selection.clear if primary else None,
+        reasons=tuple(reasons),
+        pools=tuple(pools),
+    )
+
+
+@dataclass(frozen=True)
+class PoolAccountObservation:
+    outcome: PoolAccountOutcome
+    reason: str | None
+    raw_hash: str | None = None
+    program_owner: str | None = None
+    lamports: int | None = None
+
+
+def pool_account_not_observed(exc: SafetyProviderError) -> PoolAccountObservation:
+    outcome: PoolAccountOutcome = (
+        "NOT_COLLECTED" if exc.status == "NOT_COLLECTED" else "PROVIDER_FAILED"
+    )
+    return PoolAccountObservation(outcome=outcome, reason=str(exc) or type(exc).__name__)
+
+
+def classify_pool_account(pool: str, result: Any, provider: str) -> PoolAccountObservation:
+    """EXISTS / ACCOUNT_MISSING only from a well-formed successful response."""
+    if not isinstance(result, dict) or "value" not in result:
+        return PoolAccountObservation(
+            "PROVIDER_FAILED", f"{provider} returned a malformed getAccountInfo envelope"
+        )
+    value = result["value"]
+    digest = raw_hash(result)
+    if value is None:
+        return PoolAccountObservation("ACCOUNT_MISSING", None, digest)
+    owner = value.get("owner") if isinstance(value, dict) else None
+    if not isinstance(owner, str) or not is_solana_address(owner):
+        return PoolAccountObservation(
+            "PROVIDER_FAILED", f"{provider} returned an account without a readable owner"
+        )
+    lamports = _uint(value.get("lamports"))
+    return PoolAccountObservation("EXISTS", None, digest, owner, lamports)

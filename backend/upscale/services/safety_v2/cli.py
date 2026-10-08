@@ -1,9 +1,11 @@
-"""Safety V2 command line (Solana token-safety evidence; Phase 1: mint account only).
+"""Safety V2 command line (Solana token-safety evidence: mint account and holders).
 
 Local only (no provider request):
 
     python -m upscale.services.safety_v2 status [--json]
     python -m upscale.services.safety_v2 targets add --token <mint|solana:mint>
+    python -m upscale.services.safety_v2 targets pin-pool --token <mint> --pool <address>
+        [--dex raydium-amm-v4]
     python -m upscale.services.safety_v2 targets list [--json]
     python -m upscale.services.safety_v2 snapshot --token <mint> --no-fetch [--no-save]
     python -m upscale.services.safety_v2 show (--id N | --token <mint>) [--json]
@@ -11,8 +13,13 @@ Local only (no provider request):
 
 Makes Solana provider requests (Safety V2's own daily budget; the count is printed):
 
-    python -m upscale.services.safety_v2 collect --token <mint> [--json]
-    python -m upscale.services.safety_v2 snapshot --token <mint> [--no-save] [--json]
+    python -m upscale.services.safety_v2 collect --token <mint> [--no-holders] [--json]
+    python -m upscale.services.safety_v2 snapshot --token <mint> [--no-holders] [--no-save]
+        [--json]
+
+A collection reads the mint account (1 request) and, unless ``--no-holders``, the holders
+(at most 4 + UPSCALE_SAFETY_V2_HOLDER_MAX_PAGES requests). Wallet proof is read only from
+UPSCALE_SAFETY_V2_RADAR_DB, read-only.
 """
 
 import argparse
@@ -42,14 +49,21 @@ def parser() -> argparse.ArgumentParser:
     tsub = t.add_subparsers(dest="action", required=True)
     ta = tsub.add_parser("add")
     ta.add_argument("--token", required=True)
+    tp = tsub.add_parser("pin-pool", help="pin an exact pool (its owner is a POOL_OR_VAULT)")
+    tp.add_argument("--token", required=True)
+    tp.add_argument("--pool", required=True)
+    tp.add_argument("--dex", default=None, help="e.g. raydium-amm-v4 (corroborates its "
+                    "shared vault authority)")  # fmt: skip
     tl = tsub.add_parser("list")
     tl.add_argument("--json", action="store_true")
-    c = sub.add_parser("collect", help=f"one mint-account observation. {PROVIDER_NOTE}")
+    c = sub.add_parser("collect", help=f"one mint + holder observation. {PROVIDER_NOTE}")
     c.add_argument("--token", required=True)
+    c.add_argument("--no-holders", action="store_true", help="mint account only")
     c.add_argument("--json", action="store_true")
     sn = sub.add_parser("snapshot", help=f"collect + snapshot. {PROVIDER_NOTE}")
     sn.add_argument("--token", required=True)
     sn.add_argument("--no-fetch", action="store_true", help="from stored data only: no request")
+    sn.add_argument("--no-holders", action="store_true", help="collect the mint account only")
     sn.add_argument("--no-save", action="store_true", help="print the body without storing it")
     sn.add_argument("--json", action="store_true")
     sh = sub.add_parser("show", help="a stored snapshot (local only)")
@@ -90,6 +104,14 @@ def body_text(body: dict[str, Any]) -> str:
         lines.append(
             f"  {k}: {v['status']} {json.dumps(v['value']) if v['value'] is not None else v['reason']}"
         )
+    h = body.get("holders")
+    if h:
+        lines.append(f"holders: {h['status']} source={h['source']} fetched_at={h['fetched_at']}")
+        for k in ("top1_pct", "top10_pct", "top10_wallet_pct", "holder_count"):
+            v = h[k]
+            bound = ">=" if v["lower_bound"] else ""
+            lines.append(f"  {k}: {v['status']} "
+                         f"{bound + str(v['value']) if v['value'] is not None else v['reason']}")  # fmt: skip
     for f in body["flags"]:
         lines.append(f"  [{f['outcome']}] {f['id']} ({f['severity']}): {f['reason']}")
     return "\n".join(lines)
@@ -120,6 +142,8 @@ def _run(a: argparse.Namespace, settings: SafetySettings) -> int:
             until = svc.guard.cooldown_until()
             st = {"db_path": settings.db_path, "provider": svc.provider.name if svc.provider else None,
                   "daily_request_budget": settings.daily_request_budget,
+                  "holder_max_pages": settings.holder_max_pages,
+                  "radar_db_configured": settings.radar_db_path is not None,
                   "remaining_today": svc.guard.remaining_today(),
                   "cooldown_until": until.isoformat() if until else None,
                   "requests_today": svc.repo.requests_by_method(svc.guard.day()),
@@ -129,6 +153,9 @@ def _run(a: argparse.Namespace, settings: SafetySettings) -> int:
             if a.action == "add":
                 cid, added = svc.add_target(a.token)
                 print(f"{cid}: {'added' if added else 'already a target'}")
+            elif a.action == "pin-pool":
+                pinned = svc.pin_pool(a.token, a.pool, a.dex)
+                print(f"{a.pool}: {'pinned' if pinned else 'already pinned'}")
             else:
                 rows: list[dict[str, Any]] = [
                     {"canonical_id": c, "source": s, "added_at": t}
@@ -137,13 +164,15 @@ def _run(a: argparse.Namespace, settings: SafetySettings) -> int:
                 _out(rows, a.json, "\n".join(r["canonical_id"] for r in rows) or "no targets")
         elif a.command == "collect":
             print(f"note: {PROVIDER_NOTE}", file=sys.stderr)
-            got = asyncio.run(svc.collect(_cid(a.token)))
+            got = asyncio.run(svc.collect(_cid(a.token), holders=not a.no_holders))
             _out(got.__dict__, a.json, f"{got.outcome} (collection {got.collection_id}, "
-                 f"observation {got.observation_id}, requests {got.requests})")  # fmt: skip
+                 f"observation {got.observation_id}, holders {got.holder_outcome}, "
+                 f"requests {got.requests})")  # fmt: skip
         elif a.command == "snapshot":
             if not a.no_fetch:
                 print(f"note: {PROVIDER_NOTE}", file=sys.stderr)
-            res = asyncio.run(svc.snapshot(_cid(a.token), fetch=not a.no_fetch, save=not a.no_save))
+            res = asyncio.run(svc.snapshot(_cid(a.token), fetch=not a.no_fetch, save=not a.no_save,
+                                           holders=not a.no_holders))  # fmt: skip
             _out(_result_dict(res), a.json, body_text(res.body) + f"\nhash: {res.body_hash}")
         elif a.command == "show":
             sid = a.id if a.id is not None else svc.repo.latest_snapshot_id(_cid(a.token))

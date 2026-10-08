@@ -12,6 +12,16 @@ Environment (all optional):
   ``UPSCALE_SAFETY_V2_TIMEOUT_SECONDS`` (10), ``UPSCALE_SAFETY_V2_MAX_RETRIES`` (2),
   ``UPSCALE_SAFETY_V2_COOLDOWN_SECONDS`` (900), ``UPSCALE_SAFETY_V2_MAX_COOLDOWN_SECONDS``
   (7200)
+* ``UPSCALE_SAFETY_V2_HOLDER_MAX_PAGES`` (2): DAS ``getTokenAccounts`` pages (1,000 token
+  accounts each) one holder collection may read; past it the scan is PARTIAL.
+* ``UPSCALE_SAFETY_V2_HOLDER_OWNER_LOOKUPS`` (30): largest owners whose own accounts are
+  read (one ``getMultipleAccounts``) to tell program-owned owners apart.
+* ``UPSCALE_SAFETY_V2_RADAR_DB`` (unset): a Radar database read **read-only** for positive
+  wallet proof (a signer). Unset, missing or incompatible: no owner is proven a wallet.
+
+One holder collection makes at most ``4 + holder_max_pages`` logical requests
+(``getTokenSupply``, ``getTokenLargestAccounts``, one ``getMultipleAccounts`` for those
+accounts, the scan pages, one ``getMultipleAccounts`` for the owners).
 """
 
 import os
@@ -21,10 +31,14 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SNAPSHOT_SCHEMA = "safety.snapshot.v2"
-DB_SCHEMA_VERSION = 1
+# 1: Phase 1 tables. 2: + safety_target_pools, safety_holder_observations,
+# safety_holder_balances. A database of another version is refused, never migrated.
+DB_SCHEMA_VERSION = 2
 # Bump whenever a rule's logic, threshold or wording changes: a snapshot built under
 # another rules version is never claimed to be an exact reproduction.
-RULES_VERSION = "1"
+# "2": Phase 2 holder rules (concentration, few holders, large unknown / program owners)
+# and holder-scoped coverage.
+RULES_VERSION = "2"
 
 ENV_PREFIX = "UPSCALE_SAFETY_V2_"
 
@@ -47,6 +61,11 @@ class SafetySettings(BaseModel):
     cooldown_seconds: float = Field(default=900.0, ge=0)  # after a 429; doubles per repeat
     max_cooldown_seconds: float = Field(default=7200.0, ge=0)
 
+    # --- Holder collection (Phase 2) ---
+    holder_max_pages: int = Field(default=2, ge=1, le=20)
+    holder_owner_lookups: int = Field(default=30, ge=0, le=100)  # one getMultipleAccounts
+    radar_db_path: str | None = None  # read-only wallet proof; None: not consulted
+
     @model_validator(mode="after")
     def _caps(self) -> "SafetySettings":
         if self.max_cooldown_seconds < self.cooldown_seconds:
@@ -54,7 +73,7 @@ class SafetySettings(BaseModel):
         return self
 
 
-_INT = ("daily_request_budget", "max_retries")
+_INT = ("daily_request_budget", "max_retries", "holder_max_pages", "holder_owner_lookups")
 _FLOAT = ("max_rps", "timeout_seconds", "backoff_base_seconds", "cooldown_seconds",
           "max_cooldown_seconds")  # fmt: skip
 
@@ -65,6 +84,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> SafetySettings:
     values: dict[str, object] = {}
     if raw := source.get(ENV_PREFIX + "DB"):
         values["db_path"] = raw
+    if raw := source.get(ENV_PREFIX + "RADAR_DB"):
+        values["radar_db_path"] = raw
     for name in _INT + _FLOAT:
         raw = source.get(ENV_PREFIX + name.upper())
         if raw is None or not raw.strip():

@@ -20,13 +20,17 @@ Rule outcomes are ``TRIGGERED`` / ``NOT_TRIGGERED`` / ``UNDETERMINED``. Evidence
 missing, partial, unknown or failed can prove a ``>= threshold`` rule true (a lower bound
 already past the threshold) but never false: it can't produce ``NOT_TRIGGERED``.
 
-Invariants reserved for later phases (not implemented in Phase 1; see `DEFERRED_RULES`):
+Holder evidence (Phase 2): owner types are never assumed (see `OwnerClass`), a page-capped
+or largest-accounts-only holder read is PARTIAL with ``lower_bound`` set, and partial
+holder evidence can trigger a ``>= threshold`` rule but never yields NOT_TRIGGERED.
+``LARGE_UNKNOWN_OWNER`` (owner type can't be proven) and
+``LARGE_UNCLASSIFIED_PROGRAM_OWNER`` (a program-owned account no registry entry identifies)
+are separate conditions and are never conflated.
+
+Invariants reserved for later phases (not implemented yet; see `DEFERRED_RULES`):
 
 * Holders: a verified deployer *absent* from a PARTIAL holder scan is not 0% (the field is
   UNAVAILABLE); a verified deployer *observed* in a partial scan is a PARTIAL lower bound.
-  ``LARGE_UNKNOWN_OWNER`` (owner type can't be proven) and
-  ``LARGE_UNCLASSIFIED_PROGRAM_OWNER`` (a program-owned account no registry entry
-  identifies) are separate conditions and are never conflated.
 * Market: ``MARKET_CLOSED_ON_CHAIN`` needs an exact pool that was previously observed and a
   *successful* current ``getAccountInfo(pool)`` returning no account; a provider failure
   never means closed. ``MARKET_NOT_REPORTED`` needs repeated misses *and* a configurable
@@ -72,16 +76,41 @@ MINT_OUTCOMES: tuple[MintOutcome, ...] = (
     "MINT", "NOT_A_MINT", "ACCOUNT_MISSING", "MALFORMED", "PROVIDER_FAILED", "NOT_COLLECTED",
 )  # fmt: skip
 
-# Rules Phase 1 deliberately doesn't evaluate. They are reported NOT_SUPPORTED and never
+# What one holder collection established (balances exist only for COLLECTED).
+HolderOutcome = Literal["COLLECTED", "PROVIDER_FAILED", "NOT_COLLECTED"]
+HOLDER_OUTCOMES: tuple[HolderOutcome, ...] = ("COLLECTED", "PROVIDER_FAILED", "NOT_COLLECTED")
+# full_scan: every DAS page read and consistent with the largest accounts; partial_scan:
+# stopped at the page cap (or inconsistent); largest_accounts: no scan (<= 20 accounts).
+HolderSource = Literal["full_scan", "partial_scan", "largest_accounts"]
+HOLDER_SOURCES: tuple[HolderSource, ...] = ("full_scan", "partial_scan", "largest_accounts")
+# What the owner's own account looked like (one getMultipleAccounts at collection time).
+OwnerLookup = Literal["FOUND", "MISSING", "NOT_LOOKED_UP"]
+OWNER_LOOKUPS: tuple[OwnerLookup, ...] = ("FOUND", "MISSING", "NOT_LOOKED_UP")
+
+# An owner's type as of a snapshot, from positive evidence only:
+# * NORMAL_WALLET: proven a keypair (it signed a transaction; Radar evidence <= as_of).
+# * PROGRAM_OWNED: the owner's account is owned by a program other than System, or the
+#   registry names it a program.
+# * POOL_OR_VAULT: the target's pinned pool, or a registry pool authority corroborated by a
+#   pinned pool of that DEX.
+# * BURN: a registry burn address (the incinerator).
+# * UNRESOLVED: the owner's address or account couldn't be read, or evidence conflicts.
+# * UNKNOWN: read, but nothing proves what it is. Never treated as a wallet.
+OwnerClass = Literal[
+    "NORMAL_WALLET", "PROGRAM_OWNED", "POOL_OR_VAULT", "BURN", "UNRESOLVED", "UNKNOWN"
+]
+OWNER_CLASSES: tuple[OwnerClass, ...] = (
+    "NORMAL_WALLET", "PROGRAM_OWNED", "POOL_OR_VAULT", "BURN", "UNRESOLVED", "UNKNOWN",
+)  # fmt: skip
+EXCLUDED_CLASSES: frozenset[str] = frozenset({"POOL_OR_VAULT", "BURN"})
+
+# Rules Safety V2 deliberately doesn't evaluate yet. They are reported NOT_SUPPORTED and never
 # count toward coverage (an optional, unsupported rule can't make every snapshot PARTIAL).
 DEFERRED_RULES: dict[str, str] = {
     "TOKEN_2022_EXTENSION_RISK": (
         "Token-2022 extension semantics (delegates, hooks, fees, pause, default state) need "
         "interpretation beyond the parsed extension list; extensions are reported as evidence"
     ),
-    "TOP_HOLDER_CONCENTRATION": "holder collection is a later phase",
-    "LARGE_UNKNOWN_OWNER": "holder collection is a later phase",
-    "LARGE_UNCLASSIFIED_PROGRAM_OWNER": "holder collection is a later phase",
     "LOW_LIQUIDITY": "market collection is a later phase",
     "LIQUIDITY_COLLAPSE": "market history is a later phase",
     "MARKET_CLOSED_ON_CHAIN": "market collection is a later phase",

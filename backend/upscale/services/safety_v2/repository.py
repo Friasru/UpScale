@@ -3,6 +3,17 @@
 Phase 1 tables: ``safety_meta``, ``safety_targets``, ``safety_requests``,
 ``safety_collections``, ``safety_mint_observations``, ``safety_snapshots``.
 
+Phase 2 tables (schema version 2; a Phase 1 version-1 database is refused before any
+mutation, never migrated and never given the new tables):
+
+* ``safety_target_pools``: exact pool addresses pinned on a target (``pinned_at`` is when
+  Safety V2 learned it; a pin applies only to snapshots with ``as_of >= pinned_at``).
+* ``safety_holder_observations``: one bounded holder collection (or why it failed / wasn't
+  attempted), independent of the mint observation of the same collection.
+* ``safety_holder_balances``: that observation's owner-aggregated non-zero balances, with
+  what the owner's own account looked like. Classification is never stored: it is derived
+  per snapshot ``as_of``.
+
 * Observations and snapshots are append-only (UPDATE / DELETE abort in triggers).
 * A collection is RUNNING until it is finished DONE or ABORTED, and a finished collection
   is final. An observation can only be added to a RUNNING collection of the same target,
@@ -25,11 +36,27 @@ from pathlib import Path
 from typing import Any
 
 from upscale.services.safety_v2.config import DB_SCHEMA_VERSION, RULES_VERSION, SNAPSHOT_SCHEMA
-from upscale.services.safety_v2.models import MINT_OUTCOMES, SafetySchemaError, SafetyStateError
-from upscale.services.safety_v2.provider import MintObservation, RequestOutcome
+from upscale.services.safety_v2.models import (
+    HOLDER_OUTCOMES,
+    HOLDER_SOURCES,
+    MINT_OUTCOMES,
+    OWNER_LOOKUPS,
+    SafetySchemaError,
+    SafetyStateError,
+)
+from upscale.services.safety_v2.provider import (
+    HolderObservation,
+    MintObservation,
+    OwnerFact,
+    RequestOutcome,
+)
 from upscale.services.solana_chain import TOKEN_2022_PROGRAM, TOKEN_PROGRAM
 
 _OUTCOMES = ",".join(repr(o) for o in MINT_OUTCOMES)
+_HOLDER_OUTCOMES = ",".join(repr(o) for o in HOLDER_OUTCOMES)
+_HOLDER_SOURCES = ",".join(repr(o) for o in HOLDER_SOURCES)
+_LOOKUPS = ",".join(repr(o) for o in OWNER_LOOKUPS)
+HOLDER_ORIGIN = "safety_v2.collect_holders"
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS safety_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS safety_targets (
@@ -109,6 +136,93 @@ CREATE TRIGGER IF NOT EXISTS safety_mint_no_update BEFORE UPDATE ON safety_mint_
 BEGIN SELECT RAISE(ABORT, 'safety_mint_observations rows are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS safety_mint_no_delete BEFORE DELETE ON safety_mint_observations
 BEGIN SELECT RAISE(ABORT, 'safety_mint_observations rows are append-only'); END;
+CREATE TABLE IF NOT EXISTS safety_target_pools (
+    id INTEGER PRIMARY KEY,
+    canonical_id TEXT NOT NULL REFERENCES safety_targets(canonical_id),
+    pool_address TEXT NOT NULL,
+    dex TEXT,
+    pinned_at REAL NOT NULL,
+    source TEXT NOT NULL,
+    UNIQUE (canonical_id, pool_address),
+    CHECK (canonical_id != 'solana:' || pool_address)
+);
+CREATE TRIGGER IF NOT EXISTS safety_pools_no_update BEFORE UPDATE ON safety_target_pools
+BEGIN SELECT RAISE(ABORT, 'safety_target_pools rows are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS safety_pools_no_delete BEFORE DELETE ON safety_target_pools
+BEGIN SELECT RAISE(ABORT, 'safety_target_pools rows are append-only'); END;
+CREATE TABLE IF NOT EXISTS safety_holder_observations (
+    id INTEGER PRIMARY KEY,
+    canonical_id TEXT NOT NULL REFERENCES safety_targets(canonical_id),
+    collection_id INTEGER NOT NULL REFERENCES safety_collections(id),
+    fetched_at REAL NOT NULL,
+    provider TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ({_HOLDER_OUTCOMES})),
+    reason TEXT,
+    source TEXT CHECK (source IN ({_HOLDER_SOURCES})),
+    supply_raw TEXT,
+    decimals INTEGER CHECK (decimals BETWEEN 0 AND 255),
+    pages_read INTEGER NOT NULL CHECK (pages_read >= 0),
+    max_pages INTEGER NOT NULL CHECK (max_pages >= pages_read),
+    token_accounts_seen INTEGER NOT NULL CHECK (token_accounts_seen >= 0),
+    largest_accounts_seen INTEGER NOT NULL CHECK (largest_accounts_seen BETWEEN 0 AND 20),
+    skipped_rows INTEGER NOT NULL CHECK (skipped_rows >= 0),
+    holder_count INTEGER CHECK (holder_count >= 0),
+    holder_count_complete INTEGER NOT NULL CHECK (holder_count_complete IN (0, 1)),
+    reliable INTEGER NOT NULL CHECK (reliable IN (0, 1)),
+    reasons_json TEXT NOT NULL,
+    owners_hash TEXT,
+    CHECK ((outcome = 'COLLECTED') = (source IS NOT NULL)),
+    CHECK ((outcome = 'COLLECTED') = (supply_raw IS NOT NULL)),
+    CHECK ((outcome = 'COLLECTED') = (decimals IS NOT NULL)),
+    CHECK ((outcome = 'COLLECTED') = (owners_hash IS NOT NULL)),
+    CHECK ((outcome = 'COLLECTED') = (reason IS NULL)),
+    CHECK (outcome = 'COLLECTED' OR (holder_count IS NULL AND holder_count_complete = 0
+        AND reliable = 0 AND token_accounts_seen = 0 AND pages_read = 0)),
+    CHECK (holder_count_complete = 0 OR (source = 'full_scan' AND holder_count IS NOT NULL)),
+    CHECK (source IS NOT 'largest_accounts' OR (pages_read = 0 AND holder_count IS NULL)),
+    CHECK (source NOT IN ('full_scan', 'partial_scan') OR pages_read >= 1),
+    CHECK (supply_raw IS NULL OR (supply_raw != '' AND supply_raw NOT GLOB '*[^0-9]*'))
+);
+CREATE INDEX IF NOT EXISTS safety_holders_by_target
+    ON safety_holder_observations (canonical_id, fetched_at);
+CREATE TRIGGER IF NOT EXISTS safety_holders_in_collection
+BEFORE INSERT ON safety_holder_observations
+WHEN NOT EXISTS (SELECT 1 FROM safety_collections c WHERE c.id = NEW.collection_id
+    AND c.status = 'RUNNING' AND c.canonical_id = NEW.canonical_id
+    AND c.started_at <= NEW.fetched_at)
+BEGIN SELECT RAISE(ABORT, 'safety_holder_observations: needs a RUNNING collection of the same target started at or before fetched_at'); END;
+CREATE TRIGGER IF NOT EXISTS safety_holders_no_update BEFORE UPDATE ON safety_holder_observations
+BEGIN SELECT RAISE(ABORT, 'safety_holder_observations rows are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS safety_holders_no_delete BEFORE DELETE ON safety_holder_observations
+BEGIN SELECT RAISE(ABORT, 'safety_holder_observations rows are append-only'); END;
+CREATE TABLE IF NOT EXISTS safety_holder_balances (
+    observation_id INTEGER NOT NULL REFERENCES safety_holder_observations(id),
+    rank INTEGER NOT NULL CHECK (rank >= 1),
+    owner_key TEXT NOT NULL,
+    owner TEXT,
+    accounts_json TEXT NOT NULL,
+    amount_raw TEXT NOT NULL
+        CHECK (amount_raw != '' AND amount_raw NOT GLOB '*[^0-9]*' AND amount_raw NOT GLOB '0*'),
+    lookup TEXT NOT NULL CHECK (lookup IN ({_LOOKUPS})),
+    owner_program TEXT,
+    PRIMARY KEY (observation_id, owner_key),
+    UNIQUE (observation_id, rank),
+    CHECK ((owner IS NULL) = (owner_key GLOB 'unresolved:*')),
+    CHECK (owner IS NULL OR owner_key = owner),
+    CHECK ((lookup = 'FOUND') = (owner_program IS NOT NULL)),
+    CHECK (owner IS NOT NULL OR lookup = 'NOT_LOOKED_UP')
+);
+CREATE TRIGGER IF NOT EXISTS safety_balances_in_collection
+BEFORE INSERT ON safety_holder_balances
+WHEN NOT EXISTS (SELECT 1 FROM safety_holder_observations o JOIN safety_collections c
+    ON c.id = o.collection_id WHERE o.id = NEW.observation_id AND o.outcome = 'COLLECTED'
+    AND c.status = 'RUNNING')
+BEGIN SELECT RAISE(ABORT, 'safety_holder_balances: needs a COLLECTED observation of a RUNNING collection'); END;
+CREATE TRIGGER IF NOT EXISTS safety_balances_no_update BEFORE UPDATE ON safety_holder_balances
+BEGIN SELECT RAISE(ABORT, 'safety_holder_balances rows are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS safety_balances_no_delete BEFORE DELETE ON safety_holder_balances
+BEGIN SELECT RAISE(ABORT, 'safety_holder_balances rows are append-only'); END;
 CREATE TABLE IF NOT EXISTS safety_snapshots (
     id INTEGER PRIMARY KEY,
     canonical_id TEXT NOT NULL REFERENCES safety_targets(canonical_id),
@@ -130,7 +244,8 @@ BEGIN SELECT RAISE(ABORT, 'safety_snapshots rows are immutable'); END;
 """
 TABLES = (
     "safety_meta", "safety_targets", "safety_requests", "safety_collections",
-    "safety_mint_observations", "safety_snapshots",
+    "safety_mint_observations", "safety_snapshots", "safety_target_pools",
+    "safety_holder_observations", "safety_holder_balances",
 )  # fmt: skip
 _OUTCOME_COLUMN = {"ok": "ok", "rate_limited": "rate_limited", "timeout": "timeouts",
                    "failed": "failures"}  # fmt: skip
@@ -163,6 +278,41 @@ class MintRow:
 
 
 @dataclass(frozen=True)
+class HolderRow:
+    id: int
+    canonical_id: str
+    collection_id: int
+    fetched_at: float
+    provider: str
+    origin: str
+    outcome: str
+    reason: str | None
+    source: str | None
+    supply_raw: str | None
+    decimals: int | None
+    pages_read: int
+    max_pages: int
+    token_accounts_seen: int
+    largest_accounts_seen: int
+    skipped_rows: int
+    holder_count: int | None
+    holder_count_complete: bool
+    reliable: bool
+    reasons: list[str]
+    owners_hash: str | None
+
+
+@dataclass(frozen=True)
+class PoolPin:
+    id: int
+    canonical_id: str
+    pool_address: str
+    dex: str | None
+    pinned_at: float
+    source: str
+
+
+@dataclass(frozen=True)
 class SnapshotRow:
     id: int
     canonical_id: str
@@ -182,6 +332,32 @@ _MINT_COLUMNS = (
     "context_slot, program_owner, token_program, decimals, supply_raw, mint_authority, "
     "freeze_authority, extensions_json"
 )
+
+
+_HOLDER_COLUMNS = (
+    "id, canonical_id, collection_id, fetched_at, provider, origin, outcome, reason, source, "
+    "supply_raw, decimals, pages_read, max_pages, token_accounts_seen, largest_accounts_seen, "
+    "skipped_rows, holder_count, holder_count_complete, reliable, reasons_json, owners_hash"
+)
+
+
+def _holder_row(r: tuple[Any, ...]) -> HolderRow:
+    return HolderRow(
+        id=r[0], canonical_id=r[1], collection_id=r[2], fetched_at=r[3], provider=r[4],
+        origin=r[5], outcome=r[6], reason=r[7], source=r[8], supply_raw=r[9], decimals=r[10],
+        pages_read=r[11], max_pages=r[12], token_accounts_seen=r[13],
+        largest_accounts_seen=r[14], skipped_rows=r[15], holder_count=r[16],
+        holder_count_complete=bool(r[17]), reliable=bool(r[18]), reasons=json.loads(r[19]),
+        owners_hash=r[20],
+    )  # fmt: skip
+
+
+def owners_hash(owners: tuple[OwnerFact, ...] | list[OwnerFact]) -> str:
+    """SHA-256 of the canonical owner facts (provenance of one holder observation)."""
+    rows = [[o.key, o.owner, list(o.accounts), str(o.amount_raw), o.lookup, o.owner_program]
+            for o in owners]  # fmt: skip
+    text = json.dumps(rows, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _mint_row(r: tuple[Any, ...]) -> MintRow:
@@ -437,6 +613,117 @@ class SafetyRepository:
         if row is None:
             raise SafetyStateError(f"no mint observation {observation_id}")
         return _mint_row(row)
+
+    # --- pool pins (Phase 2) ---------------------------------------------------------------
+
+    def pin_pool(
+        self, canonical_id: str, pool_address: str, dex: str | None, source: str, at: float
+    ) -> bool:
+        with self._lock, self.db() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO safety_target_pools (canonical_id, pool_address, dex, "
+                "pinned_at, source) VALUES (?, ?, ?, ?, ?)",
+                (canonical_id, pool_address, dex, at, source),
+            )
+        return cur.rowcount == 1
+
+    def pool_pins(self, canonical_id: str, as_of: float) -> list[PoolPin]:
+        """Pins of this target learned at or before `as_of`."""
+        with self._lock:
+            rows = (
+                self.db()
+                .execute(
+                    "SELECT id, canonical_id, pool_address, dex, pinned_at, source FROM "
+                    "safety_target_pools WHERE canonical_id = ? AND pinned_at <= ? "
+                    "ORDER BY pool_address",
+                    (canonical_id, as_of),
+                )
+                .fetchall()
+            )
+        return [PoolPin(*r) for r in rows]
+
+    # --- holder observations (Phase 2) -----------------------------------------------------
+
+    def record_holder_observation(
+        self,
+        canonical_id: str,
+        collection_id: int,
+        fetched_at: float,
+        provider: str,
+        obs: HolderObservation,
+    ) -> int:
+        """The observation and its balances, in one transaction."""
+        collected = obs.outcome == "COLLECTED"
+        with self._lock, self.db() as conn:
+            cur = conn.execute(
+                "INSERT INTO safety_holder_observations (canonical_id, collection_id, "
+                "fetched_at, provider, origin, outcome, reason, source, supply_raw, decimals, "
+                "pages_read, max_pages, token_accounts_seen, largest_accounts_seen, "
+                "skipped_rows, holder_count, holder_count_complete, reliable, reasons_json, "
+                "owners_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (canonical_id, collection_id, fetched_at, provider, HOLDER_ORIGIN, obs.outcome,
+                 obs.reason, obs.source,
+                 str(obs.supply_raw) if obs.supply_raw is not None else None, obs.decimals,
+                 obs.pages_read, obs.max_pages, obs.token_accounts_seen,
+                 obs.largest_accounts_seen, obs.skipped_rows, obs.holder_count,
+                 int(obs.holder_count_complete), int(obs.reliable), json.dumps(list(obs.reasons)),
+                 owners_hash(obs.owners) if collected else None),
+            )  # fmt: skip
+            oid = cur.lastrowid
+            assert oid is not None
+            conn.executemany(
+                "INSERT INTO safety_holder_balances (observation_id, rank, owner_key, owner, "
+                "accounts_json, amount_raw, lookup, owner_program) VALUES (?,?,?,?,?,?,?,?)",
+                [(oid, rank, o.key, o.owner, json.dumps(list(o.accounts)), str(o.amount_raw),
+                  o.lookup, o.owner_program)
+                 for rank, o in enumerate(obs.owners, 1)],
+            )  # fmt: skip
+        return oid
+
+    def latest_holder_observation(self, canonical_id: str, as_of: float) -> HolderRow | None:
+        """The newest holder observation of this exact identity fetched at or before
+        `as_of`."""
+        with self._lock:
+            row = (
+                self.db()
+                .execute(
+                    f"SELECT {_HOLDER_COLUMNS} FROM safety_holder_observations "
+                    "WHERE canonical_id = ? AND fetched_at <= ? "
+                    "ORDER BY fetched_at DESC, id DESC LIMIT 1",
+                    (canonical_id, as_of),
+                )
+                .fetchone()
+            )
+        return _holder_row(row) if row else None
+
+    def holder_observation(self, observation_id: int) -> HolderRow:
+        with self._lock:
+            row = (
+                self.db()
+                .execute(
+                    f"SELECT {_HOLDER_COLUMNS} FROM safety_holder_observations WHERE id = ?",
+                    (observation_id,),
+                )
+                .fetchone()
+            )
+        if row is None:
+            raise SafetyStateError(f"no holder observation {observation_id}")
+        return _holder_row(row)
+
+    def holder_balances(self, observation_id: int) -> list[OwnerFact]:
+        """The observation's balances, largest first (as collected)."""
+        with self._lock:
+            rows = (
+                self.db()
+                .execute(
+                    "SELECT owner_key, owner, accounts_json, amount_raw, lookup, owner_program "
+                    "FROM safety_holder_balances WHERE observation_id = ? ORDER BY rank",
+                    (observation_id,),
+                )
+                .fetchall()
+            )
+        return [OwnerFact(k, o, tuple(json.loads(a)), int(amt), lk, p)
+                for k, o, a, amt, lk, p in rows]  # fmt: skip
 
     # --- snapshots ------------------------------------------------------------------------
 

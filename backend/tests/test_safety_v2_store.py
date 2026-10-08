@@ -42,7 +42,7 @@ def test_new_database_records_schema_versions(tmp_path: Path) -> None:
         repo.set_meta("schema_version", "2")
 
 
-@pytest.mark.parametrize("version", ["0", "2", None])
+@pytest.mark.parametrize("version", ["0", "1", "3", None])
 def test_unknown_schema_version_is_refused(tmp_path: Path, version: str | None) -> None:
     path = tmp_path / "s.sqlite3"
     with sqlite3.connect(path) as conn:
@@ -52,6 +52,31 @@ def test_unknown_schema_version_is_refused(tmp_path: Path, version: str | None) 
     conn.close()
     with pytest.raises(SafetySchemaError, match=f"schema version {version or 'unknown'}"):
         SafetyRepository(path).db()
+
+
+def test_a_phase_1_schema_1_database_is_refused_before_any_mutation(tmp_path: Path) -> None:
+    """A real Phase 1 layout (no holder tables, schema_version 1) is never migrated, and the
+    Phase 2 tables are never created in it."""
+    from upscale.services.safety_v2 import repository
+
+    path = tmp_path / "phase1.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(repository._SCHEMA)
+        for table in ("safety_holder_balances", "safety_holder_observations",
+                      "safety_target_pools"):  # fmt: skip
+            conn.execute(f"DROP TABLE {table}")
+        conn.execute("INSERT INTO safety_meta VALUES ('schema_version', '1')")
+    conn.close()
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    with pytest.raises(SafetySchemaError, match="schema version 1"):
+        SafetyRepository(path).db()
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    with sqlite3.connect(path) as conn:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert not names & {"safety_target_pools", "safety_holder_observations",
+                        "safety_holder_balances"}  # fmt: skip
+    assert DB_SCHEMA_VERSION == 2
 
 
 def test_safety_tables_without_meta_are_refused(tmp_path: Path) -> None:

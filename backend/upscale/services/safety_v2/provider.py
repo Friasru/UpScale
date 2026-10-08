@@ -20,6 +20,12 @@ The URL may contain an API key: it never appears in an error, a repr or the data
 that distinguishes MINT / NOT_A_MINT / ACCOUNT_MISSING / MALFORMED. Anything it can't
 vouch for is MALFORMED, never a default: in particular a malformed authority value is
 never read as a revoked (null) authority.
+
+`collect_holders` (Phase 2) reads one bounded holder observation with `solana_chain`'s pure
+helpers (`merge_accounts`, `aggregate_owners`, `parse_account`): the token supply, the 20
+largest token accounts and their owners, up to ``max_pages`` DAS pages (Helius only), and
+the largest owners' own accounts. Any failed request fails the whole component (partial
+holder data is never kept); the mint component is unaffected.
 """
 
 import asyncio
@@ -39,14 +45,30 @@ from upscale.services.chains import is_solana_address
 from upscale.services.market_data import MarketDataError
 from upscale.services.safety_v2.config import SafetySettings
 from upscale.services.safety_v2.models import (
+    HolderOutcome,
+    HolderSource,
     MintOutcome,
+    OwnerLookup,
     SafetyBudgetExhaustedError,
     SafetyCoolingDownError,
     SafetyProviderError,
     SafetyRateLimitedError,
     SafetyTimeoutError,
 )
-from upscale.services.solana_chain import TOKEN_2022_PROGRAM, TOKEN_PROGRAM, parse_mint
+from upscale.services.solana_chain import (
+    MAX_LARGEST_ACCOUNTS,
+    SCAN_PAGE_SIZE,
+    TOKEN_2022_PROGRAM,
+    TOKEN_PROGRAM,
+    AccountRecord,
+    ScannedAccount,
+    TokenAccountBalance,
+    TokenAccountScan,
+    aggregate_owners,
+    merge_accounts,
+    parse_account,
+    parse_mint,
+)
 
 RequestOutcome = Literal["ok", "rate_limited", "timeout", "failed"]
 COOLDOWN_KEY = "provider.cooldown_until"
@@ -165,7 +187,9 @@ class RequestGuard:
 
 
 class SafetyRpcProvider:
-    """Guarded Solana JSON-RPC: only what Phase 1 needs (``getAccountInfo``)."""
+    """Guarded Solana JSON-RPC: ``getAccountInfo`` (Phase 1); ``getTokenSupply``,
+    ``getTokenLargestAccounts``, ``getMultipleAccounts`` and, on Helius only, DAS
+    ``getTokenAccounts`` (Phase 2). Malformed results raise `SafetyProviderError`."""
 
     def __init__(
         self,
@@ -173,9 +197,11 @@ class SafetyRpcProvider:
         url: str,
         name: str = "Solana RPC",
         transport: httpx2.AsyncBaseTransport | None = None,
+        supports_scan: bool = False,
     ):
         self.guard = guard
         self.name = name
+        self.supports_scan = supports_scan  # DAS getTokenAccounts (Helius)
         self._url = url
         self._transport = transport
         self._ids = itertools.count(1)
@@ -189,6 +215,86 @@ class SafetyRpcProvider:
         return await self.guard.run(
             "getAccountInfo", lambda: self._attempt("getAccountInfo", params)
         )
+
+    async def _call(self, method: str, params: Any) -> Any:
+        return await self.guard.run(method, lambda: self._attempt(method, params))
+
+    async def get_token_supply(self, mint: str) -> tuple[int, int]:
+        """(supply in base units, decimals)."""
+        result = await self._call("getTokenSupply", [mint, {"commitment": "confirmed"}])
+        value = result.get("value") if isinstance(result, dict) else None
+        amount = _uint(value.get("amount")) if isinstance(value, dict) else None
+        decimals = value.get("decimals") if isinstance(value, dict) else None
+        if amount is None or isinstance(decimals, bool) or not isinstance(decimals, int):
+            raise SafetyProviderError(f"{self.name} returned a malformed token supply")
+        if not 0 <= decimals <= 255:
+            raise SafetyProviderError(f"{self.name} returned decimals out of range")
+        return amount, decimals
+
+    async def get_largest_accounts(self, mint: str) -> list[TokenAccountBalance]:
+        result = await self._call("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])
+        rows = result.get("value") if isinstance(result, dict) else None
+        if not isinstance(rows, list) or len(rows) > MAX_LARGEST_ACCOUNTS:
+            raise SafetyProviderError(f"{self.name} returned malformed largest accounts")
+        out: list[TokenAccountBalance] = []
+        for row in rows:
+            address = row.get("address") if isinstance(row, dict) else None
+            amount = _uint(row.get("amount")) if isinstance(row, dict) else None
+            if not isinstance(address, str) or not is_solana_address(address) or amount is None:
+                raise SafetyProviderError(f"{self.name} returned a malformed largest account")
+            out.append(TokenAccountBalance(address=address, amount_raw=amount))
+        return out
+
+    async def get_multiple_accounts(self, addresses: list[str]) -> dict[str, AccountRecord | None]:
+        """At most 100 addresses (one request); None for an account that doesn't exist."""
+        if not addresses:
+            return {}
+        if len(addresses) > 100:
+            raise ValueError("getMultipleAccounts takes at most 100 addresses")
+        result = await self._call(
+            "getMultipleAccounts",
+            [addresses, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+        )
+        values = result.get("value") if isinstance(result, dict) else None
+        if not isinstance(values, list) or len(values) != len(addresses):
+            raise SafetyProviderError(f"{self.name} returned malformed accounts")
+        out: dict[str, AccountRecord | None] = {}
+        for address, value in zip(addresses, values, strict=True):
+            if value is not None and not isinstance(value, dict):
+                raise SafetyProviderError(f"{self.name} returned a malformed account")
+            record = parse_account(address, value) if value is not None else None
+            if value is not None and record is None:
+                raise SafetyProviderError(f"{self.name} returned an account without an owner")
+            out[address] = record
+        return out
+
+    async def get_token_accounts_page(
+        self, mint: str, page: int
+    ) -> tuple[list[ScannedAccount], int, int]:
+        """(accounts of `mint`, malformed rows skipped, rows returned) for one DAS page."""
+        if not self.supports_scan:
+            raise ValueError(f"{self.name} can't list token accounts")
+        params = {"mint": mint, "limit": SCAN_PAGE_SIZE, "page": page,
+                  "options": {"showZeroBalance": False}}  # fmt: skip
+        result = await self._call("getTokenAccounts", params)
+        rows = result.get("token_accounts") if isinstance(result, dict) else None
+        if not isinstance(rows, list) or len(rows) > SCAN_PAGE_SIZE:
+            raise SafetyProviderError(f"{self.name} returned malformed token accounts")
+        accounts: list[ScannedAccount] = []
+        skipped = 0
+        for row in rows:
+            fields = row if isinstance(row, dict) else {}
+            if fields.get("mint") not in (None, mint):
+                continue  # another mint's account: never counted
+            address, owner = fields.get("address"), fields.get("owner")
+            amount = _uint(fields.get("amount"))
+            if (not isinstance(address, str) or not is_solana_address(address)
+                    or not isinstance(owner, str) or not is_solana_address(owner)
+                    or amount is None):  # fmt: skip
+                skipped += 1
+                continue
+            accounts.append(ScannedAccount(address=address, owner=owner, amount_raw=amount))
+        return accounts, skipped, len(rows)
 
     async def _attempt(self, method: str, params: Any) -> Any:
         payload = {"jsonrpc": "2.0", "id": next(self._ids), "method": method, "params": params}
@@ -235,7 +341,7 @@ def build_provider(
     """Helius when a key is configured, else a plain RPC, else None (nothing collected)."""
     if helius_api_key:
         url = f"https://mainnet.helius-rpc.com/?api-key={helius_api_key}"
-        return SafetyRpcProvider(guard, url, "Helius", transport)
+        return SafetyRpcProvider(guard, url, "Helius", transport, supports_scan=True)
     if rpc_url:
         return SafetyRpcProvider(guard, rpc_url, "Solana RPC", transport)
     return None
@@ -357,4 +463,163 @@ def classify_mint_account(mint: str, result: Any, provider: str) -> MintObservat
         freeze_authority=freeze_auth,
         extensions=extensions,
         **base,
+    )
+
+
+# --- holder collection (Phase 2) -----------------------------------------------------------
+
+
+def _uint(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+@dataclass(frozen=True)
+class OwnerFact:
+    """One owner's aggregated balance as collected (no classification: that is decided per
+    snapshot ``as_of``). `owner` is None when the token account's owner couldn't be read;
+    the key is then ``unresolved:<token account>``."""
+
+    key: str
+    owner: str | None
+    accounts: tuple[str, ...]
+    amount_raw: int
+    lookup: OwnerLookup
+    owner_program: str | None = None  # FOUND only: the program owning the owner's account
+
+
+@dataclass(frozen=True)
+class HolderObservation:
+    outcome: HolderOutcome
+    reason: str | None  # PROVIDER_FAILED / NOT_COLLECTED only
+    source: HolderSource | None = None
+    supply_raw: int | None = None
+    decimals: int | None = None
+    pages_read: int = 0
+    max_pages: int = 0
+    token_accounts_seen: int = 0
+    largest_accounts_seen: int = 0
+    skipped_rows: int = 0
+    holder_count: int | None = None  # distinct resolved owners with a balance (pre-exclusion)
+    holder_count_complete: bool = False
+    reliable: bool = False
+    reasons: tuple[str, ...] = ()
+    owners: tuple[OwnerFact, ...] = ()
+
+
+def holder_not_observed(exc: SafetyProviderError) -> HolderObservation:
+    outcome: HolderOutcome = "NOT_COLLECTED" if exc.status == "NOT_COLLECTED" else "PROVIDER_FAILED"
+    return HolderObservation(outcome=outcome, reason=str(exc) or type(exc).__name__)
+
+
+def holder_request_bound(provider: SafetyRpcProvider, max_pages: int) -> int:
+    """The most logical requests one holder collection can make."""
+    return 4 + (max_pages if provider.supports_scan else 0)
+
+
+async def collect_holders(
+    provider: SafetyRpcProvider, mint: str, max_pages: int, owner_lookups: int
+) -> HolderObservation:
+    """One bounded holder observation; raises `SafetyProviderError` on any failed request."""
+    supply_raw, decimals = await provider.get_token_supply(mint)
+    largest = await provider.get_largest_accounts(mint)
+    token_accounts = await provider.get_multiple_accounts([b.address for b in largest])
+    scan: TokenAccountScan | None = None
+    if provider.supports_scan:
+        scanned: list[ScannedAccount] = []
+        skipped = pages = 0
+        complete = False
+        for page in range(1, max_pages + 1):
+            rows, bad, returned = await provider.get_token_accounts_page(mint, page)
+            pages += 1
+            scanned += rows
+            skipped += bad
+            if returned < SCAN_PAGE_SIZE:  # a short page is the last one
+                complete = True
+                break
+        scan = TokenAccountScan(accounts=scanned, pages_read=pages, max_pages=max_pages,
+                                complete=complete, skipped_rows=skipped)  # fmt: skip
+
+    merged = merge_accounts(mint, largest, token_accounts, scan)
+    reasons: list[str] = []
+    source: HolderSource
+    if scan is None:
+        source = "largest_accounts"
+        reasons.append(
+            f"{provider.name} can't list every token account: only the {len(largest)} largest "
+            "token accounts were read, so shares are lower bounds and the holder count is "
+            "unknown"
+        )
+    else:
+        scanned_addresses = {a.address for a in scan.accounts}
+        # A scan that claims completeness yet lacks a largest account can't be trusted
+        # (e.g. the index lags the chain); a capped scan is expected to lack some.
+        missed = [b.address for b in largest if scan.complete and b.amount_raw > 0
+                  and b.address in merged and b.address not in scanned_addresses]  # fmt: skip
+        if not scan.complete:
+            reasons.append(
+                f"the token-account scan stopped at the page cap ({scan.pages_read} of at most "
+                f"{max_pages} pages, {len(scan.accounts):,} accounts): shares and holder counts "
+                "are lower bounds"
+            )
+        if missed:
+            reasons.append(
+                f"the scan missed {len(missed)} of the largest token accounts (index lag?), so "
+                "it isn't treated as complete"
+            )
+        if scan.skipped_rows:
+            reasons.append(f"{scan.skipped_rows} scanned rows were malformed and skipped")
+        source = (
+            "full_scan" if scan.complete and not missed and not scan.skipped_rows
+            else "partial_scan"
+        )  # fmt: skip
+
+    ranked = [o for o in aggregate_owners(merged) if o.amount_raw > 0]  # zero balances dropped
+    lookups = [o.owner for o in ranked if o.owner][:owner_lookups]
+    found = await provider.get_multiple_accounts(lookups)
+    owners: list[OwnerFact] = []
+    for o in ranked:
+        lookup: OwnerLookup = "NOT_LOOKED_UP"
+        program: str | None = None
+        if o.owner is not None and o.owner in found:
+            record = found[o.owner]
+            lookup, program = ("FOUND", record.program_owner) if record else ("MISSING", None)
+        owners.append(OwnerFact(o.key, o.owner, o.accounts, o.amount_raw, lookup, program))
+
+    unresolved = sum(o.owner is None for o in owners)
+    if unresolved:
+        reasons.append(f"{unresolved} token accounts' owners couldn't be resolved")
+    total = sum(o.amount_raw for o in owners)
+    reliable = True
+    if supply_raw == 0:
+        reasons.append("total supply is zero, so shares can't be computed")
+        reliable = False
+    elif not owners:
+        reasons.append("no token account with a balance was read")
+        reliable = False
+    elif total > supply_raw:
+        reasons.append("the balances read exceed the total supply: holder data is inconsistent")
+        reliable = False
+    resolved = sum(o.owner is not None for o in owners)
+    return HolderObservation(
+        outcome="COLLECTED",
+        reason=None,
+        source=source,
+        supply_raw=supply_raw,
+        decimals=decimals,
+        pages_read=scan.pages_read if scan else 0,
+        max_pages=max_pages if scan else 0,
+        token_accounts_seen=len(merged),
+        largest_accounts_seen=len(largest),
+        skipped_rows=scan.skipped_rows if scan else 0,
+        holder_count=resolved if scan is not None else None,
+        holder_count_complete=source == "full_scan" and not unresolved,
+        reliable=reliable,
+        reasons=tuple(reasons),
+        owners=tuple(owners),
     )

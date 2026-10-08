@@ -1,9 +1,12 @@
-"""Safety V2 orchestration (Phase 1): targets, one bounded mint-account collection, and
-deterministic ``safety.snapshot.v2`` snapshots.
+"""Safety V2 orchestration: targets (and pinned pools), one bounded collection (the mint
+account, and optionally the holders), and deterministic ``safety.snapshot.v2`` snapshots.
 
 CLI-only: nothing in the app starts it. A collection always ends DONE or ABORTED: a
 provider failure is stored as evidence (PROVIDER_FAILED / NOT_COLLECTED) and the collection
-is DONE; any other exception finishes it ABORTED and is re-raised.
+is DONE; any other exception finishes it ABORTED and is re-raised. The mint and holder
+components fail independently: a holder failure never discards the mint observation.
+Holders are collected only when asked (``holders=True``; the CLI's default), so a
+mint-only refresh never shadows earlier holder evidence.
 """
 
 from collections.abc import Callable, Mapping
@@ -13,21 +16,36 @@ from typing import Any, Literal
 
 import httpx2
 
+from upscale.services.chains import is_solana_address
 from upscale.services.market_data import InvalidRequestError
 from upscale.services.safety_v2.config import RULES_VERSION, SNAPSHOT_SCHEMA, SafetySettings
-from upscale.services.safety_v2.features import build_body, code_fingerprints
-from upscale.services.safety_v2.models import SafetyProviderError, solana_identity, ts
+from upscale.services.safety_v2.features import HolderInputs, build_body, code_fingerprints
+from upscale.services.safety_v2.models import (
+    SafetyBudgetExhaustedError,
+    SafetyProviderError,
+    solana_identity,
+    ts,
+)
 from upscale.services.safety_v2.provider import (
+    HolderObservation,
     MintObservation,
     RequestGuard,
     SafetyRpcProvider,
     build_provider,
     classify_mint_account,
+    collect_holders,
+    holder_not_observed,
+    holder_request_bound,
     not_observed,
 )
+from upscale.services.safety_v2.registry import RAYDIUM_AMM_V4
 from upscale.services.safety_v2.repository import SafetyRepository, encode_body
+from upscale.services.safety_v2.sources import radar_wallet_proofs
 
 NO_PROVIDER = "no Solana provider configured (UPSCALE_HELIUS_API_KEY / UPSCALE_SOLANA_RPC_URL)"
+
+
+KNOWN_DEXES = (RAYDIUM_AMM_V4,)
 
 
 @dataclass(frozen=True)
@@ -36,6 +54,8 @@ class Collected:
     observation_id: int
     outcome: str
     requests: int
+    holder_observation_id: int | None = None
+    holder_outcome: str | None = None
 
 
 @dataclass
@@ -86,14 +106,49 @@ class SafetyService:
         cid, mint = solana_identity(raw)
         return cid, self.repo.add_target(cid, mint, source, ts(self._now()))
 
+    def pin_pool(
+        self, raw: str, pool_address: str, dex: str | None = None, source: str = "manual"
+    ) -> bool:
+        """Pin an exact pool on a target: its owner is excluded as POOL_OR_VAULT in
+        snapshots with ``as_of`` at or after now (never retroactively)."""
+        cid, mint = solana_identity(raw)
+        self._mint(cid)
+        pool = pool_address.strip()
+        if pool != pool_address or not is_solana_address(pool):
+            raise InvalidRequestError(f"{pool_address!r} is not a valid Solana address")
+        if pool == mint:
+            raise InvalidRequestError("the pool address can't be the mint itself")
+        if dex is not None and dex not in KNOWN_DEXES:
+            raise InvalidRequestError(f"unknown dex {dex!r} (known: {', '.join(KNOWN_DEXES)})")
+        return self.repo.pin_pool(cid, pool, dex, source, ts(self._now()))
+
     def _mint(self, canonical_id: str) -> str:
         mint = self.repo.target_mint(canonical_id)
         if mint is None:
             raise InvalidRequestError(f"{canonical_id} is not a Safety V2 target (add it first)")
         return mint
 
-    async def collect(self, canonical_id: str) -> Collected:
-        """One getAccountInfo(mint) observation (at most one logical provider call)."""
+    async def _holders(self, mint: str) -> tuple[HolderObservation, str]:
+        if self.provider is None:
+            return HolderObservation("NOT_COLLECTED", NO_PROVIDER), "none"
+        name = self.provider.name
+        needed = holder_request_bound(self.provider, self.settings.holder_max_pages)
+        try:
+            self.guard.check()
+            if self.guard.remaining_today() < needed:
+                raise SafetyBudgetExhaustedError(
+                    f"a bounded holder collection needs up to {needed} requests and only "
+                    f"{self.guard.remaining_today()} remain in today's budget"
+                )
+            obs = await collect_holders(self.provider, mint, self.settings.holder_max_pages,
+                                        self.settings.holder_owner_lookups)  # fmt: skip
+        except SafetyProviderError as exc:
+            obs = holder_not_observed(exc)
+        return obs, name
+
+    async def collect(self, canonical_id: str, holders: bool = False) -> Collected:
+        """One getAccountInfo(mint) observation, plus, with `holders`, one bounded holder
+        observation (at most ``4 + holder_max_pages`` more logical provider calls)."""
         mint = self._mint(canonical_id)
         started = ts(self._now())
         collection = self.repo.start_collection(canonical_id, started)
@@ -112,27 +167,48 @@ class SafetyService:
                     obs = classify_mint_account(mint, result, name)
             fetched = ts(self._now())
             oid = self.repo.record_mint_observation(canonical_id, collection, fetched, name, obs)
+            reasons = [obs.reason] if obs.reason else []
+            hid = hobs = None
+            if holders:
+                hobs, hname = await self._holders(mint)
+                hid = self.repo.record_holder_observation(
+                    canonical_id, collection, ts(self._now()), hname, hobs
+                )
+                if hobs.reason:
+                    reasons.append(f"holders: {hobs.reason}")
             used = self.guard.used_this_run - before
-            self.repo.finish_collection(collection, "DONE", ts(self._now()), used,
-                                        [obs.reason] if obs.reason else [])  # fmt: skip
+            self.repo.finish_collection(collection, "DONE", ts(self._now()), used, reasons)
         except BaseException as exc:
             self.repo.finish_collection(
                 collection, "ABORTED", max(ts(self._now()), started),
                 self.guard.used_this_run - before, [f"aborted: {type(exc).__name__}: {exc}"],
             )  # fmt: skip
             raise
-        return Collected(collection, oid, obs.outcome, used)
+        return Collected(collection, oid, obs.outcome, used, hid,
+                         hobs.outcome if hobs else None)  # fmt: skip
+
+    def holder_inputs(self, canonical_id: str, as_of: float) -> HolderInputs:
+        """Stored holder evidence, pool pins and Radar wallet proofs known at `as_of`."""
+        obs = self.repo.latest_holder_observation(canonical_id, as_of)
+        if obs is None:
+            return HolderInputs(None)
+        balances = tuple(self.repo.holder_balances(obs.id))
+        wallets = [b.owner for b in balances if b.owner is not None]
+        proofs = radar_wallet_proofs(self.settings.radar_db_path, wallets, as_of)
+        pools = tuple(self.repo.pool_pins(canonical_id, as_of))
+        return HolderInputs(obs, balances, pools, proofs)
 
     def build(self, canonical_id: str, as_of: float) -> dict[str, Any]:
         """The body from stored inputs fetched at or before `as_of` (no request)."""
         mint = self._mint(canonical_id)
         row = self.repo.latest_mint_observation(canonical_id, as_of)
-        return build_body(canonical_id, mint, as_of, row, self._fingerprints())
+        holders = self.holder_inputs(canonical_id, as_of)
+        return build_body(canonical_id, mint, as_of, row, self._fingerprints(), holders)
 
     async def snapshot(
-        self, canonical_id: str, fetch: bool = True, save: bool = True
+        self, canonical_id: str, fetch: bool = True, save: bool = True, holders: bool = False
     ) -> SnapshotResult:
-        collected = await self.collect(canonical_id) if fetch else None
+        collected = await self.collect(canonical_id, holders) if fetch else None
         as_of = self._now()
         body = self.build(canonical_id, ts(as_of))
         _, _, digest = encode_body(body)

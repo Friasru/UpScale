@@ -58,7 +58,7 @@ def _imports(path: Path) -> list[str]:
 
 def _sources() -> list[Path]:
     files = sorted(SAFETY.glob("*.py"))
-    assert len(files) == 10, [f.name for f in files]
+    assert len(files) == 12, [f.name for f in files]  # Phase 2: registry.py, sources.py
     return files
 
 

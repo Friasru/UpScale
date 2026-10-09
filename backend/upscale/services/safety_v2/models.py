@@ -34,10 +34,10 @@ successful misses of the same pool *and* a minimum elapsed duration: two immedia
 consecutive polls never trigger it. Liquidity, volume and price are PROVIDER_REPORTED,
 never presented as verified on-chain.
 
-Invariants reserved for later phases (not implemented yet; see `DEFERRED_RULES`):
-
-* Holders: a verified deployer *absent* from a PARTIAL holder scan is not 0% (the field is
-  UNAVAILABLE); a verified deployer *observed* in a partial scan is a PARTIAL lower bound.
+Creator / deployer evidence (Phase 4B, ``VERIFIED_DEPLOYER_HOLDS_SUPPLY``): a verified
+deployer *absent* from a complete holder scan holds 0%; *absent* from a partial or
+largest-accounts-only read it is UNKNOWN (never 0%); *observed* in such a read it is a
+PARTIAL lower bound.
 """
 
 from datetime import UTC, datetime
@@ -135,7 +135,6 @@ DEFERRED_RULES: dict[str, str] = {
         "Token-2022 extension semantics (delegates, hooks, fees, pause, default state) need "
         "interpretation beyond the parsed extension list; extensions are reported as evidence"
     ),
-    "VERIFIED_DEPLOYER_HOLDS_SUPPLY": "creator / deployer evidence is a later phase",
 }
 
 

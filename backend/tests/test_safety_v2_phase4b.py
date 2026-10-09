@@ -118,6 +118,25 @@ def test_verified_deployer_only(tmp_path: Path) -> None:
     assert flags(body)["VERIFIED_DEPLOYER_HOLDS_SUPPLY"] == N  # absent from a complete scan
 
 
+def _listed(body: dict[str, Any], key: str) -> set[str]:
+    return {x["id"] for x in body["coverage"][key]}
+
+
+@pytest.mark.parametrize("roles", [[("TOKEN_DEPLOYER", "VERIFIED", DEPLOYER)], []])
+def test_the_deployer_rule_is_never_also_listed_not_supported(
+    tmp_path: Path, roles: list[tuple[str, str, str | None]]
+) -> None:
+    """Regression: Phase 4B evaluates VERIFIED_DEPLOYER_HOLDS_SUPPLY (or scopes it out), so
+    it must not stay in coverage.not_supported; no rule id is listed in two states."""
+    body = _with_roles(tmp_path, roles)
+    assert "VERIFIED_DEPLOYER_HOLDS_SUPPLY" not in _listed(body, "not_supported")
+    assert "VERIFIED_DEPLOYER_HOLDS_SUPPLY" in set(flags(body)) | _listed(body, "out_of_scope")
+    evaluated, scoped = set(flags(body)), _listed(body, "out_of_scope")
+    unsupported = _listed(body, "not_supported")
+    assert not evaluated & scoped and not evaluated & unsupported and not scoped & unsupported
+    assert unsupported == {"TOKEN_2022_EXTENSION_RISK"}
+
+
 @pytest.mark.parametrize(("candidate", "expected"), [(DEPLOYER, True), (CREATOR_ADDR, False)])
 def test_candidate_matches_verified_deployer(
     tmp_path: Path, candidate: str, expected: bool

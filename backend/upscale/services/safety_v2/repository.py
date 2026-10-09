@@ -944,6 +944,21 @@ class SafetyRepository:
             )
         return _holder_row(row) if row else None
 
+    def holder_observations(self, canonical_id: str, as_of: float) -> list[HolderRow]:
+        """Every holder observation of this identity fetched at or before `as_of`, in
+        (fetched_at, id) order: the stable order Phase 4B pairs are chosen in."""
+        with self._lock:
+            rows = (
+                self.db()
+                .execute(
+                    f"SELECT {_HOLDER_COLUMNS} FROM safety_holder_observations "
+                    "WHERE canonical_id = ? AND fetched_at <= ? ORDER BY fetched_at, id",
+                    (canonical_id, as_of),
+                )
+                .fetchall()
+            )
+        return [_holder_row(r) for r in rows]
+
     def holder_observation(self, observation_id: int) -> HolderRow:
         with self._lock:
             row = (
@@ -1159,19 +1174,21 @@ class SafetyRepository:
 
     def latest_radar_capture(
         self, canonical_id: str, as_of: float
-    ) -> tuple[int, str, str | None] | None:
-        """(id, status, reason) of the newest capture attempt at or before `as_of`."""
+    ) -> tuple[int, str, str | None, float] | None:
+        """(id, status, reason, captured_at) of the newest capture attempt at or before
+        `as_of`."""
         with self._lock:
             row = (
                 self.db()
                 .execute(
-                    "SELECT id, status, reason FROM safety_radar_captures WHERE canonical_id = ? "
+                    "SELECT id, status, reason, captured_at FROM safety_radar_captures "
+                    "WHERE canonical_id = ? "
                     "AND captured_at <= ? ORDER BY captured_at DESC, id DESC LIMIT 1",
                     (canonical_id, as_of),
                 )
                 .fetchone()
             )
-        return (row[0], row[1], row[2]) if row else None
+        return (row[0], row[1], row[2], row[3]) if row else None
 
     def captured_wallet_proofs(
         self, canonical_id: str, wallets: list[str], as_of: float

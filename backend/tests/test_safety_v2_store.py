@@ -284,7 +284,8 @@ def test_body_has_no_wall_clock_beyond_as_of_and_fetched_at(tmp_path: Path) -> N
     svc, clock, _ = _setup(tmp_path)
     res = asyncio.run(svc.snapshot(CID))
     text = encode_body(res.body)[0]
-    assert text.count("2026-") == 2  # as_of + the input's fetched_at, nothing else
+    # as_of + the inputs' knowledge times (mint fetched_at, Radar capture captured_at)
+    assert text.count("2026-") == 3
 
 
 def test_rebuild_reproduces_under_identical_fingerprints(tmp_path: Path) -> None:

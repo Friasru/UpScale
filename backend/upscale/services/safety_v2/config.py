@@ -52,7 +52,9 @@ DB_SCHEMA_VERSION = 4
 # "2": Phase 2 holder rules (concentration, few holders, large unknown / program owners)
 # and holder-scoped coverage. "3": Phase 3 market rules (liquidity, collapse, closure,
 # not-reported history, eligibility, primary clarity, pool age) and market-scoped coverage.
-RULES_VERSION = "3"
+# "4": Phase 4B verified-deployer holding and holder-change rules (concentration rising,
+# rapid meaningful-holder loss, large-holder exit) with their scoped coverage.
+RULES_VERSION = "4"
 
 ENV_PREFIX = "UPSCALE_SAFETY_V2_"
 

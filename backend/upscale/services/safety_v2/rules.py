@@ -65,6 +65,23 @@ never means closed. MARKET_CLOSED_ON_CHAIN is applicable only when a corroborate
 one; otherwise (healthy reported market, pin never corroborated, no pool) it is out of
 scope, never NOT_TRIGGERED from DEX presence.
 
+Phase 4B rules. VERIFIED_DEPLOYER_HOLDS_SUPPLY (medium >= 5 %, high >= 10 %) applies only
+when a VERIFIED token deployer is known at ``as_of``; complete holder evidence decides it
+either way (absent from a complete scan = 0 %), partial evidence can only trigger it.
+Deployer TOKEN_OUTFLOW events are evidence only (no defensible amount threshold exists, and
+Radar observes only transactions touching the tracked pool, so zero observed outflows is
+never proof of none). Holder-change rules compare the current holder observation with the
+latest strictly earlier *complete* one; with no earlier holder observation they are out of
+scope, and with no complete pair they are UNDETERMINED:
+
+* CONCENTRATION_RISING (medium): top-10 share up >= 10 percentage points.
+* RAPID_HOLDER_LOSS (medium): **meaningful** holders down >= 30 % within 7 days (out of
+  scope for a pair further apart or a previous meaningful count below 30).
+* LARGE_HOLDER_EXIT (medium): an owner with >= 5 % in the previous complete scan is absent
+  (zero balance) from the current complete scan; a reduction is never an exit. Proven
+  pool / burn owners (classified as of each scan) never count; UNKNOWN and PROGRAM_OWNED
+  owners do (no wallet proof is required).
+
 Token-2022 extension rules are deferred (see `models.DEFERRED_RULES`): the parsed
 extension list is reported as evidence, but its risk depends on extension state that needs
 interpretation (a delegate may be unset, a hook program may be null, ...).
@@ -77,6 +94,7 @@ is PARTIAL; COMPLETE needs every applicable decision-bearing rule evaluated.
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any
 
 from upscale.services.safety_v2.models import (
@@ -541,4 +559,134 @@ def evaluate_market(facts: MarketFacts) -> list[RuleResult]:
             out.append(_rule("VERY_NEW_POOL", "medium", (path,), False,
                              f"the tracked pool is {hours:.2f} h old (>= "
                              f"{POOL_AGE_MEDIUM_HOURS} h, provider-reported creation time)"))  # fmt: skip
+    return out
+
+
+# --- creator / deployer and holder-change rules (Phase 4B) ---------------------------------
+
+# No production equivalent exists for any of these; they are chosen for Safety V2 and frozen
+# here. They reuse Safety V2's own Phase 2 lines where the fact is the same:
+# * a verified deployer holding >= LARGE_OWNER_PCT (5 %) is a large owner (medium), and
+#   >= TOP1_MEDIUM_PCT (10 %) is as much as the top-1 concentration line (high);
+# * a "large holder" for LARGE_HOLDER_EXIT is the same LARGE_OWNER_PCT (5 %) owner.
+DEPLOYER_HOLDING_MEDIUM_PCT, DEPLOYER_HOLDING_HIGH_PCT = LARGE_OWNER_PCT, TOP1_MEDIUM_PCT
+# Top-10 share up by >= 10 percentage points between two complete scans: a quarter of the
+# 35 % -> 60 % gap between the TOP10 medium and high lines (top10_change_pp, never %).
+CONCENTRATION_RISING_PP = 10
+# Meaningful holders down >= 30 % between two complete scans at most 7 days apart. A pair
+# further apart isn't "rapid" (out of scope); a baseline below FEW_HOLDERS_HIGH (30) is
+# too small to read a percentage from (FEW_HOLDERS covers thin holder bases).
+RAPID_HOLDER_LOSS_PCT = 30
+RAPID_HOLDER_LOSS_MAX_WINDOW_S = 7 * 24 * 3600
+RAPID_HOLDER_LOSS_MIN_BASELINE = FEW_HOLDERS_HIGH
+CHANGE_RULE_IDS = ("CONCENTRATION_RISING", "LARGE_HOLDER_EXIT", "RAPID_HOLDER_LOSS")
+CREATOR_RULE_IDS = ("VERIFIED_DEPLOYER_HOLDS_SUPPLY",)
+CHANGE_NEEDED = "two complete holder scans (full scan, every owner resolved)"
+
+
+@dataclass(frozen=True)
+class DeployerFacts:
+    """A VERIFIED deployer's holding. `status`: AVAILABLE (complete scan: exact, absent =
+    0), PARTIAL (observed in partial evidence: a lower bound) or why there is none."""
+
+    status: Status
+    reason: str | None
+    amount: int = 0
+    supply: int = 0
+
+
+def evaluate_creator(facts: DeployerFacts) -> list[RuleResult]:
+    path = ("creator.deployer_holding_pct",)
+    if facts.status not in ("AVAILABLE", "PARTIAL"):
+        return [_rule("VERIFIED_DEPLOYER_HOLDS_SUPPLY", "medium", path, None,
+                      f"{facts.status}: {facts.reason}",
+                      "a complete holder scan, or the deployer observed in partial evidence")]  # fmt: skip
+    pct = round(100 * facts.amount / facts.supply, 6)
+    bound = "" if facts.status == "AVAILABLE" else "at least "
+    if _at_least(facts.amount, facts.supply, DEPLOYER_HOLDING_MEDIUM_PCT):
+        high = _at_least(facts.amount, facts.supply, DEPLOYER_HOLDING_HIGH_PCT)
+        line = DEPLOYER_HOLDING_HIGH_PCT if high else DEPLOYER_HOLDING_MEDIUM_PCT
+        return [_rule("VERIFIED_DEPLOYER_HOLDS_SUPPLY", "high" if high else "medium", path, True,
+                      f"the verified token deployer holds {bound}{pct}% of supply "
+                      f"(>= {line}%)")]  # fmt: skip
+    if facts.status == "AVAILABLE":
+        return [_rule("VERIFIED_DEPLOYER_HOLDS_SUPPLY", "medium", path, False,
+                      f"the verified token deployer holds {pct}% of supply "
+                      f"(< {DEPLOYER_HOLDING_MEDIUM_PCT}%), complete scan")]  # fmt: skip
+    return [_rule("VERIFIED_DEPLOYER_HOLDS_SUPPLY", "medium", path, None,
+                  f"the verified token deployer holds at least {pct}%; a lower bound below "
+                  f"{DEPLOYER_HOLDING_MEDIUM_PCT}% can't show the holding is below it",
+                  "a complete holder scan")]  # fmt: skip
+
+
+@dataclass(frozen=True)
+class ChangeFacts:
+    """An exact comparison of two complete holder scans (`exact`), or why there is none.
+    Raw integers: top-10 amounts and supplies, meaningful holder counts."""
+
+    exact: bool
+    reason: str | None
+    elapsed_s: float = 0.0
+    prev_top10: int = 0
+    prev_supply: int = 1
+    cur_top10: int = 0
+    cur_supply: int = 1
+    prev_meaningful: int = 0
+    cur_meaningful: int = 0
+    exits: int = 0
+
+
+def top10_change_pp(f: ChangeFacts) -> Fraction:
+    return 100 * (Fraction(f.cur_top10, f.cur_supply) - Fraction(f.prev_top10, f.prev_supply))
+
+
+def holder_loss_applicable(f: ChangeFacts) -> tuple[bool, str]:
+    """RAPID_HOLDER_LOSS is out of scope for a pair too far apart or a tiny baseline."""
+    if not f.exact:
+        return True, ""
+    if f.elapsed_s > RAPID_HOLDER_LOSS_MAX_WINDOW_S:
+        return False, (f"the two complete scans are {f.elapsed_s / 3600:.1f} h apart, more than "
+                       f"{RAPID_HOLDER_LOSS_MAX_WINDOW_S // 3600} h: not a rapid-change window")  # fmt: skip
+    if f.prev_meaningful < RAPID_HOLDER_LOSS_MIN_BASELINE:
+        return False, (f"the previous scan had {f.prev_meaningful} meaningful holders, below the "
+                       f"{RAPID_HOLDER_LOSS_MIN_BASELINE} baseline a percentage needs "
+                       "(FEW_HOLDERS covers thin holder bases)")  # fmt: skip
+    return True, ""
+
+
+def evaluate_changes(f: ChangeFacts) -> list[RuleResult]:
+    """Holder-change rules (only when a prior holder observation exists)."""
+    out: list[RuleResult] = []
+    if not f.exact:
+        why = str(f.reason)
+        out.append(_rule("CONCENTRATION_RISING", "medium", ("changes.top10_change_pp",), None,
+                         why, CHANGE_NEEDED))  # fmt: skip
+        out.append(_rule("LARGE_HOLDER_EXIT", "medium", ("changes.large_holder_exits",), None,
+                         why, CHANGE_NEEDED))  # fmt: skip
+        out.append(_rule("RAPID_HOLDER_LOSS", "medium",
+                         ("changes.meaningful_holder_count_change_pct",), None, why,
+                         CHANGE_NEEDED))  # fmt: skip
+        return out
+    pp = top10_change_pp(f)
+    out.append(_rule("CONCENTRATION_RISING", "medium", ("changes.top10_change_pp",),
+                     pp >= CONCENTRATION_RISING_PP,
+                     f"the top-10 share changed by {float(pp):+.4f} percentage points between two "
+                     f"complete scans (rising: >= +{CONCENTRATION_RISING_PP} pp)"))  # fmt: skip
+    out.append(_rule("LARGE_HOLDER_EXIT", "medium", ("changes.large_holder_exits",),
+                     f.exits > 0,
+                     f"owners holding >= {LARGE_OWNER_PCT}% in the previous complete scan that "
+                     f"are absent (zero balance) from the current complete scan: {f.exits}"
+                     if f.exits else f"no owner holding >= {LARGE_OWNER_PCT}% in the previous "
+                     "complete scan is absent from the current one"))  # fmt: skip
+    applicable, _ = holder_loss_applicable(f)
+    if applicable:
+        lost = f.prev_meaningful - f.cur_meaningful
+        rapid = lost * 100 >= RAPID_HOLDER_LOSS_PCT * f.prev_meaningful
+        out.append(_rule("RAPID_HOLDER_LOSS", "medium",
+                         ("changes.meaningful_holder_count_change_pct",), rapid,
+                         f"meaningful holders (>= {_fraction()} of supply each) went "
+                         f"{f.prev_meaningful} -> {f.cur_meaningful} in "
+                         f"{f.elapsed_s / 3600:.1f} h (rapid loss: a decline of >= "
+                         f"{RAPID_HOLDER_LOSS_PCT}% within "
+                         f"{RAPID_HOLDER_LOSS_MAX_WINDOW_S // 3600} h)"))  # fmt: skip
     return out

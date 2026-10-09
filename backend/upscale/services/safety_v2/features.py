@@ -39,6 +39,7 @@ Radar signer proof with ``fetched_at <= as_of``. Semantics:
 """
 
 import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cache
@@ -57,6 +58,7 @@ from upscale.services.safety_v2.models import (
     DEFERRED_RULES,
     EXCLUDED_CLASSES,
     OWNER_CLASSES,
+    VALUED,
     Evidence,
     IdentityStatus,
     OwnerClass,
@@ -72,6 +74,8 @@ from upscale.services.safety_v2.provider import TOKEN_PROGRAMS, OwnerFact
 from upscale.services.safety_v2.registry import REGISTRY_VERSION, lookup
 from upscale.services.safety_v2.repository import HolderRow, MintRow, PoolPin, owners_hash
 from upscale.services.safety_v2.rules import (
+    CHANGE_RULE_IDS,
+    CREATOR_RULE_IDS,
     HOLDER_RULE_IDS,
     LARGE_OWNER_PCT,
     LIQUIDITY_WINDOW_S,
@@ -79,13 +83,19 @@ from upscale.services.safety_v2.rules import (
     MARKET_NOT_REPORTED_MIN_MISSES,
     MARKET_RULE_IDS,
     MEANINGFUL_HOLDER_FRACTION,
+    ChangeFacts,
+    DeployerFacts,
     HolderFacts,
     MarketFacts,
     assess,
     evaluate,
+    evaluate_changes,
+    evaluate_creator,
     evaluate_holders,
     evaluate_market,
+    holder_loss_applicable,
     is_meaningful,
+    top10_change_pp,
 )
 from upscale.services.safety_v2.sources import (
     NOT_CONSULTED,
@@ -206,6 +216,8 @@ def build_body(
     fingerprints: Mapping[str, str],
     holders: "HolderInputs | None" = None,
     market: "MarketInputs | None" = None,
+    creator: "CreatorInputs | None" = None,
+    changes: "ChangeInputs | None" = None,
 ) -> dict[str, Any]:
     """The ``safety.snapshot.v2`` body for one exact identity as of `as_of`. Without a
     holder (market) observation at or before `as_of`, the holder (market) rules are out of
@@ -243,6 +255,12 @@ def build_body(
     min_ = market or MarketInputs()
     inputs += _check_market_inputs(canonical_id, as_of, min_)
     msection, mfacts = market_section(mint, as_of, min_)
+    cin = creator or CreatorInputs()
+    inputs += _check_creator_inputs(canonical_id, as_of, cin)
+    csection, dfacts, deployer_scope = creator_section(as_of, cin, hin)
+    chin = changes or ChangeInputs()
+    inputs += _check_change_inputs(canonical_id, as_of, hin, chin)
+    chsection, chfacts = changes_section(as_of, hin, chin)
 
     authority = authority_fields(mint_row)
     status, why = token_identity(mint_row)
@@ -263,9 +281,23 @@ def build_body(
         if not mfacts.closure_applicable:
             out_of_scope.append({"id": "MARKET_CLOSED_ON_CHAIN",
                                  "reason": mfacts.closure_reason or str(mfacts.reason)})  # fmt: skip
+    if deployer_scope is None:
+        results += evaluate_creator(dfacts)
+    else:
+        out_of_scope += [{"id": r, "reason": deployer_scope} for r in CREATOR_RULE_IDS]
+    if chin.had_prior:
+        results += evaluate_changes(chfacts)
+        loss_ok, loss_why = holder_loss_applicable(chfacts)
+        if not loss_ok:
+            results = [r for r in results if r.id != "RAPID_HOLDER_LOSS"]
+            out_of_scope.append({"id": "RAPID_HOLDER_LOSS", "reason": loss_why})
+    else:
+        out_of_scope += [{"id": r, "reason": CHANGES_OUT_OF_SCOPE} for r in CHANGE_RULE_IDS]
     results = sorted(results, key=lambda r: r.id)
     assessment, coverage, coverage_reasons = assess(results, status, why)
-    notes = {"creator": "not collected yet in Safety V2"}
+    notes: dict[str, str] = {}
+    if csection["source_status"] == "NOT_CAPTURED":
+        notes["creator"] = CREATOR_OUT_OF_SCOPE
     if not in_scope:
         notes["holders"] = HOLDERS_OUT_OF_SCOPE
         out_of_scope += [{"id": r, "reason": HOLDERS_OUT_OF_SCOPE} for r in HOLDER_RULE_IDS]
@@ -288,6 +320,8 @@ def build_body(
         "authority": {k: v.as_dict() for k, v in authority.items()},
         "holders": section,
         "market": msection,
+        "creator": csection,
+        "changes": chsection,
         "flags": [r.model_dump(mode="json", exclude={"needs"}) for r in results],
         "undetermined": [
             {"id": r.id, "needs": r.needs, "reason": r.reason}
@@ -303,7 +337,7 @@ def build_body(
                 "mint_account": _mint_component(mint_row),
                 "holders": section["status"],
                 "market": msection["status"],
-                "creator": "NOT_SUPPORTED",
+                "creator": csection["source_status"],
             },
             "component_notes": dict(sorted(notes.items())),
             "not_supported": [{"id": k, "reason": v} for k, v in sorted(DEFERRED_RULES.items())],
@@ -841,4 +875,342 @@ def market_section(mint: str, as_of: float, m: MarketInputs) -> tuple[dict[str, 
         misses=len(view.misses), miss_span_s=span,
         closure_applicable=view.closure_applicable, closure_reason=view.closure_reason,
     )  # fmt: skip
+    return section, facts
+
+
+# --- creator / verified deployer (Phase 4B) ------------------------------------------------
+
+CREATOR_OUT_OF_SCOPE = "no Radar capture at or before as_of: creator evidence is out of scope"
+POOL_ONLY_COVERAGE = (
+    "Radar observes only transactions touching the tracked pool: a deployer transfer that "
+    "doesn't touch the pool is invisible to it, so zero observed TOKEN_OUTFLOW events never "
+    "proves there were none"
+)
+
+
+@dataclass(frozen=True)
+class CreatorInputs:
+    """Safety-captured Radar evidence usable at as_of (``source_time <= as_of`` and
+    ``captured_at <= as_of``): the latest capture attempt and the captured rows."""
+
+    capture: tuple[int, str, str | None, float] | None = None
+    creators: tuple[dict[str, Any], ...] = ()
+    flows: tuple[dict[str, Any], ...] = ()
+    coverage: tuple[dict[str, Any], ...] = ()
+
+
+def _check_creator_inputs(
+    canonical_id: str, as_of: float, c: CreatorInputs
+) -> list[dict[str, Any]]:
+    if c.capture is None:
+        if c.creators or c.flows or c.coverage:
+            raise SafetyStateError("captured Radar facts without a capture at or before as_of")
+        return []
+    if c.capture[3] > as_of:
+        raise SafetyCausalityError(
+            f"Radar capture {c.capture[0]} was made at {iso(c.capture[3])}, after as_of {iso(as_of)}"
+        )
+    for kind, rows in (("creator", c.creators), ("flow", c.flows), ("coverage", c.coverage)):
+        for r in rows:
+            if r["canonical_id"] != canonical_id:
+                raise SafetyIdentityError(f"captured {kind} row {r['id']} is of another token")
+            for col in ("source_time", "captured_at"):
+                if r[col] > as_of:
+                    raise SafetyCausalityError(
+                        f"captured {kind} row {r['id']} has {col} {iso(r[col])}, after as_of "
+                        f"{iso(as_of)}"
+                    )
+    return [{
+        "component": "radar_capture", "capture_id": c.capture[0], "status": c.capture[1],
+        "captured_at": iso(c.capture[3]),
+        "creator_rows": sorted(r["id"] for r in c.creators),
+        "flow_rows": sorted(r["id"] for r in c.flows),
+        "coverage_rows": sorted(r["id"] for r in c.coverage),
+    }]  # fmt: skip
+
+
+def _role_fact(row: dict[str, Any] | None, missing_status: str, why: str) -> dict[str, Any]:
+    if row is None:
+        return {"status": missing_status, "address": None, "reason": why}
+    return {
+        "status": row["status"], "address": row["address"], "method": row["method"],
+        "reason": json.loads(row["provenance_json"]).get("reason")
+        or json.loads(row["provenance_json"]).get("note"),
+        "radar_signature": row["signature"], "source_system": row["source_system"],
+        "radar_schema_version": row["radar_schema_version"],
+        "source_key": row["source_key"], "source_time": iso(row["source_time"]),
+        "captured_at": iso(row["captured_at"]), "capture_row_id": row["id"],
+    }  # fmt: skip
+
+
+def _latest(rows: Sequence[dict[str, Any]], role: str) -> dict[str, Any] | None:
+    """The latest knowable fact of one role: (source_time, Safety row id), never iteration
+    order. Roles are never mixed."""
+    mine = [r for r in rows if r["role"] == role]
+    return max(mine, key=lambda r: (r["source_time"], r["id"])) if mine else None
+
+
+def _outflow_coverage(rows: Sequence[dict[str, Any]]) -> tuple[Status, list[str]]:
+    """Whether captured activity coverage could support an outflow count. Never COMPLETE:
+    Radar's pool-only listing can't see every deployer transfer."""
+    if not rows:
+        return "UNAVAILABLE", ["no Radar activity coverage was captured"]
+    reasons = [POOL_ONLY_COVERAGE]
+    gaps: dict[int, dict[str, Any]] = {}
+    for r in sorted(rows, key=lambda r: (r["source_time"], r["id"])):
+        if r["kind"] == "GAP":
+            gaps[r["radar_id"]] = r  # the latest captured state of each gap
+    open_gaps = sum(g["status"] == "OPEN" for g in gaps.values())
+    if open_gaps:
+        reasons.append(f"{open_gaps} Radar activity gaps are open (signatures not traversed)")
+    scans = [json.loads(r["facts_json"]) for r in rows if r["kind"] == "SCAN"]
+    if not any(s.get("kind") == "activity" for s in scans):
+        reasons.append("no Radar activity scan was captured")
+    if any(s.get("status") != "AVAILABLE" for s in scans):
+        reasons.append("some captured Radar scans weren't complete (status not AVAILABLE)")
+    if any((s.get("txs_skipped") or 0) or (s.get("txs_beyond_cap") or 0) for s in scans):
+        reasons.append("some captured Radar scans skipped transactions or hit a parse cap")
+    if any(s.get("kind") == "activity" and s.get("head_listing_complete") == 0 for s in scans):
+        reasons.append("some captured Radar activity listings were incomplete")
+    return "PARTIAL", reasons
+
+
+def creator_section(
+    as_of: float, c: CreatorInputs, h: "HolderInputs"
+) -> tuple[dict[str, Any], DeployerFacts, str | None]:
+    """(``creator`` section, deployer-holding facts, out-of-scope reason or None)."""
+    source_why: str | None
+    if c.capture is None:
+        source, source_why = "NOT_CAPTURED", CREATOR_OUT_OF_SCOPE
+    else:
+        source, source_why = c.capture[1], c.capture[2]
+    captured = source == "CAPTURED"
+    if not captured:
+        absent = source_why or f"Radar capture {source}"
+        cand = _role_fact(None, "NOT_COLLECTED", absent)
+        dep = _role_fact(None, "NOT_COLLECTED", absent)
+        cand_row = dep_row = None
+    else:
+        cand_row = _latest(c.creators, "POOL_CREATOR_CANDIDATE")
+        dep_row = _latest(c.creators, "TOKEN_DEPLOYER")
+        cand = _role_fact(cand_row, "NOT_COLLECTED",
+                          "Radar had no pool-creator determination captured by as_of")  # fmt: skip
+        dep = _role_fact(dep_row, "UNVERIFIED",
+                         "Radar had no token-deployer determination captured by as_of "
+                         "(not proof that none exists)")  # fmt: skip
+    verified: str | None = None  # the VERIFIED deployer's exact address
+    if dep_row is not None and dep_row["status"] == "VERIFIED" and dep_row["address"]:
+        verified = str(dep_row["address"])
+    match: bool | None = None
+    if (verified is not None and cand_row is not None and cand_row["status"] == "CANDIDATE"
+            and cand_row["address"]):  # fmt: skip
+        match = cand_row["address"] == verified  # exact, case-sensitive
+
+    # Holding: only for a VERIFIED deployer, from the latest holder observation.
+    scope: str | None = None
+    facts = DeployerFacts("UNAVAILABLE", "no verified token deployer")
+    holding: Evidence = missing("UNAVAILABLE", "no verified token deployer at as_of")
+    if not verified:
+        scope = (f"no VERIFIED token deployer at as_of (Radar capture: {source}; deployer: "
+                 f"{dep['status']})")  # fmt: skip
+    else:
+        address = verified
+        obs = h.observation
+        if obs is None:
+            holding = missing("UNAVAILABLE", "no holder observation at or before as_of")
+        elif obs.outcome != "COLLECTED":
+            holding = missing(_STATUS_OF.get(obs.outcome, "UNAVAILABLE"),
+                              f"holder observation {obs.id} is {obs.outcome}")  # fmt: skip
+        elif not obs.reliable or not obs.supply_raw or int(obs.supply_raw) == 0:
+            holding = missing("UNKNOWN", f"holder observation {obs.id} can't be trusted")
+        else:
+            supply = int(obs.supply_raw)
+            amount = sum(b.amount_raw for b in h.balances if b.owner == address)
+            full = obs.source == "full_scan" and all(b.owner is not None for b in h.balances)
+            pct = round(100 * amount / supply, 6)
+            if full:
+                holding = available(pct)  # absent from a complete scan: exactly 0
+            elif amount > 0:
+                holding = Evidence(status="PARTIAL", value=pct, lower_bound=True,
+                                   reason=f"observed in {obs.source} evidence: a lower bound")  # fmt: skip
+            else:
+                holding = missing("UNKNOWN", f"absent from {obs.source} holder evidence, which "
+                                  "is incomplete: not proof of zero")  # fmt: skip
+            if holding.status in VALUED:
+                facts = DeployerFacts(holding.status, holding.reason, amount, supply)
+        if holding.status not in VALUED:
+            facts = DeployerFacts(holding.status, holding.reason)
+
+    # Outflows: evidence only.
+    outflows: dict[str, Any]
+    if not verified:
+        outflows = {"status": "UNAVAILABLE", "reason": "no verified token deployer at as_of"}
+    else:
+        events = sorted((f for f in c.flows if f["wallet"] == verified
+                         and f["direction"] == "TOKEN_OUTFLOW"),
+                        key=lambda f: (f["source_time"], f["id"]))  # fmt: skip
+        cov_status, cov_reasons = _outflow_coverage(c.coverage)
+        times = [f["block_time"] if f["block_time"] is not None else f["source_time"]
+                 for f in events]  # fmt: skip
+        outflows = {
+            "status": cov_status,
+            "kind": "TOKEN_OUTFLOW",
+            "event_count": Evidence(status="PARTIAL", value=len(events), lower_bound=True,
+                                    reason=cov_reasons[0]).as_dict()
+            if cov_status == "PARTIAL"
+            else missing("UNAVAILABLE", cov_reasons[0]).as_dict(),
+            "total_amount_raw": str(sum(int(f["amount_raw"]) for f in events)),
+            "first_event_time": iso(min(times)) if times else None,
+            "last_event_time": iso(max(times)) if times else None,
+            "events": [{"signature": f["signature"], "amount_raw": f["amount_raw"],
+                        "block_time": iso(f["block_time"]), "source_time": iso(f["source_time"]),
+                        "capture_row_id": f["id"]} for f in events],
+            "coverage_reasons": cov_reasons,
+            "note": "observed TOKEN_OUTFLOW events (balance decreases), not trades",
+        }  # fmt: skip
+    section = {
+        "source_status": source,
+        "source_reason": source_why,
+        "pool_creator_candidate": cand,
+        "token_deployer": dep,
+        "candidate_matches_verified_deployer": match,
+        "deployer_holding_pct": holding.as_dict(),
+        "deployer_outflows": outflows,
+    }
+    return section, facts, scope
+
+
+# --- holder changes (Phase 4B) --------------------------------------------------------------
+
+CHANGES_OUT_OF_SCOPE = (
+    "no earlier holder observation at or before as_of: holder-change rules are out of scope"
+)
+
+
+@dataclass(frozen=True)
+class ChangeInputs:
+    """`had_prior`: an earlier holder observation exists. `previous`: the latest strictly
+    earlier (in (fetched_at, id) order) *complete* one, with its pins and wallet proofs as
+    knowable at its own fetched_at (historical classification), or None."""
+
+    had_prior: bool = False
+    previous: "HolderInputs | None" = None
+
+
+def is_complete(obs: HolderRow | None, balances: Sequence[OwnerFact]) -> bool:
+    """A holder observation exact comparison can use: a reliable full scan, every owner
+    resolved, supply known and > 0, balances consistent with supply."""
+    return (
+        obs is not None and obs.outcome == "COLLECTED" and obs.reliable
+        and obs.source == "full_scan" and obs.supply_raw is not None
+        and int(obs.supply_raw) > 0 and all(b.owner is not None for b in balances)
+        and sum(b.amount_raw for b in balances) <= int(obs.supply_raw)
+    )  # fmt: skip
+
+
+def _check_change_inputs(
+    canonical_id: str, as_of: float, cur: "HolderInputs", ch: ChangeInputs
+) -> list[dict[str, Any]]:
+    prev = ch.previous
+    if prev is None or prev.observation is None:
+        return []
+    p, c = prev.observation, cur.observation
+    if c is None or (p.fetched_at, p.id) >= (c.fetched_at, c.id):
+        raise SafetyStateError("the previous holder observation must precede the current one")
+    # Its own causality, as of its own fetched_at (historical classification inputs).
+    out = _check_holder_inputs(canonical_id, p.fetched_at, prev)
+    for entry in out:
+        entry["component"] = "previous_" + entry["component"]
+    return out
+
+
+def _change_pct(cur: int, prev: int) -> Evidence:
+    if prev == 0:
+        return missing(
+            "UNAVAILABLE", "the previous count is zero: a percentage change is undefined"
+        )
+    return available(round(100 * (cur - prev) / prev, 6))
+
+
+def changes_section(
+    as_of: float, cur: "HolderInputs", ch: ChangeInputs
+) -> tuple[dict[str, Any], ChangeFacts]:
+    obs = cur.observation
+    fields = ("top10_change_pp", "holder_count_change_pct", "meaningful_holder_count_change_pct")
+    if not ch.had_prior or obs is None:
+        why = CHANGES_OUT_OF_SCOPE
+        section: dict[str, Any] = {
+            "status": "UNAVAILABLE", "reason": why, "current_holder_observation_id":
+            obs.id if obs else None, "previous_holder_observation_id": None,
+            **{k: missing("UNAVAILABLE", why).as_dict() for k in fields},
+            "large_holder_exits": missing("UNAVAILABLE", why).as_dict(),
+        }  # fmt: skip
+        return section, ChangeFacts(False, why)
+    prev = ch.previous
+    if not is_complete(obs, cur.balances):
+        why = f"the current holder observation {obs.id} isn't a complete scan"
+    elif prev is None or prev.observation is None:
+        why = (
+            "no earlier complete holder scan to compare with (earlier scans are partial or failed)"
+        )
+    else:
+        why = ""
+    if why:
+        section = {
+            "status": "UNKNOWN", "reason": why, "current_holder_observation_id": obs.id,
+            "previous_holder_observation_id": prev.observation.id
+            if prev and prev.observation else None,
+            **{k: missing("UNKNOWN", why).as_dict() for k in fields},
+            "large_holder_exits": missing("UNKNOWN", why).as_dict(),
+        }  # fmt: skip
+        return section, ChangeFacts(False, why)
+
+    assert prev is not None and prev.observation is not None
+    p = prev.observation
+    # Each scan as a snapshot at its own time would report it: previous owners classified
+    # with what was knowable at the previous fetched_at, current with what is knowable now.
+    psec, pf = holder_section(p.fetched_at, prev)
+    csec, cf = holder_section(as_of, cur)
+    pp = top10_change_pp(ChangeFacts(True, None, prev_top10=pf.top10_amount,
+                                     prev_supply=pf.supply, cur_top10=cf.top10_amount,
+                                     cur_supply=cf.supply))  # fmt: skip
+    present = {b.owner for b in cur.balances if b.amount_raw > 0}
+    prev_owners = [classify_owner(f, p.fetched_at, prev.pools, prev.proofs)
+                   for f in sorted(prev.balances, key=lambda f: (-f.amount_raw, f.key))]  # fmt: skip
+    exits = [
+        {"owner": c.fact.owner, "previous_pct": _pct(c.fact.amount_raw, pf.supply),
+         "previous_amount_raw": str(c.fact.amount_raw), "current_amount_raw": "0",
+         "classification_at_previous": c.cls, "classification_reason": c.reason,
+         "previous_holder_observation_id": p.id, "current_holder_observation_id": obs.id}
+        for c in prev_owners
+        if c.cls not in EXCLUDED_CLASSES
+        and c.fact.amount_raw * 100 >= LARGE_OWNER_PCT * pf.supply
+        and c.fact.owner not in present
+    ]  # fmt: skip
+    hc_prev, hc_cur = psec["holder_count"]["value"], csec["holder_count"]["value"]
+    mc_prev = psec["meaningful_holder_count"]["value"]
+    mc_cur = csec["meaningful_holder_count"]["value"]
+    section = {
+        "status": "AVAILABLE", "reason": None,
+        "current_holder_observation_id": obs.id, "previous_holder_observation_id": p.id,
+        "current_fetched_at": iso(obs.fetched_at), "previous_fetched_at": iso(p.fetched_at),
+        "elapsed_seconds": obs.fetched_at - p.fetched_at,
+        "top10_change_pp": available(round(float(pp), 6)).as_dict(),
+        "previous_top10_pct": psec["top10_pct"]["value"], "current_top10_pct": csec["top10_pct"]["value"],
+        "holder_count_change_pct": _change_pct(hc_cur, hc_prev).as_dict(),
+        "previous_holder_count": hc_prev, "current_holder_count": hc_cur,
+        "meaningful_holder_count_change_pct": _change_pct(mc_cur, mc_prev).as_dict(),
+        "previous_meaningful_holder_count": mc_prev, "current_meaningful_holder_count": mc_cur,
+        "large_holder_exits": available(exits).as_dict(),
+        "semantics": {
+            "top10_change_pp": "current top10_pct - previous top10_pct, percentage points",
+            "holder_count_change_pct": "(current - previous) / previous holder_count, %",
+            "meaningful_holder_count_change_pct": "(current - previous) / previous "
+            "meaningful_holder_count, % (the RAPID_HOLDER_LOSS input)",
+            "large_holder_exits": f"owners >= {LARGE_OWNER_PCT}% in the previous complete scan "
+            "absent from the current complete scan (not reductions); pool / burn excluded",
+        },
+    }  # fmt: skip
+    facts = ChangeFacts(True, None, obs.fetched_at - p.fetched_at, pf.top10_amount, pf.supply,
+                        cf.top10_amount, cf.supply, int(mc_prev), int(mc_cur), len(exits))  # fmt: skip
     return section, facts

@@ -22,10 +22,13 @@ from upscale.services.chains import is_solana_address
 from upscale.services.market_data import InvalidRequestError
 from upscale.services.safety_v2.config import RULES_VERSION, SNAPSHOT_SCHEMA, SafetySettings
 from upscale.services.safety_v2.features import (
+    ChangeInputs,
+    CreatorInputs,
     HolderInputs,
     MarketInputs,
     build_body,
     code_fingerprints,
+    is_complete,
 )
 from upscale.services.safety_v2.market import market_view
 from upscale.services.safety_v2.models import (
@@ -295,7 +298,7 @@ class SafetyService:
         proofs = self.repo.captured_wallet_proofs(canonical_id, wallets, as_of)
         if run is None:
             return WalletProofs("NOT_CONFIGURED", "no Radar capture at or before as_of", proofs)
-        rid, status, reason = run
+        rid, status, reason, _ = run
         mapped: ProofStatus = (
             "AVAILABLE" if status == "CAPTURED"
             else "NOT_CONFIGURED" if status == "NOT_CONFIGURED"
@@ -323,13 +326,45 @@ class SafetyService:
         return MarketInputs(observations, tuple(self.repo.pool_pins(canonical_id, as_of)),
                             tuple(self.repo.pool_accounts(canonical_id, as_of)))  # fmt: skip
 
+    def creator_inputs(self, canonical_id: str, as_of: float) -> CreatorInputs:
+        """Safety-captured Radar evidence usable at `as_of` (never live Radar)."""
+        capture = self.repo.latest_radar_capture(canonical_id, as_of)
+        if capture is None:
+            return CreatorInputs()
+        facts = self.repo.captured_facts
+        return CreatorInputs(
+            capture,
+            tuple(facts("safety_radar_creator_evidence", canonical_id, as_of)),
+            tuple(facts("safety_radar_flow_evidence", canonical_id, as_of)),
+            tuple(facts("safety_radar_activity_coverage", canonical_id, as_of)),
+        )
+
+    def change_inputs(self, canonical_id: str, as_of: float) -> ChangeInputs:
+        """The latest strictly earlier complete holder observation (in (fetched_at, id)
+        order), with pins and wallet proofs as knowable at its own fetched_at."""
+        observations = self.repo.holder_observations(canonical_id, as_of)
+        priors = observations[:-1]
+        for prev in reversed(priors):
+            balances = tuple(self.repo.holder_balances(prev.id))
+            if not is_complete(prev, balances):
+                continue
+            at = prev.fetched_at
+            wallets = sorted({b.owner for b in balances if b.owner is not None})
+            inputs = HolderInputs(prev, balances, tuple(self.repo.pool_pins(canonical_id, at)),
+                                  self.wallet_proofs(canonical_id, wallets, at))  # fmt: skip
+            return ChangeInputs(True, inputs)
+        return ChangeInputs(bool(priors), None)
+
     def build(self, canonical_id: str, as_of: float) -> dict[str, Any]:
-        """The body from stored inputs fetched at or before `as_of` (no request)."""
+        """The body from stored Safety inputs known at `as_of` (no request, no Radar read)."""
         mint = self._mint(canonical_id)
         row = self.repo.latest_mint_observation(canonical_id, as_of)
         holders = self.holder_inputs(canonical_id, as_of)
         market = self.market_inputs(canonical_id, as_of)
-        return build_body(canonical_id, mint, as_of, row, self._fingerprints(), holders, market)
+        creator = self.creator_inputs(canonical_id, as_of)
+        changes = self.change_inputs(canonical_id, as_of)
+        return build_body(canonical_id, mint, as_of, row, self._fingerprints(), holders, market,
+                          creator, changes)  # fmt: skip
 
     async def snapshot(
         self,

@@ -672,7 +672,7 @@ def test_holder_provider_failure_keeps_the_mint_component(tmp_path: Path) -> Non
     assert (res.collected.outcome, res.collected.holder_outcome) == ("MINT", "PROVIDER_FAILED")
     assert body["coverage"]["components"] | {} == {
         "mint_account": "AVAILABLE", "holders": "PROVIDER_UNAVAILABLE",
-        "market": "UNAVAILABLE", "creator": "NOT_SUPPORTED",
+        "market": "UNAVAILABLE", "creator": "NOT_CONFIGURED",
     }  # fmt: skip
     assert body["authority"]["mint_authority"]["status"] == "AVAILABLE"
     f = flags(body)

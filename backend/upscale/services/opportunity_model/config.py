@@ -62,3 +62,51 @@ def safety_db_path() -> str | None:
     guessed default: unset, the Safety source is UNAVAILABLE (Safety V2's isolation rule
     keeps its package name out of other modules)."""
     return os.getenv("UPSCALE_SAFETY_V2_DB") or None
+
+
+# --- O2 decision engine ------------------------------------------------------------------------
+
+OPPORTUNITY_RULES_VERSION = "1"
+DECISION_SCHEMA = "opportunity.decision.v1"
+
+
+@dataclass(frozen=True)
+class DecisionConfig:
+    """Every O2 threshold, frozen under OPPORTUNITY_RULES_VERSION "1". Values are copied
+    (never imported) from Scout's Growth config defaults where one maps exactly; the rest
+    are the smallest conservative rules needed (see `decision`)."""
+
+    # Scout `MarketActivityConfig.rising_ratio` / `falling_ratio`: a trusted rate ratio at or
+    # above / at or below which volume or trades are rising / falling.
+    rising_ratio: float = 1.3
+    falling_ratio: float = 0.75
+    # Scout `MarketActivityConfig.buyers_strengthening_change`. Scout's fallback (buy share
+    # >= 0.55 when no change is measured) is deliberately not used: a missing change would
+    # then satisfy what a measured, falling change fails.
+    buyers_strengthening_change: float = 0.03
+    # Scout `FlowConfig.min_strength_buy_share`: below this buyers are never strengthening.
+    min_strength_buy_share: float = 0.40
+    # Scout `RiskPenaltyConfig.liquidity_drain_pct`: worst stored liquidity change at or
+    # below minus this is draining.
+    liquidity_drain_pct: float = 30.0
+    # Scout `read`: liquidity growing at >= +10 %, steady at >= -5 %.
+    liquidity_growing_pct: float = 10.0
+    liquidity_steady_pct: float = -5.0
+    # Scout `EarlinessConfig.early_move_pct`: a move up to this % is still early (STRONG);
+    # `late_move_multiple` 10x (a +900 % move) is late (no MODERATE either).
+    early_move_pct: float = 50.0
+    late_move_pct: float = 900.0
+    # Smallest conservative rule: STRONG needs activity not slowing (6h trade rate at least
+    # the 24h rate; 1.0 is Scout's neutral point of `activity_regime`).
+    min_activity_regime: float = 1.0
+    # Scout `TechnicalConfig.min_snapshots`: enough stored snapshots for a trend.
+    min_technical_snapshots: int = 4
+    # Smallest conservative social attribution rule: at least half the attributable posts
+    # name the exact contract.
+    min_exact_mention_share: float = 0.5
+
+    def as_dict(self) -> dict[str, float]:
+        return {k: float(v) for k, v in sorted(vars(self).items())}
+
+
+DECISION_CONFIG = DecisionConfig()

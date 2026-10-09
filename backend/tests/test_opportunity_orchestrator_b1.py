@@ -428,7 +428,8 @@ def test_the_dry_run_writes_nothing_and_opens_stores_read_only(
 def cli(world: dict[str, Any], *argv: str) -> tuple[int, str]:
     out = io.StringIO()
     code = main(["--evidence-db", world["evidence"], "--safety-db", world["safety"],
-                 "--opportunity-db", world["opportunity"], *argv], out=out,
+                 "--opportunity-db", world["opportunity"], "--orchestrator-db",
+                 str(world["tmp"] / "orchestrator.sqlite3"), *argv], out=out,
                 clock=lambda: NOW)  # fmt: skip
     return code, out.getvalue()
 
@@ -445,7 +446,8 @@ def test_cli_scan_requires_dry_run_and_reports(world: dict[str, Any],
     assert "-> REJECT" in out and LIVE_NOT_IMPLEMENTED in out and "DRY RUN" in out
     code, status = cli(world, "status")
     assert code == 0 and "candidates: 4   admitted: 3   rejected: 1" in status
-    assert "orchestrator db: none (B1)" in status and "COST_BOUND_UNKNOWN" in status
+    assert "orchestrator db: missing" in status and "COST_BOUND_UNKNOWN" in status
+    assert not (world["tmp"] / "orchestrator.sqlite3").exists()  # read-only: never created
     assert "TESTSECRET" not in out + status
 
 
@@ -460,8 +462,9 @@ def test_the_package_imports_no_safety_radar_provider_scout_service_or_execution
                      "shadow", "execution", "socket", "requests", "solana_chain", "solana_dex",
                      "dexscreener"):  # fmt: skip
             assert word not in tokens, (path.name, word)
-    assert not list(pkg.glob("repository.py")) + list(pkg.glob("queue.py")) + list(
-        pkg.glob("worker.py")) + list(pkg.glob("safety_adapter.py"))  # fmt: skip
+    # B2 adds the orchestrator repository; a real Safety adapter / worker belongs to B3+.
+    assert not list(pkg.glob("queue.py")) + list(pkg.glob("worker.py")) + list(
+        pkg.glob("safety_adapter.py"))  # fmt: skip
 
 
 def test_frozen_b3_policy_is_recorded() -> None:

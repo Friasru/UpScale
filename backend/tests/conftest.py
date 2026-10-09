@@ -19,6 +19,9 @@ os.environ["UPSCALE_SAFETY_V2_DB"] = os.path.join(
 os.environ["UPSCALE_OPPORTUNITY_DB"] = os.path.join(
     os.path.dirname(os.environ["UPSCALE_SCOUT_DB"]), "opportunity.sqlite3"
 )
+os.environ["UPSCALE_ORCHESTRATOR_DB"] = os.path.join(
+    os.path.dirname(os.environ["UPSCALE_SCOUT_DB"]), "orchestrator.sqlite3"
+)
 
 import asyncio
 import base64

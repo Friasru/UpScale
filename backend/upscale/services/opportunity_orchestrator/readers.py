@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from upscale.services.evidence_archive.store import EvidenceRecord, EvidenceStore
+from upscale.services.evidence_archive.store import EvidenceRecord, EvidenceStore, Kind
+from upscale.services.opportunity_model.loaders import ArchiveReader, SafetyRow
 from upscale.services.opportunity_model.repository import (
     OpportunityRepository,
     OpportunityStorageError,
@@ -144,3 +145,83 @@ class OpportunityDb:
         if self.repo is not None:
             self.repo.close()
             self.repo = None
+
+
+def opportunity_decision_by_key(
+    path: str, canonical_id: str, decision_at: datetime, rules_version: str
+) -> int | None:
+    """The Opportunity decision stored under the exact key (canonical_id, LIVE_FORWARD,
+    decision_at, rules_version), read-only; None when there is none."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return None
+    conn = sqlite3.connect(f"file:{p.resolve()}?mode=ro", uri=True)
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        row = conn.execute(
+            "SELECT id FROM opportunity_decisions WHERE canonical_id = ? AND origin = "
+            "'LIVE_FORWARD' AND decision_at = ? AND rules_version = ?",
+            (canonical_id, decision_at.timestamp(), rules_version),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row[0]) if row else None
+
+
+class PinnedArchive:
+    """An O1 `ArchiveSource` (read-only) whose ``scout`` evidence is exactly one archived
+    record: the job's own Scout record, never a newer one. Other kinds (social, Analyze)
+    come from the archive as usual. O1 still applies every causality / identity check to
+    whatever is returned."""
+
+    def __init__(self, path: str, canonical_id: str, scout_record_id: str, run_time: datetime):
+        self.reader = ArchiveReader(path)
+        self.path = Path(path).expanduser()
+        self.canonical_id, self.record_id, self.run_time = canonical_id, scout_record_id, run_time
+
+    def latest(self, kind: Kind, asset_id: str, until: datetime) -> EvidenceRecord | None:
+        if kind != "scout":
+            return self.reader.latest(kind, asset_id, until)
+        if asset_id != self.canonical_id or not self.path.is_file():
+            return None
+        store = EvidenceStore(self.path, read_only=True)
+        try:
+            rows = store.records(kind="scout", asset_id=asset_id, since=self.run_time,
+                                 until=self.run_time)  # fmt: skip
+        finally:
+            store.close()
+        return next((r for r in rows if r.record_id == self.record_id), None)
+
+    def close(self) -> None:
+        self.reader.close()
+
+
+class PinnedSafety:
+    """An O1 `SafetySource` (read-only) that returns exactly the job's Safety snapshot, by
+    id, never "the latest at or before" a time. O1 still checks its ``as_of``, identity,
+    rules version and body hash."""
+
+    def __init__(self, path: str | None, snapshot_id: int | None):
+        self.path = Path(path).expanduser() if path else None
+        self.snapshot_id = snapshot_id
+
+    def latest_snapshot(self, canonical_id: str, until: datetime) -> SafetyRow | None:
+        if self.path is None or self.snapshot_id is None or not self.path.is_file():
+            return None
+        conn = sqlite3.connect(f"file:{self.path.resolve()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = ON")
+            row = conn.execute(
+                "SELECT id, canonical_id, as_of, schema_version, rules_version, coverage, band, "
+                "body_zlib, body_hash FROM safety_snapshots WHERE id = ? AND canonical_id = ?",
+                (self.snapshot_id, canonical_id),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return None
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return SafetyRow(id=row[0], canonical_id=row[1], as_of=datetime.fromtimestamp(row[2], UTC),
+                         schema_version=row[3], rules_version=row[4], coverage=row[5],
+                         band=row[6], body_zlib=row[7], body_hash=row[8])  # fmt: skip

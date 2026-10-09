@@ -38,3 +38,42 @@ class OrchestratorPolicy:
 
 
 POLICY = OrchestratorPolicy()
+
+
+# --- B2: orchestration state -----------------------------------------------------------------
+
+ORCHESTRATOR_DB_SCHEMA_VERSION = 1
+ORCHESTRATOR_COMPONENT = "opportunity_orchestrator"
+
+
+def orchestrator_db_path() -> str:
+    """``UPSCALE_ORCHESTRATOR_DB``, else ``~/.upscale/orchestrator.sqlite3``."""
+    import os
+    from pathlib import Path
+
+    return os.getenv("UPSCALE_ORCHESTRATOR_DB") or str(
+        Path.home() / ".upscale" / "orchestrator.sqlite3"
+    )
+
+
+@dataclass(frozen=True)
+class ProcessingPolicy:
+    """Retry, lease and per-token throttle values for job processing. The throttle never
+    replaces Safety's own RequestGuard; it only limits how often the bridge *asks*."""
+
+    # attempt_count counts collection attempts that started and failed transiently or were
+    # interrupted (a successful collection doesn't count). After failure n (1-based) the job
+    # waits retry_backoff_s[n - 1]; failure number max_attempts makes it FAILED.
+    max_attempts: int = 3
+    retry_backoff_s: tuple[float, ...] = (10 * 60, 30 * 60)
+    lease_s: float = 15 * 60  # a COLLECTING / DECIDING job older than this is stale
+    min_collection_interval_s: float = 60 * 60  # per token, after a successful collection
+    max_collections_per_day: int = 6  # collection starts per token per UTC day
+    not_configured_wait_s: float = 60 * 60  # DEFERRED when no Safety collection is possible
+
+    def __post_init__(self) -> None:
+        if self.max_attempts < 1 or len(self.retry_backoff_s) != self.max_attempts - 1:
+            raise ValueError("one backoff per non-final attempt")
+
+
+PROCESSING = ProcessingPolicy()

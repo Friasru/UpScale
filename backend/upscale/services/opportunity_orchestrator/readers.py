@@ -168,6 +168,33 @@ def opportunity_decision_by_key(
     return int(row[0]) if row else None
 
 
+def original_scout_records(
+    path: str, keys: dict[int, tuple[str, str, datetime]]
+) -> dict[int, EvidenceRecord | None] | None:
+    """The exact archived Scout record of each key ``(canonical_id, scout_record_id,
+    scout_run_time)``, by the same correlation `PinnedArchive` uses (that token, that run
+    time, that record id; never a newer record), or None for a key whose record is gone.
+    None overall when the archive itself can't be read (missing file, foreign / locked
+    database): nothing can be concluded about any record then."""
+    p = Path(path).expanduser()
+    if not keys:
+        return {}
+    if not p.is_file():
+        return None
+    store = EvidenceStore(p, read_only=True)
+    out: dict[int, EvidenceRecord | None] = {}
+    try:
+        for key, (canonical_id, record_id, run_time) in keys.items():
+            rows = store.records(kind="scout", asset_id=canonical_id, since=run_time,
+                                 until=run_time)  # fmt: skip
+            out[key] = next((r for r in rows if r.record_id == record_id), None)
+    except Exception:  # an unreadable / foreign / locked file
+        return None
+    finally:
+        store.close()
+    return out
+
+
 class PinnedArchive:
     """An O1 `ArchiveSource` (read-only) whose ``scout`` evidence is exactly one archived
     record: the job's own Scout record, never a newer one. Other kinds (social, Analyze)

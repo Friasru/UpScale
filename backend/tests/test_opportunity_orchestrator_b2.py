@@ -22,7 +22,11 @@ from upscale.services.opportunity_model.repository import (
 )
 from upscale.services.opportunity_orchestrator import processing
 from upscale.services.opportunity_orchestrator.cli import LIVE_SAFETY_NOT_IMPLEMENTED, main
-from upscale.services.opportunity_orchestrator.config import PROCESSING
+from upscale.services.opportunity_orchestrator.config import (
+    POLICY,
+    PROCESSING,
+    OrchestratorPolicy,
+)
 from upscale.services.opportunity_orchestrator.processing import (
     Processor,
     enqueue,
@@ -151,10 +155,10 @@ def env(world: dict[str, Any]) -> Any:
     opp.close()
 
 
-def processor(env: Any, port: Any) -> Processor:
+def processor(env: Any, port: Any, policy: OrchestratorPolicy = POLICY) -> Processor:
     world, repo, opp, clock = env
     return Processor(repo, port, opp, world["evidence"], world["safety"], world["opportunity"],
-                     clock)  # fmt: skip
+                     clock, policy=policy)  # fmt: skip
 
 
 def decisions(world: dict[str, Any]) -> int:
@@ -392,7 +396,10 @@ def test_retries_back_off_exactly_then_fail(env: Any) -> None:
     world, repo, _, clock = env
     enqueue(repo, world["evidence"], clock())
     script = {CID["TokA"]: [infra("PROVIDER_UNAVAILABLE")] * 3}
-    proc = processor(env, FakeSafety(world["safety"], script))
+    # attempt counting only: admission freshness is isolated (the 30 min wait would expire
+    # the Scout record first; see test_opportunity_orchestrator_stale_admission.py)
+    unexpiring = OrchestratorPolicy(admission_market_age_s=24 * 3600)
+    proc = processor(env, FakeSafety(world["safety"], script), unexpiring)
     j = proc.run(job_for(repo, "TokA"))
     assert (j.state, j.attempt_count, j.next_attempt_at) == (
         "RETRY_WAIT",

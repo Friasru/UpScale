@@ -34,6 +34,7 @@ from tests.test_opportunity_orchestrator_b1 import safety_store
 from upscale.services.opportunity_model.repository import OpportunityRepository
 from upscale.services.opportunity_orchestrator import cli as orch_cli
 from upscale.services.opportunity_orchestrator.cli import NO_ORDER, live_lock, main
+from upscale.services.opportunity_orchestrator.config import POLICY, OrchestratorPolicy
 from upscale.services.opportunity_orchestrator.processing import Processor, enqueue
 from upscale.services.opportunity_orchestrator.repository import OrchestratorRepository
 from upscale.services.opportunity_orchestrator.safety_adapter import (
@@ -388,6 +389,28 @@ def test_live_processes_exactly_one_job_and_reports(world: dict[str, Any]) -> No
     assert not Path(world["orch"] + ".live.lock").exists() or _lock_free(world)
 
 
+def test_live_never_selects_a_stale_job_and_spends_nothing(world: dict[str, Any]) -> None:
+    enqueued(world)  # Scout market evidence is 2 min old
+    world["clock"].advance(POLICY.admission_market_age_s - 120 + 1)  # now 15 min + 1 s old
+    code, out, h = live(world, "--max-requests", "27")
+    assert code == 0, out
+    assert "no longer admissible: job 1" in out and "[ADMISSION_EXPIRED]" in out
+    assert "no runnable job" in out and "preflight" not in out
+    assert h["rpc"].calls == [] and count(world["safety"], "safety_targets") == 0
+    assert count(world["opportunity"], "opportunity_decisions") == 0
+    repo = OrchestratorRepository(world["orch"], read_only=True)
+    assert [(j.state, j.category) for j in repo.jobs()] == [("SUPERSEDED", "ADMISSION_EXPIRED")]
+    repo.close()
+
+
+def test_live_at_exactly_the_admission_limit_still_collects(world: dict[str, Any]) -> None:
+    enqueued(world)
+    world["clock"].advance(POLICY.admission_market_age_s - 120)  # exactly 15 min old
+    code, out, h = live(world, "--max-requests", "27")
+    assert code == 0 and "1 job processed; stopping" in out, out
+    assert "no longer admissible" not in out and h["rpc"].calls != []
+
+
 def _lock_free(world: dict[str, Any]) -> bool:
     with live_lock(world["orch"]):
         return True
@@ -493,10 +516,17 @@ def test_an_incompatible_safety_database_is_refused_cleanly(world: dict[str, Any
 # --- in-flight 429 vs pre-collection cooldown (hardening) ---------------------------------------
 
 
+# Attempt counting across retries (10 min, 30 min, the next UTC day) isolated from admission
+# freshness: a waiting job's Scout record would otherwise expire first (tested separately in
+# test_opportunity_orchestrator_stale_admission.py).
+UNEXPIRING = OrchestratorPolicy(admission_market_age_s=3 * 24 * 3600)
+
+
 class Runner:
     """Drives one job through the real adapter, waiting out each retry like a later run."""
 
-    def __init__(self, world: dict[str, Any], port: RealSafetyPort):
+    def __init__(self, world: dict[str, Any], port: RealSafetyPort,
+                 policy: OrchestratorPolicy | None = None):  # fmt: skip
         self.world, self.port = world, port
         self.repo = OrchestratorRepository(world["orch"])
         self.opp = OpportunityRepository(world["opportunity"])
@@ -504,6 +534,8 @@ class Runner:
         enqueue(self.repo, world["evidence"], clock.now())
         self.proc = Processor(self.repo, port, self.opp, world["evidence"], world["safety"],
                               world["opportunity"], clock.now)  # fmt: skip
+        if policy is not None:
+            self.proc.policy = policy
         self.job = self.proc.runnable()[0]
 
     def again(self) -> Any:
@@ -542,7 +574,7 @@ def test_a_g_a_cooldown_before_collection_defers_without_an_attempt(world: dict[
 def test_b_c_d_e_repeated_in_flight_429s_count_and_terminate(world: dict[str, Any]) -> None:
     rpc = rpc_for(mint=("http", 429))
     port, _ = port_for(world, rpc)  # Safety cooldown 15 min, doubling per repeat
-    r = Runner(world, port)
+    r = Runner(world, port, UNEXPIRING)
     try:
         for n, state in ((1, "RETRY_WAIT"), (2, "RETRY_WAIT"), (3, "FAILED")):
             started = world["clock"].now()
@@ -693,7 +725,7 @@ def test_d_a_cooldown_started_elsewhere_after_collecting_counts(world: dict[str,
 
 def test_f_g_budget_spent_after_collecting_counts_and_cannot_loop(world: dict[str, Any]) -> None:
     rpc = _interfering(world, "budget")
-    r = Runner(world, port_for(world, rpc)[0])
+    r = Runner(world, port_for(world, rpc)[0], UNEXPIRING)
     try:
         for n, state in ((1, "RETRY_WAIT"), (2, "RETRY_WAIT"), (3, "FAILED")):
             started = world["clock"].now()
@@ -743,7 +775,7 @@ def test_every_started_transient_failure_counts_exactly_once(
             raise RuntimeError("database is locked")
 
         monkeypatch.setattr(SafetyService, "collect", boom)
-    r = Runner(world, port_for(world, rpc)[0])
+    r = Runner(world, port_for(world, rpc)[0], UNEXPIRING)
     try:
         assert r.repo.job(r.job.id).attempt_count == 0
         seen = []

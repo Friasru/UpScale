@@ -185,7 +185,9 @@ def main(
                 run = res.run.decision_time.isoformat() if res.run else "none settled"
                 out.write(f"scout run: {run}; created {len(res.created)}, existing "
                           f"{len(res.existing)}, superseded {len(res.superseded)}, rejected "
-                          f"{res.rejected}\n")  # fmt: skip
+                          f"{res.rejected}; no longer admissible {len(res.inadmissible)}\n")  # fmt: skip
+                for j in res.inadmissible:
+                    out.write(_job_line(j))
                 return 0
             opportunity = OpportunityRepository(paths[2])
             try:
@@ -353,8 +355,13 @@ def _live_one(
     opportunity = OpportunityRepository(opportunity_db)
     try:
         proc = Processor(repo, port, opportunity, evidence, safety, opportunity_db, clock)
-        proc.release_due()  # due waits become QUEUED (no provider call); never recover
-        runnable = proc.runnable()
+        now = clock()
+        # Inadmissible waiting jobs are superseded (no provider call), due waits become
+        # QUEUED; never recover. Only a job still admissible at `now` can be selected.
+        for gone in proc.revalidate_waiting(now):
+            out.write("no longer admissible: " + _job_line(gone))
+        proc.release_due(now)
+        runnable = proc.runnable(now)
         if not runnable:
             out.write("no runnable job (run scan --dry-run / enqueue)\n")
             return 0

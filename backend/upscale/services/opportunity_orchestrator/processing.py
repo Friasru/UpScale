@@ -37,13 +37,25 @@ time, never the Scout time) -> DECIDED.
   no decision yet -> it is recorded again under the same key, unless the running rules
   version differs (OPPORTUNITY_RULES_VERSION_MISMATCH). Nearby decisions are never
   looked at.
+* Admission is revalidated while a job waits: a QUEUED / DEFERRED / RETRY_WAIT job is
+  re-admitted from exactly its own archived Scout record (never a newer one) by B1's
+  `evaluate_candidate` at the current time and policy. Market evidence older than
+  ``admission_market_age_s`` -> SUPERSEDED (ADMISSION_EXPIRED); another admission rule now
+  failing -> SUPERSEDED (ADMISSION_REVOKED); the record gone from the archive -> SUPERSEDED
+  (ADMISSION_SOURCE_MISSING). An unreadable archive concludes nothing: the job waits, but is
+  never runnable. Checked by the sweep (`supersede_inadmissible`, run by enqueue and before
+  every selection), by `runnable` and again immediately before any Safety call, so an
+  inadmissible job never reaches Safety or Opportunity. COLLECTING / SNAPSHOTTED / DECIDING
+  jobs have crossed the collection boundary and are never revalidated.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from upscale.log_safety import redact
+from upscale.services.evidence_archive.store import EvidenceRecord
 from upscale.services.opportunity_model import config as opportunity_config
 from upscale.services.opportunity_model.models import OpportunityError, OpportunityInput
 from upscale.services.opportunity_model.recorder import record_decision
@@ -68,10 +80,12 @@ from upscale.services.opportunity_orchestrator.readers import (
     PinnedArchive,
     PinnedSafety,
     opportunity_decision_by_key,
+    original_scout_records,
     scan_archive,
 )
 from upscale.services.opportunity_orchestrator.repository import (
     Job,
+    JobState,
     OrchestratorRepository,
 )
 from upscale.services.opportunity_orchestrator.safety_port import (
@@ -106,21 +120,22 @@ class EnqueueResult:
     existing: list[Job] = field(default_factory=list)
     superseded: list[Job] = field(default_factory=list)
     rejected: int = 0
+    # waiting jobs whose own Scout record is no longer admissible (any run, any token)
+    inadmissible: list[Job] = field(default_factory=list)
 
 
 def enqueue(
     repo: OrchestratorRepository, evidence_db: str, now: datetime,
     policy: OrchestratorPolicy = POLICY,
 ) -> EnqueueResult:  # fmt: skip
-    """Jobs for the admitted candidates of the newest settled Scout run (B1 admission)."""
+    """Jobs for the admitted candidates of the newest settled Scout run (B1 admission); then
+    every waiting job that is no longer admissible is superseded (`supersede_inadmissible`)."""
     scan = scan_archive(evidence_db, now, policy.run_lookback_s, policy.archive_scan_limit)
     selected, newer = (
         select_run(group_runs(scan.records, now, policy)) if not scan.truncated else (None, ())
     )
     out = EnqueueResult(selected[0] if selected else None, newer)
-    if selected is None:
-        return out
-    for r in selected[1]:
+    for r in selected[1] if selected else ():
         a = evaluate_candidate(r, now=now, policy=policy, run_settled=True)
         if not a.admitted:
             out.rejected += 1
@@ -129,6 +144,7 @@ def enqueue(
         (out.created if created else out.existing).append(job)
         if created:
             out.superseded += supersede_older(repo, job, now)
+    out.inadmissible = supersede_inadmissible(repo, evidence_db, now, policy)
     return out
 
 
@@ -141,6 +157,77 @@ def supersede_older(repo: OrchestratorRepository, job: Job, now: datetime) -> li
             out.append(repo.transition(old, "SUPERSEDED", now, "SUPERSEDED",
                                        f"by job {job.id} (newer Scout run)"))  # fmt: skip
     return out
+
+
+# --- admission revalidation (waiting jobs) ----------------------------------------------------
+
+WAITING: tuple[JobState, ...] = ("QUEUED", "DEFERRED", "RETRY_WAIT")
+Verdict = Literal[
+    "ADMISSIBLE", "ADMISSION_EXPIRED", "ADMISSION_REVOKED", "ADMISSION_SOURCE_MISSING",
+    "ARCHIVE_UNAVAILABLE",
+]  # fmt: skip
+# A verdict that terminalizes a waiting job (SUPERSEDED, the verdict as its category).
+INADMISSIBLE: tuple[Verdict, ...] = (
+    "ADMISSION_EXPIRED", "ADMISSION_REVOKED", "ADMISSION_SOURCE_MISSING",
+)  # fmt: skip
+
+
+@dataclass(frozen=True)
+class Revalidation:
+    verdict: Verdict
+    note: str = ""
+
+
+def admission_verdict(
+    job: Job, record: EvidenceRecord | None, now: datetime, policy: OrchestratorPolicy = POLICY
+) -> Revalidation:
+    """Pure: is `job` still admissible from `record`, its own archived Scout record (None:
+    gone from the archive)? B1's `evaluate_candidate` decides, at `now` under `policy`; only
+    market evidence past ``admission_market_age_s`` is an expiry, any other failed rule a
+    revocation (the age rule may then be among its codes)."""
+    if record is None:
+        return Revalidation("ADMISSION_SOURCE_MISSING",
+                            f"Scout record {job.scout_record_id} (run "
+                            f"{job.scout_run_time.isoformat()}) is not in the Evidence Archive")  # fmt: skip
+    a = evaluate_candidate(record, now=now, policy=policy, run_settled=True)
+    if a.admitted:
+        return Revalidation("ADMISSIBLE")
+    if a.reasons == ("SCOUT_TOO_OLD",):
+        assert a.market_observed_at is not None and a.age_seconds is not None
+        return Revalidation("ADMISSION_EXPIRED",
+                            f"market_observed_at {a.market_observed_at.isoformat()} is "
+                            f"{a.age_seconds:.6f}s old (max "
+                            f"{policy.admission_market_age_s:.6f}s)")  # fmt: skip
+    return Revalidation("ADMISSION_REVOKED",
+                        f"Scout record {job.scout_record_id} no longer admitted: "
+                        + ",".join(a.reasons))  # fmt: skip
+
+
+def revalidate(
+    evidence_db: str, jobs: Sequence[Job], now: datetime, policy: OrchestratorPolicy = POLICY
+) -> dict[int, Revalidation]:
+    """`admission_verdict` for each job (read-only), from exactly its own Scout record."""
+    records = original_scout_records(
+        evidence_db, {j.id: (j.canonical_id, j.scout_record_id, j.scout_run_time) for j in jobs}
+    )
+    if records is None:
+        return {j.id: Revalidation("ARCHIVE_UNAVAILABLE", "the Evidence Archive can't be read")
+                for j in jobs}  # fmt: skip
+    return {j.id: admission_verdict(j, records[j.id], now, policy) for j in jobs}
+
+
+def supersede_inadmissible(
+    repo: OrchestratorRepository, evidence_db: str, now: datetime,
+    policy: OrchestratorPolicy = POLICY,
+) -> list[Job]:  # fmt: skip
+    """Every waiting job (QUEUED / DEFERRED / RETRY_WAIT) that is no longer admissible ->
+    SUPERSEDED with its verdict as the category (event by trigger, atomically). Idempotent:
+    a superseded job is terminal and never looked at again; an unreadable archive changes
+    nothing."""
+    waiting = repo.jobs(WAITING)
+    verdicts = revalidate(evidence_db, waiting, now, policy)
+    return [repo.transition(j, "SUPERSEDED", now, verdicts[j.id].verdict, verdicts[j.id].note)
+            for j in waiting if verdicts[j.id].verdict in INADMISSIBLE]  # fmt: skip
 
 
 # --- throttle / retry -------------------------------------------------------------------------
@@ -204,24 +291,40 @@ class Processor:
     opportunity_db: str
     clock: Clock
     proc: ProcessingPolicy = PROCESSING
+    policy: OrchestratorPolicy = POLICY
 
-    def release_due(self) -> list[Job]:
-        now = self.clock()
+    def revalidate_waiting(self, now: datetime | None = None) -> list[Job]:
+        """Supersede every waiting job that is no longer admissible (no Safety call)."""
+        return supersede_inadmissible(self.repo, self.evidence_db, now or self.clock(),
+                                      self.policy)  # fmt: skip
+
+    def release_due(self, now: datetime | None = None) -> list[Job]:
+        now = now or self.clock()
         return [self.repo.transition(j, "QUEUED", now, "RELEASED", "wait over")
                 for j in self.repo.jobs(("DEFERRED", "RETRY_WAIT"))
                 if j.next_attempt_at is not None and j.next_attempt_at <= now]  # fmt: skip
 
-    def runnable(self) -> list[Job]:
+    def runnable(self, now: datetime | None = None) -> list[Job]:
+        """Runnable jobs, best first (B1 priority, then job id): SNAPSHOTTED jobs, and QUEUED
+        jobs still admissible from their own Scout record at `now` (read-only: an
+        inadmissible job is skipped here and superseded by the sweep / `run`)."""
+        now = now or self.clock()
         busy = {j.canonical_id for j in self.repo.jobs(("COLLECTING", "DECIDING"))}
         ready = [j for j in self.repo.jobs(("QUEUED", "SNAPSHOTTED")) if j.canonical_id not in busy]
+        verdicts = revalidate(self.evidence_db, [j for j in ready if j.state == "QUEUED"], now,
+                              self.policy)  # fmt: skip
+        ready = [j for j in ready if j.state != "QUEUED" or verdicts[j.id].verdict == "ADMISSIBLE"]
         return sorted(ready, key=lambda j: j.priority)
 
     def process(self, limit: int | None = None) -> list[Job]:
-        """Recover stale work, release due waits, then run the best jobs in order."""
+        """Recover stale work, supersede inadmissible waiting jobs, release due waits, then
+        run the best jobs in order."""
         self.recover()
-        self.release_due()
+        now = self.clock()
+        self.revalidate_waiting(now)
+        self.release_due(now)
         done = []
-        for job in self.runnable()[:limit]:
+        for job in self.runnable(now)[:limit]:
             done.append(self.run(self.repo.job(job.id)))
         return done
 
@@ -235,6 +338,13 @@ class Processor:
     def _safety(self, job: Job) -> Job:
         now = self.clock()
         cid = job.canonical_id
+        # Last gate before any Safety call (reuse or collection): the job's own Scout record
+        # must still be admissible now, whatever the caller did before.
+        check = revalidate(self.evidence_db, [job], now, self.policy)[job.id]
+        if check.verdict in INADMISSIBLE:
+            return self.repo.transition(job, "SUPERSEDED", now, check.verdict, check.note)
+        if check.verdict != "ADMISSIBLE":  # unreadable archive: nothing concluded, wait
+            return job
         seen = self.port.inspect(cid, now)
         if seen.reuse == "FRESH_REUSABLE" and seen.as_of is not None:
             return self.repo.transition(job, "SNAPSHOTTED", now, "SAFETY_REUSED", seen.detail,

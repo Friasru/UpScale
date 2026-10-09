@@ -343,9 +343,22 @@ def test_fresh_reusable_safety_skips_collection(env: Any) -> None:
         (infra("PROVIDER_TIMEOUT"), "RETRY_WAIT", 1, timedelta(minutes=10)),
         (infra("DATABASE_LOCK"), "RETRY_WAIT", 1, timedelta(minutes=10)),
         (RuntimeError("boom"), "RETRY_WAIT", 1, timedelta(minutes=10)),
-        (infra("SAFETY_BUDGET_EXHAUSTED"), "DEFERRED", 0, None),
-        (infra("SAFETY_COOLDOWN", NOW + timedelta(minutes=7)), "DEFERRED", 0, timedelta(minutes=7)),
-        (infra("PROVIDER_NOT_CONFIGURED"), "DEFERRED", 0, timedelta(minutes=60)),
+        # Reported by a *started* collection: one attempt each (pre-collection blocks are
+        # the preflight's, tested below). Budget: the next UTC day; cooldown 7 min < 10 min.
+        (infra("SAFETY_BUDGET_EXHAUSTED"), "RETRY_WAIT", 1, None),
+        (
+            infra("SAFETY_COOLDOWN", NOW + timedelta(minutes=7)),
+            "RETRY_WAIT",
+            1,
+            timedelta(minutes=10),
+        ),
+        (
+            infra("PROVIDER_RATE_LIMITED", NOW + timedelta(minutes=45)),
+            "RETRY_WAIT",
+            1,
+            timedelta(minutes=45),
+        ),
+        (infra("PROVIDER_NOT_CONFIGURED"), "RETRY_WAIT", 1, timedelta(minutes=10)),
     ],
 )
 def test_infrastructure_never_creates_an_opportunity_decision(
@@ -678,8 +691,9 @@ def test_cli_offline_commands(world: dict[str, Any], monkeypatch: pytest.MonkeyP
         "TESTSECRET" not in "".join(outs) and b"TESTSECRET" not in Path(world["orch"]).read_bytes()
     )
     assert cli(world, "scan")[0] == 2
-    with pytest.raises(SystemExit):
-        main(["process", "--live"], out=io.StringIO())
+    refused = io.StringIO()  # B3: --live exists but needs an explicit spending ceiling
+    assert main(["--orchestrator-db", world["orch"], "process", "--live"], out=refused) == 2
+    assert "--max-requests" in refused.getvalue()
 
 
 def test_offline_process_decides_from_existing_fresh_safety(world: dict[str, Any]) -> None:

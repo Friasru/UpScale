@@ -11,6 +11,7 @@ mint-only refresh never shadows earlier holder evidence. The market likewise
 a previously reported pool is missing from a successful DEX response.
 """
 
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -20,7 +21,12 @@ import httpx2
 
 from upscale.services.chains import is_solana_address
 from upscale.services.market_data import InvalidRequestError
-from upscale.services.safety_v2.config import RULES_VERSION, SNAPSHOT_SCHEMA, SafetySettings
+from upscale.services.safety_v2.config import (
+    RULES_VERSION,
+    SNAPSHOT_SCHEMA,
+    SafetySettings,
+    load_settings,
+)
 from upscale.services.safety_v2.features import (
     ChangeInputs,
     CreatorInputs,
@@ -111,6 +117,16 @@ class RebuildResult:
     mismatched: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class CollectionRequestBound:
+    """A conservative upper bound on what one `SafetyService.collect` can spend: the most
+    logical provider calls it can make, and the most attempts (every retry counts against
+    the daily budget). An upper bound, never a promise of actual usage."""
+
+    logical_max: int
+    attempt_max: int
+
+
 class SafetyService:
     def __init__(
         self,
@@ -134,6 +150,29 @@ class SafetyService:
         self.dex: SafetyDexProvider | None = build_dex_provider(
             self.guard, settings.dex_url, transport
         )
+
+    def collection_request_bound(
+        self, holders: bool = True, market: bool = True
+    ) -> CollectionRequestBound:
+        """The most one ``collect(canonical_id, holders, market)`` can spend with this
+        service's providers and settings (read-only: nothing is requested or recorded).
+
+        Logical calls, as `collect` makes them: ``getAccountInfo(mint)`` (1, with a Solana
+        provider); with `holders`, `holder_request_bound` (4, plus ``holder_max_pages`` with a
+        full-scan provider); with `market`, the DEX request (1, with a market provider) and
+        the conditional ``getAccountInfo(pool)`` (1, with both providers: counted always,
+        since whether a tracked pool went missing is only known during the collection).
+        Each logical call takes at most ``max_retries + 1`` attempts."""
+        rpc = 0 if self.provider is None else 1
+        if holders and self.provider is not None:
+            rpc += holder_request_bound(self.provider, self.settings.holder_max_pages)
+        dex = 0
+        if market and self.dex is not None:
+            dex = 1
+            if self.provider is not None:
+                rpc += 1
+        logical = rpc + dex
+        return CollectionRequestBound(logical, logical * (self.settings.max_retries + 1))
 
     def add_target(self, raw: str, source: str = "manual") -> tuple[str, bool]:
         cid, mint = solana_identity(raw)
@@ -415,3 +454,18 @@ class SafetyService:
         _, _, digest = encode_body(body)
         status: RebuildStatus = "REPRODUCED" if digest == row.body_hash else "DIVERGED"
         return RebuildResult(snapshot_id, status, row.body_hash, digest)
+
+
+def service_from_env(
+    settings: SafetySettings | None = None, env: Mapping[str, str] | None = None
+) -> SafetyService:
+    """The `SafetyService` the Safety CLI uses: `settings` (else ``UPSCALE_SAFETY_V2_*``),
+    Helius when ``UPSCALE_HELIUS_API_KEY`` is set, else the plain RPC at
+    ``UPSCALE_SOLANA_RPC_URL``, else no Solana provider; the DEX provider from
+    ``settings.dex_url``. Credentials are passed through only (never logged or stored)."""
+    source = os.environ if env is None else env
+    return SafetyService(
+        settings or load_settings(source),
+        helius_api_key=source.get("UPSCALE_HELIUS_API_KEY") or None,
+        rpc_url=source.get("UPSCALE_SOLANA_RPC_URL") or None,
+    )

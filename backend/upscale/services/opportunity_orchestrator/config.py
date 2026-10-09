@@ -77,3 +77,13 @@ class ProcessingPolicy:
 
 
 PROCESSING = ProcessingPolicy()
+
+
+# --- B3: live Safety collection ----------------------------------------------------------------
+
+# Requests kept free in Safety's daily budget beyond one collection's conservative attempt
+# bound (manual Safety CLI use, retries elsewhere). A preflight, never a guarantee: Safety's
+# own RequestGuard stays the final authority.
+LIVE_BUDGET_RESERVE = 50
+# The only live batch size B3 allows (first validation: one job, then stop).
+LIVE_MAX_JOBS = 1

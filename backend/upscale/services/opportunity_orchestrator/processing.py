@@ -9,10 +9,15 @@ time, never the Scout time) -> DECIDED.
 
 * Observed token evidence (complete / partial holders, NOT_A_MINT, ACCOUNT_MISSING,
   NO_POOLS, a closed market) continues to Opportunity.
-* Infrastructure never creates an Opportunity decision. Budget, cooldown and "not
-  configured" defer (no attempt counted); provider unavailable / timeout / database lock /
-  a collection exception count one failed attempt: RETRY_WAIT after 10 min, then 30 min,
-  and the third failed attempt is FAILED. ``attempt_count`` counts collection attempts that
+* Infrastructure never creates an Opportunity decision. Before a job enters COLLECTING,
+  the throttle and the preflight (cooldown, budget, providers not configured) defer it
+  with no attempt counted. Once COLLECTING, the attempt has started: any infrastructure
+  outcome (provider unavailable / timeout, a cooldown, a budget spent mid-collection, a
+  database lock, an exception) counts one attempt: RETRY_WAIT after 10 min, then 30 min
+  (or later, if Safety's cooldown or the next UTC budget day is later), and the third
+  started failure is FAILED.
+  Safety spending more than its advertised request bound fails the job terminally
+  (SAFETY_REQUEST_BOUND_BREACH) and stops processing. ``attempt_count`` counts collection attempts that
   started and failed transiently or were interrupted.
 * Per token: no new collection within 60 min of the last *successful* one, and at most 6
   collection starts (successful or failed) per UTC day (a bridge throttle; Safety's
@@ -70,9 +75,10 @@ from upscale.services.opportunity_orchestrator.repository import (
     OrchestratorRepository,
 )
 from upscale.services.opportunity_orchestrator.safety_port import (
-    DEFERRING,
     CollectionResult,
     InfraCategory,
+    PortInvariantError,
+    RequestBoundBreach,
     SafetyPort,
 )
 
@@ -161,15 +167,19 @@ def throttle_until(
 
 def fail_attempt(
     repo: OrchestratorRepository, job: Job, category: str, note: str, now: datetime,
-    proc: ProcessingPolicy,
+    proc: ProcessingPolicy, not_before: datetime | None = None,
 ) -> Job:  # fmt: skip
-    """One failed / interrupted collection attempt: RETRY_WAIT with backoff, or FAILED."""
+    """One failed / interrupted started collection attempt: RETRY_WAIT with backoff, or
+    FAILED on the last allowed attempt. ``not_before`` (e.g. Safety's cooldown after an
+    in-flight 429) can only push the retry later: next = max(cooldown, backoff)."""
     n = job.attempt_count + 1
     if n >= proc.max_attempts:
         return repo.transition(job, "FAILED", now, category, note, attempt_count=n)
-    wait = timedelta(seconds=proc.retry_backoff_s[n - 1])
+    retry = now + timedelta(seconds=proc.retry_backoff_s[n - 1])
+    if not_before is not None and not_before > retry:
+        retry = not_before
     return repo.transition(job, "RETRY_WAIT", now, category, note, attempt_count=n,
-                           next_attempt_at=now + wait)  # fmt: skip
+                           next_attempt_at=retry)  # fmt: skip
 
 
 def _defer_until(category: InfraCategory, retry_at: datetime | None, now: datetime,
@@ -244,6 +254,11 @@ class Processor:
                                    lease_started_at=now)  # fmt: skip
         try:
             res = self.port.collect(cid, now)
+        except RequestBoundBreach as exc:  # the cost contract is wrong: terminal, surfaced
+            self.repo.transition(job, "FAILED", self.clock(), exc.category, redact(str(exc)))
+            raise
+        except PortInvariantError:
+            raise  # never retried: the error surfaces
         except Exception as exc:
             res = CollectionResult("INFRASTRUCTURE", "COLLECTION_EXCEPTION",
                                    detail=redact(f"{type(exc).__name__}: {exc}"))  # fmt: skip
@@ -258,13 +273,14 @@ class Processor:
             return self.repo.transition(job, "SNAPSHOTTED", after, f"TOKEN_EVIDENCE:{res.outcome}",
                                         res.detail, safety_snapshot_id=snap.snapshot_id,
                                         safety_as_of=snap.as_of)  # fmt: skip
-        category = res.outcome
-        if category in DEFERRING:
-            return self.repo.transition(
-                job, "DEFERRED", after, category, res.detail,
-                next_attempt_at=_defer_until(category, res.retry_at, after, self.proc),
-            )  # fmt: skip
-        return fail_attempt(self.repo, job, category, res.detail, after, self.proc)
+        # The collection started: any infrastructure outcome is one started attempt (never a
+        # free deferral, whoever caused a cooldown or spent the budget meanwhile). Safety's
+        # cooldown end, or for a spent budget the next UTC day (Safety's budget period), can
+        # only push the retry later than the backoff.
+        not_before = res.retry_at
+        if res.outcome == "SAFETY_BUDGET_EXHAUSTED" and not_before is None:
+            not_before = _next_utc_day(after)
+        return fail_attempt(self.repo, job, res.outcome, res.detail, after, self.proc, not_before)
 
     def _decide(self, job: Job) -> Job:
         """SNAPSHOTTED -> DECIDING, storing the decision key once (exact decision time and

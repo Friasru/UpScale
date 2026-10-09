@@ -1,5 +1,6 @@
 """Safety V2 isolation: an independent feature family. It imports none of the decision /
-learning / execution components or Radar, nothing imports it, it emits no production
+learning / execution components or Radar, nothing imports it except the orchestration
+bridge's single Safety adapter file (through allowed modules only), it emits no production
 evidence, and it never writes another component's database. Offline."""
 
 import ast
@@ -110,11 +111,68 @@ def test_safety_v2_never_uses_production_safety_or_evidence_paths() -> None:
         assert not [n for n in names if "evidence_archive" in n or "solana_safety" in n], f
 
 
+# The one production file outside Safety V2 allowed to reference it: the orchestration
+# bridge's Safety adapter, and only through these Safety modules.
+ADAPTER = UPSCALE / "services" / "opportunity_orchestrator" / "safety_adapter.py"
+ADAPTER_MAY_IMPORT = frozenset(
+    {"upscale.services.safety_v2.config", "upscale.services.safety_v2.models",
+     "upscale.services.safety_v2.service"}
+)  # fmt: skip
+
+
+def outside_references(upscale: Path) -> list[Path]:
+    """Files outside Safety V2 that mention it, except the one allowed adapter."""
+    safety = upscale / "services" / "safety_v2"
+    adapter = upscale / "services" / "opportunity_orchestrator" / "safety_adapter.py"
+    return [f for f in sorted(upscale.rglob("*.py"))
+            if safety not in f.parents and f != adapter and "safety_v2" in f.read_text()]  # fmt: skip
+
+
+def adapter_violations(path: Path) -> list[str]:
+    """Safety V2 modules the adapter imports beyond `ADAPTER_MAY_IMPORT`."""
+    modules = {m for m in _imports(path) if m.startswith("upscale.services.safety_v2")}
+    allowed = ADAPTER_MAY_IMPORT | {f"{m}.{n}" for m in ADAPTER_MAY_IMPORT for n in _names(path, m)}
+    return sorted(modules - allowed)
+
+
+def _names(path: Path, module: str) -> set[str]:
+    tree = ast.parse(path.read_text(), str(path))
+    return {a.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+            and node.module == module for a in node.names}  # fmt: skip
+
+
 def test_nothing_outside_safety_v2_imports_it() -> None:
-    for f in UPSCALE.rglob("*.py"):
-        if SAFETY in f.parents:
-            continue
-        assert "safety_v2" not in f.read_text(), f"{f} must not import Safety V2"
+    """Only the orchestrator's Safety adapter may reference Safety V2, and only through the
+    allowed modules."""
+    assert outside_references(UPSCALE) == []
+    if ADAPTER.exists():
+        assert adapter_violations(ADAPTER) == []
+
+
+def test_a_second_file_referencing_safety_v2_still_fails(tmp_path: Path) -> None:
+    root = tmp_path / "upscale"
+    (root / "services" / "safety_v2").mkdir(parents=True)
+    orch = root / "services" / "opportunity_orchestrator"
+    orch.mkdir(parents=True)
+    (orch / "safety_adapter.py").write_text("from upscale.services.safety_v2.service import X\n")
+    assert outside_references(root) == []
+    (orch / "processing.py").write_text("from upscale.services.safety_v2 import service\n")
+    (root / "services" / "other.py").write_text("# mentions safety_v2\n")
+    assert sorted(f.name for f in outside_references(root)) == ["other.py", "processing.py"]
+
+
+def test_the_adapter_may_import_only_the_allowed_safety_modules(tmp_path: Path) -> None:
+    ok = tmp_path / "ok.py"
+    ok.write_text("from upscale.services.safety_v2.service import service_from_env\n"
+                  "from upscale.services.safety_v2.models import SafetyError\n")  # fmt: skip
+    assert adapter_violations(ok) == []
+    bad = tmp_path / "bad.py"
+    bad.write_text("from upscale.services.safety_v2.rules import evaluate_changes\n"
+                   "import upscale.services.safety_v2.repository\n")  # fmt: skip
+    assert adapter_violations(bad) == [
+        "upscale.services.safety_v2.repository", "upscale.services.safety_v2.rules",
+        "upscale.services.safety_v2.rules.evaluate_changes",
+    ]  # fmt: skip
 
 
 class _Sink:

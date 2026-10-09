@@ -455,16 +455,16 @@ def test_the_package_imports_no_safety_radar_provider_scout_service_or_execution
     pkg = Path(__file__).parents[1] / "upscale" / "services" / "opportunity_orchestrator"
     for path in pkg.glob("*.py"):
         text = path.read_text()
-        assert "safety_v2" not in text, path.name  # Safety V2's own isolation rule
+        if path.name != "safety_adapter.py":  # the one file Safety's isolation rule allows
+            assert "safety_v2" not in text, path.name
         imports = [ln for ln in text.splitlines() if ln.startswith(("import ", "from "))]
         tokens = {t for ln in imports for t in re.split(r"[ .,()]+", ln)}
         for word in ("radar", "httpx", "httpx2", "anthropic", "background_scout", "scout",
                      "shadow", "execution", "socket", "requests", "solana_chain", "solana_dex",
                      "dexscreener"):  # fmt: skip
             assert word not in tokens, (path.name, word)
-    # B2 adds the orchestrator repository; a real Safety adapter / worker belongs to B3+.
-    assert not list(pkg.glob("queue.py")) + list(pkg.glob("worker.py")) + list(
-        pkg.glob("safety_adapter.py"))  # fmt: skip
+    # B3 adds the real Safety adapter (one file); no queue / worker / daemon module.
+    assert not list(pkg.glob("queue.py")) + list(pkg.glob("worker.py"))
 
 
 def test_frozen_b3_policy_is_recorded() -> None:

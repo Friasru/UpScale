@@ -21,25 +21,47 @@ from upscale.services.opportunity_orchestrator.policy import PreflightLabel
 from upscale.services.opportunity_orchestrator.readers import SafetyDb
 
 TokenOutcome = Literal[
-    "COMPLETE", "HOLDERS_PARTIAL", "NOT_A_MINT", "ACCOUNT_MISSING", "NO_POOLS", "MARKET_CLOSED"
-]
+    "COMPLETE", "HOLDERS_PARTIAL", "NOT_A_MINT", "ACCOUNT_MISSING", "MALFORMED", "NO_POOLS",
+    "MARKET_CLOSED",
+]  # fmt: skip
 InfraCategory = Literal[
     "PROVIDER_UNAVAILABLE",
     "PROVIDER_TIMEOUT",
+    "PROVIDER_RATE_LIMITED",  # a 429 *during* a started collection (Safety cooled down)
     "SAFETY_BUDGET_EXHAUSTED",
     "SAFETY_COOLDOWN",
     "PROVIDER_NOT_CONFIGURED",
     "DATABASE_LOCK",
     "COLLECTION_EXCEPTION",
 ]
-# Infrastructure that defers without consuming a retry attempt.
+# Infrastructure that defers without consuming a retry attempt, and only when it blocks a
+# collection *before* it starts (the preflight). After a collection started, every
+# infrastructure outcome counts one attempt.
 DEFERRING: tuple[InfraCategory, ...] = (
     "SAFETY_BUDGET_EXHAUSTED", "SAFETY_COOLDOWN", "PROVIDER_NOT_CONFIGURED",
 )  # fmt: skip
-# Transient infrastructure: one failed attempt each.
+# Transient infrastructure: one failed (started) attempt each.
 TRANSIENT: tuple[InfraCategory, ...] = (
-    "PROVIDER_UNAVAILABLE", "PROVIDER_TIMEOUT", "DATABASE_LOCK", "COLLECTION_EXCEPTION",
+    "PROVIDER_UNAVAILABLE", "PROVIDER_TIMEOUT", "PROVIDER_RATE_LIMITED", "DATABASE_LOCK",
+    "COLLECTION_EXCEPTION",
 )  # fmt: skip
+
+
+class PortInvariantError(Exception):
+    """A Safety port broke an invariant it guarantees (e.g. spent more than its advertised
+    request bound, or was called inside a running event loop). Never a retryable failure:
+    processing stops and the error surfaces."""
+
+
+class RequestBoundBreach(PortInvariantError):
+    """Safety spent more requests than its own advertised worst-case bound: the cost
+    contract is wrong. Terminal for the job (never retried automatically)."""
+
+    category = "SAFETY_REQUEST_BOUND_BREACH"
+
+    def __init__(self, used: int, bound: int):
+        super().__init__(f"Safety used {used} requests, above its advertised bound {bound}")
+        self.used, self.bound = used, bound
 
 
 @dataclass(frozen=True)

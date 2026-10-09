@@ -28,7 +28,6 @@ only from UPSCALE_SAFETY_V2_RADAR_DB, read-only.
 import argparse
 import asyncio
 import json
-import os
 import sys
 from collections.abc import Sequence
 from typing import Any
@@ -36,7 +35,7 @@ from typing import Any
 from upscale.services.market_data import InvalidRequestError
 from upscale.services.safety_v2.config import SafetySettings, load_settings
 from upscale.services.safety_v2.models import SafetyError, solana_identity
-from upscale.services.safety_v2.service import SafetyService, SnapshotResult
+from upscale.services.safety_v2.service import SafetyService, SnapshotResult, service_from_env
 
 PROVIDER_NOTE = "MAKES SOLANA RPC AND DEX PROVIDER REQUESTS (Safety V2's own daily budget)"
 
@@ -91,11 +90,7 @@ def _cid(raw: str) -> str:
 
 
 def _service(settings: SafetySettings) -> SafetyService:
-    return SafetyService(
-        settings,
-        helius_api_key=os.getenv("UPSCALE_HELIUS_API_KEY") or None,
-        rpc_url=os.getenv("UPSCALE_SOLANA_RPC_URL") or None,
-    )
+    return service_from_env(settings)
 
 
 def body_text(body: dict[str, Any]) -> str:

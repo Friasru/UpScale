@@ -110,3 +110,17 @@ class DecisionConfig:
 
 
 DECISION_CONFIG = DecisionConfig()
+
+
+# --- O3 storage ------------------------------------------------------------------------------
+
+OPPORTUNITY_DB_SCHEMA_VERSION = 1
+OPPORTUNITY_COMPONENT = "opportunity_model"
+
+
+def opportunity_db_path() -> str:
+    """The Opportunity decision database: ``UPSCALE_OPPORTUNITY_DB``, else
+    ``~/.upscale/opportunity.sqlite3``."""
+    return os.getenv("UPSCALE_OPPORTUNITY_DB") or str(
+        Path.home() / ".upscale" / "opportunity.sqlite3"
+    )

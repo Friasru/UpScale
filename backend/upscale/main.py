@@ -48,6 +48,8 @@ from upscale.held_position_watch import (
 )
 from upscale.orchestrator import Orchestrator
 from upscale.outcomes_api import router as outcomes_router
+from upscale.preservation_api import configured as preservation_configured
+from upscale.preservation_api import router as preservation_router
 from upscale.schemas import ChatRequest, ChatResponse
 from upscale.scout_api import (
     SCOUT_LIMITS,
@@ -123,6 +125,8 @@ app.include_router(outcomes_router)
 app.include_router(evidence_router)
 app.include_router(calibration_router)
 app.include_router(shadow_router)
+if preservation_configured():  # the export API exists only when its environment is fully configured
+    app.include_router(preservation_router)
 
 orchestrator = Orchestrator()
 

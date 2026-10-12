@@ -74,9 +74,7 @@ class Served:
         app = FastAPI()
         app.include_router(api.router)
         self.server = uvicorn.Server(
-            uvicorn.Config(
-                app, host="127.0.0.1", port=self.port, log_level=None, log_config=None
-            )
+            uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level=None, log_config=None)
         )
         self.thread = threading.Thread(target=self.server.run, daemon=True)
         self.thread.start()
@@ -324,7 +322,8 @@ def test_the_api_is_disabled_unless_fully_configured() -> None:
 def test_the_production_app_does_not_expose_the_routes_by_default() -> None:
     from upscale.main import app
 
-    assert not [r for r in app.routes if "/internal/preservation" in getattr(r, "path", "")]
+    # (newer FastAPI wraps included routers, so the real route table is the OpenAPI document)
+    assert not [p for p in app.openapi()["paths"] if "/internal/preservation" in p]
 
 
 def test_store_paths_come_only_from_the_apps_own_variables(tmp_path: Path) -> None:
@@ -336,3 +335,68 @@ def test_store_paths_come_only_from_the_apps_own_variables(tmp_path: Path) -> No
         {"scout": str(b), "shadow": str(tmp_path / "none")},
     )
     assert got == {"evidence": a, "scout": b}
+
+
+def test_replay_protection_survives_an_app_restart(
+    svc: Served, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    t, n = int(time.time()), "9a" * 8
+    hdr = {
+        "X-Preserver-Signature": sign(TOKEN, t, n, "GET", f"{BASE}/ping", b""),
+        "X-Preserver-Timestamp": str(t),
+        "X-Preserver-Nonce": n,
+    }
+    assert svc.req("GET", "ping", token=None, headers=hdr)[0] == 200
+    monkeypatch.setattr(api, "_seen", {})  # a restart forgets every nonce...
+    monkeypatch.setattr(
+        api, "_started_at", time.time() + 5
+    )  # ...but the new process started later than the signature
+    assert (
+        svc.req("GET", "ping", token=None, headers=hdr)[0] == 404
+    )  # so the replay is still refused
+    assert (
+        svc.req("GET", "ping", ts=int(time.time()) + 5)[0] == 200
+    )  # a request signed after the restart works
+
+
+def test_the_real_app_mounts_the_routes_only_with_the_full_configuration() -> None:
+    """Startup behaviour of `upscale.main` itself, in fresh interpreters."""
+    import subprocess
+    import sys
+
+    if (
+        "preservation_router"
+        not in (Path(__file__).resolve().parent.parent / "upscale" / "main.py").read_text()
+    ):
+        pytest.skip("this tree does not mount the API (only the production-app branch does)")
+    code = "import upscale.main as m; print(sorted(p for p in m.app.openapi()['paths'] if 'preservation' in p))"
+    base = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("UPSCALE_PRESERVATION", "RAILWAY_"))
+    }
+    cwd = Path(__file__).resolve().parent.parent
+
+    def routes(extra: dict[str, str]) -> str:
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            env={**base, **extra},
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            check=True,
+        )  # noqa: S603
+        return out.stdout.strip()
+
+    full = {"UPSCALE_PRESERVATION_TOKEN": "t" * 40, "UPSCALE_PRESERVATION_ALLOWED_HOSTS": "upscale.railway.internal:8080",
+            "UPSCALE_PRESERVATION_ENVIRONMENT": "production", "RAILWAY_ENVIRONMENT_NAME": "production"}  # fmt: skip
+    assert routes({}) == "[]"
+    assert routes({**full, "RAILWAY_ENVIRONMENT_NAME": "staging"}) == "[]"
+    assert (
+        routes({k: v for k, v in full.items() if k != "UPSCALE_PRESERVATION_ALLOWED_HOSTS"}) == "[]"
+    )
+    mounted = routes(full)
+    assert (
+        "/internal/preservation/v1/ping" in mounted
+        and "/internal/preservation/v1/exports/{export_id}" in mounted
+    )

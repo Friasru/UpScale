@@ -7,7 +7,7 @@ are all set. Otherwise the routes do not exist.
 
 Every request is authenticated by an HMAC-SHA256 signature made with the shared token over
 ``timestamp \\n METHOD \\n path \\n sha256(body)`` (the token itself never travels): a request with a
-wrong signature, a timestamp more than 60 s from the server's clock, a repeated signature (replay),
+wrong signature, a timestamp more than 60 s from the server's clock, a repeated nonce (replay) or a request signed before this process started,
 a body over 1 KiB, or a ``Host`` outside the allow-list gets the same empty 404 as a route that does
 not exist. No endpoint writes to a research store, runs a command or reads a path chosen by the caller.
 """
@@ -38,6 +38,10 @@ PREFIX = "/internal/preservation/v1"
 router = APIRouter(prefix=PREFIX, tags=["preservation"])
 _manager: ExportManager | None = None
 _seen: dict[str, float] = {}
+_started_at = (
+    time.time()
+)  # replay protection survives a restart: nothing signed before this process started is accepted
+START_SLACK_S = 2
 _seen_lock = threading.Lock()
 
 
@@ -94,7 +98,7 @@ async def guard(request: Request) -> None:
             raise ValueError
         sig = h.get("x-preserver-signature", "")
         host_ok = h.get("host", "").lower() in hosts
-        fresh = abs(time.time() - ts) <= SKEW_S
+        fresh = abs(time.time() - ts) <= SKEW_S and ts >= _started_at - START_SLACK_S
         good = hmac.compare_digest(
             sig.encode(), sign(token, ts, nonce, request.method, request.url.path, body).encode()
         )
